@@ -312,7 +312,7 @@ end
     y = randn(rng, n)
     track(prior; pieces = [1:n], level = nothing, nlevel = 0) =
         (; slots = collect(1:n), x, pieces, prior, level, nlevel, active = trues(length(pieces)))
-    energy(prior; kw...) = FRpf._track_energy(track(prior; kw...), prior, y)
+    energy(prior; kw...) = FRpf._track_energy(FRpf._track_layout(track(prior; kw...)), prior, y)
 
     # A random walk of order 1 from a flat start: the sum of its increments' energies.
     σ1 = 1.0e-3
@@ -345,7 +345,7 @@ end
     # 256-bit arithmetic with a start variance far above any step's.
     function kalman_energy(prior, y, x)
         u, h = FRpf._piece_coordinates(prior, x)
-        model = FRpf._piece_model(prior, h)
+        model = FRpf._random_walk_model(prior.order, prior.σ, prior.init, h, Float64)
         setprecision(BigFloat, 256) do
             T = BigFloat
             μ, P = zeros(T, 2), T(10)^40 * Matrix{T}(I, 2, 2)

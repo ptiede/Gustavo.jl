@@ -289,7 +289,7 @@ function _block_status_array(block, geom::DataGeometry)
     ax = (
         _station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed),
         Frequency(_segment_lookup(geom.channel_freqs, _shape_segments(plan, geom).piece_chans)),
-        Ti(_time_segment_lookup(plan, geom, plan.shape[4])),
+        Ti(_time_segment_lookup(plan, geom)),
     )
     return fill(TrackNoData, ax)
 end
@@ -303,7 +303,7 @@ _block_slip_array(block, geom::DataGeometry) = fill(NaN, dims(_block_status_arra
 # its station's own prior.
 function _block_prior_array(block, geom::DataGeometry)
     (; plan) = block
-    ax = (_station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed), Ti(_time_segment_lookup(plan, geom, plan.shape[4])))
+    ax = (_station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed), Ti(_time_segment_lookup(plan, geom)))
     arr = DimArray(Array{Union{Nothing, AbstractPrior}}(undef, map(length, ax)), ax)
     for a in axes(arr, 1)
         arr[a, :, :] .= Ref(_prior_along(plan.priors[a], :Frequency))
@@ -463,7 +463,7 @@ function _joint_scan_groups(tseg)
 end
 
 """
-    JointSmoother(; max_iterations = 200, tolerance = 0.01, max_slip_probability = 0.05,
+    JointSmoother(; max_iterations = 50, tolerance = 0.01, max_slip_probability = 0.05,
                   flat_span = 0.01, warn_fraction = 0.25, eltype = nothing)
 
 Fit the station bandpass against the actual complex visibilities, with each
@@ -486,7 +486,9 @@ time. Stations may have different models.
 
 Iterations stop once no gain moves by more than `tolerance` of its standard
 error from the data and the hyperparameters given as densities are within
-`tolerance` of their standard errors of the type-II MAP, and warn if
+`tolerance` of their standard errors of the type-II MAP, or once a step lowers
+the negative log posterior by less than `tolerance²/2` (a plateau, where the
+posterior is flat along the gains still moving), and warn if
 `max_iterations` iterations pass first: an unconverged solve still depends on
 its starting point.
 
@@ -506,18 +508,21 @@ an MSv4 store); `eltype`, a real floating-point type, names another. The
 linearized steps are solved in `Float64`, the type the sparse Cholesky
 factorization supports.
 """
-struct JointSmoother
+struct JointSmoother{E}
     max_iterations::Int
     tolerance::Float64
     max_slip_probability::Float64
     flat_span::Float64
     warn_fraction::Float64
-    eltype::Union{Nothing, DataType}
+    eltype::E
 end
 JointSmoother(;
-    max_iterations::Integer = 200, tolerance::Real = 0.01, max_slip_probability::Real = 0.05,
+    max_iterations::Integer = 50, tolerance::Real = 0.01, max_slip_probability::Real = 0.05,
     flat_span::Real = 0.01, warn_fraction::Real = 0.25, eltype::Union{Nothing, Type{<:AbstractFloat}} = nothing,
-) = JointSmoother(max_iterations, tolerance, max_slip_probability, flat_span, warn_fraction, eltype)
+) = JointSmoother{_eltype_parameter(eltype)}(max_iterations, tolerance, max_slip_probability, flat_span, warn_fraction, eltype)
+
+_eltype_parameter(::Nothing) = Nothing
+_eltype_parameter(::Type{T}) where {T} = Type{T}
 
 can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc)
 

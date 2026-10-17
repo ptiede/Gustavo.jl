@@ -500,7 +500,12 @@ objective, with ``S`` re-solved.
 
 The iteration starts from each slot's own gain estimate given unit gains
 elsewhere and stops when the undamped step would move no gain by more than
-`tolerance` of its standard error from the data. Where a slot's phase is held
+`tolerance` of its standard error from the data, or on a plateau: when an
+accepted step lowers the negative log posterior by less than
+``\mathrm{tolerance}^2/2``, what a step of `tolerance` standard errors would.
+``S`` absorbs a band-constant change of a station's gains, so at low SNR the
+gains can keep moving along such directions while the posterior barely
+changes. Where a slot's phase is held
 more than ``\pi/2`` from its own data, by a phase prior or the gauge, the
 amplitude that fits it best is zero; without an amplitude prior the posterior
 then has no mode, and the solve warns.

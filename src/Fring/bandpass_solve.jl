@@ -31,18 +31,14 @@ end
 # levels (`fits[a]`), with `active` marking the pieces its prior acts on — those
 # with data or fixed values at enough slots (`known`) to determine its states.
 function _bandpass_tracks(fits, observable, ids, loc, present, nfeed, known)
-    tracks = NamedTuple[]
-    for a in eachindex(fits, loc)
-        (isnothing(fits[a]) || isnothing(fits[a][observable])) && continue
-        f = fits[a][observable]
-        k, ai = loc[a]
-        for feed in 1:nfeed, ts in present[a]
-            slots = vec(ids[k][ai, feed, :, ts])
-            active = [!isnothing(f.prior) && count(n -> known[n], slots[p]) >= _samples_needed(f.prior) for p in f.pieces]
-            push!(tracks, (; a, k, ai, feed, ts, slots, f.x, f.pieces, f.prior, f.level, f.nlevel, active))
-        end
-    end
-    return tracks
+    stations = [a for a in eachindex(fits, loc) if !isnothing(fits[a]) && !isnothing(fits[a][observable])]
+    return [_bandpass_track(fits[a][observable], a, loc[a], feed, ts, ids, known) for a in stations for feed in 1:nfeed for ts in present[a]]
+end
+
+function _bandpass_track(f, a, (k, ai), feed, ts, ids, known)
+    slots = vec(ids[k][ai, feed, :, ts])
+    active = [!isnothing(f.prior) && count(n -> known[n], slots[p]) >= _samples_needed(f.prior) for p in f.pieces]
+    return (; a, k, ai, feed, ts, slots, f.x, f.pieces, f.prior, f.level, f.nlevel, active)
 end
 
 # Whether `x′` differs from `x` by no more than `x`'s own rounding.
@@ -127,7 +123,7 @@ end
 """
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
-                          gauge, max_iterations = 200, tolerance = 0.01,
+                          gauge, max_iterations = 50, tolerance = 0.01,
                           flat_span = 0.01, eltype = nothing, tseg = nothing) -> (; phase, amp)
 
 Jointly solve the per-(station, feed, frequency segment) complex bandpass gain
@@ -205,14 +201,17 @@ on the largest change the undamped step makes to any (station, feed, segment)
 gain's log, in standard errors of that gain from the data, so a gain the data
 barely constrain counts for as little as its precision. The solve stops once
 that is below `tolerance` with the hyperparameters fit to `tolerance` of their
-standard errors, or once no damping lowers the posterior, with a warning if
-that step would have moved a gain by `tolerance` or more: the posterior is
-then flat or not convex there, typically because a prior too stiff for the data
-drives an amplitude toward zero, where the mode does not exist. docs/src/priors.md
-("The bandpass posterior") derives each step. The scans handed to one call are a connected piece of
-the coupling graph, so this is one criterion over one coupled problem: nodes
-that share no data are solved by separate calls rather than being averaged into
-a common tolerance.
+standard errors; on a plateau, once an accepted step lowers the negative log
+posterior by less than `tolerance²/2`, the decrease of a step of `tolerance`
+standard errors, with the hyperparameters fit; or once no damping lowers the
+posterior, with a warning if that step would have moved a gain by `tolerance`
+or more: the posterior is then flat or not convex there, typically because a
+prior too stiff for the data drives an amplitude toward zero, where the mode
+does not exist. docs/src/priors.md ("The bandpass posterior") derives each
+step. The scans handed to one call are a connected piece of the coupling
+graph, so this is one criterion over one coupled problem: nodes that share no
+data are solved by separate calls rather than being averaged into a common
+tolerance.
 
 Returns, per observable, one `(; track, prior, status, slip)` per (station,
 feed, time segment) track: the track, the prior it was fit under with its
@@ -225,7 +224,7 @@ type `eltype`; the steps are solved in `Float64`.
 function solve_joint_bandpass!(
         θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         phase_level_blocks = NamedTuple[], amp_level_blocks = NamedTuple[],
-        gauge::AbstractGauge, max_iterations::Integer = 200, tolerance::Real = 0.01,
+        gauge::AbstractGauge, max_iterations::Integer = 50, tolerance::Real = 0.01,
         flat_span::Real = 0.01, eltype = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
     )
@@ -237,7 +236,7 @@ function solve_joint_bandpass!(
     # gain over however many refinement cells that segment spans.
     blocks = _gain_blocks(phase_blocks, amp_blocks)
     fseg, cells = _station_freq_segments(blocks, nant)
-    r, w = _reduce_all_scans(scans, cells, Frequency(_segment_lookup(geom.channel_freqs, cells)); eltype)
+    r, w = _reduce_all_scans(scans, cells; eltype)
     ends = _cell_nodes(r, geom.stations, PerFeed())
     S = zeros(Base.eltype(r), (Scan(axes(r, Scan)), dims(r, AntennaPair), dims(r, FeedPair)))
     data = DimStack((; r, w, S, ends))
@@ -283,10 +282,9 @@ function solve_joint_bandpass!(
     any(hasdata) || throw(ArgumentError("solve_joint_bandpass!: no gain slot has data to fit."))
     fitted = (; phase = !isempty(phase_blocks), amp = !isempty(amp_blocks))
     known = (; phase = hasdata .| pinned, amp = hasdata)
-    tracks = map((:phase, :amp)) do obs
+    tracks = map((; phase = :phase, amp = :amp)) do obs
         fitted[obs] ? _bandpass_tracks(fits, obs, ids, loc, layout.present, geom.nfeed, known[obs]) : NamedTuple[]
     end
-    tracks = (; phase = tracks[1], amp = tracks[2])
     # A slot moves where it has data, or where a prior acting on its track fills it.
     function movable(obs)
         out = fitted[obs] .& hasdata
@@ -297,10 +295,9 @@ function solve_joint_bandpass!(
     end
     free = (; phase = movable(:phase) .& .!pinned, amp = movable(:amp))
     filled = map(obs -> movable(obs) .& .!hasdata, (; phase = :phase, amp = :amp))
-    priors = map(ts -> Any[t.prior for t in ts], tracks)
     acting = map(ts -> findall(t -> any(t.active), ts), tracks)
     slips = [fill(NaN, length(t.pieces)) for t in tracks.phase]
-    energy(obs, x) = sum((first(_track_energy(tracks[obs][i], priors[obs][i], x)) for i in acting[obs]); init = 0.0)
+    track_layouts = map(ts -> map(_track_layout, ts), tracks)
 
     # Float64 whatever the data's type: CHOLMOD factors only Float64.
     ℓ, φ = zeros(nslots), zeros(nslots)
@@ -318,29 +315,36 @@ function solve_joint_bandpass!(
     end
     _source_coherence!(S, gains_of(ℓ, φ), data, jl)
 
+    # Each acting track's prior with its hyperparameters resolved, seeded by
+    # type-II MAP on the track alone from every slot's own estimate.
+    lin = _linearize(gains_of(ℓ, φ), S, data, jl, nslots)
+    estimates = (;
+        phase = fitted.phase ? _slot_estimates(φ, lin, :phase) : nothing,
+        amp = fitted.amp ? _slot_estimates(ℓ, lin, :amp; phase_held = !fitted.phase) : nothing,
+    )
+    priors = map((; phase = :phase, amp = :amp)) do obs
+        isempty(acting[obs]) && return []
+        y, wy = estimates[obs]
+        return [_seed_prior(tracks[obs][i], y, wy; phase = obs === :phase) for i in acting[obs]]
+    end
+    energy(obs, x) = sum((first(_track_energy(track_layouts[obs][i], priors[obs][j], x)) for (j, i) in pairs(acting[obs])); init = 0.0)
     objective(ℓ, φ, S) = _chi2(gains_of(ℓ, φ), S, data, jl) / 2 + energy(:phase, φ) + energy(:amp, ℓ)
     key = zeros(nslots)
     for ts in tracks, t in ts
         key[t.slots] .= t.x
     end
-    curvature = map(ts -> Vector{Any}(nothing, length(ts)), tracks)
+    curvature = map(ts -> Vector{Union{Nothing, @NamedTuple{inverse::Matrix{Float64}, measured::Bool}}}(nothing, length(ts)), tracks)
+    Hφ, hpos = _curvature_pattern(jl.slot_pairs, nslots)
+    Hℓ = copy(Hφ)
     change, worst, stalled, converged, hypers_fit = Inf, 0, false, false, true
     μ, ν, near = 1.0e-3, 2.0, false
     for iteration in 1:max_iterations
         lin = _linearize(gains_of(ℓ, φ), S, data, jl, nslots)
         if fitted.phase
             y, wy = _slot_estimates(φ, lin, :phase)
-            for i in acting.phase
-                t = tracks.phase[i]
-                isone(iteration) && (priors.phase[i] = _seed_prior(t, y, wy; phase = true))
-                shift = _choose_branches!(φ, t, priors.phase[i], y, wy, free.phase; slip = slips[i])
+            for (j, i) in pairs(acting.phase)
+                shift = _choose_branches!(φ, tracks.phase[i], priors.phase[j], y, wy, free.phase; slip = slips[i])
                 isnothing(gauge_rows) || _shift_gauge!(gauge_rows, shift)
-            end
-        end
-        if fitted.amp && isone(iteration)
-            y, wy = _slot_estimates(ℓ, lin, :amp; phase_held = !fitted.phase)
-            for i in acting.amp
-                priors.amp[i] = _seed_prior(tracks.amp[i], y, wy; phase = false)
             end
         end
         # Levenberg–Marquardt: each observable's step is damped by `μ` times the
@@ -351,7 +355,8 @@ function solve_joint_bandpass!(
         # precision, so a direction neither the data nor a prior determine takes
         # no step, and a slot with no curvature above that precision, from its data
         # or a prior, does not move.
-        H = (; phase = _data_curvature(lin.q, jl.slot_pairs, -1, nslots), amp = _data_curvature(lin.q, jl.slot_pairs, 1, nslots))
+        current = (; phase = φ, amp = ℓ)
+        H = (; phase = _data_curvature!(Hφ, hpos, lin.q, -1), amp = _data_curvature!(Hℓ, hpos, lin.q, 1))
         b = (; phase = imag.(lin.c), amp = real.(lin.c))
         scale = map(h -> maximum(diag(h); init = 0.0), H)
         systems = map((; phase = :phase, amp = :amp)) do obs
@@ -359,27 +364,25 @@ function solve_joint_bandpass!(
             d = diag(H[obs])
             moving = free[obs] .& ((d .> eps() * scale[obs]) .| filled[obs])
             return _posterior_system(
-                H[obs], b[obs], obs === :phase ? φ : ℓ, moving, tracks[obs][acting[obs]], key;
+                H[obs], b[obs], current[obs], moving, tracks[obs][acting[obs]], key;
                 gauge = obs === :phase ? gauge_rows : nothing,
             )
         end
         # The hyperparameters' optimum moves with the linearization, so they are
         # fit only as closely as the gains last moved, and to `tolerance` once the
         # gains have converged.
+        hyper_tolerance = max(tolerance, change)
         hypers_fit = all((:phase, :amp)) do obs
             fitted[obs] || return true
-            p = priors[obs][acting[obs]]
-            ok = _fit_hypers!(
-                p, view(curvature[obs], acting[obs]), systems[obs], tracks[obs][acting[obs]], eps() * scale[obs];
-                tolerance = max(tolerance, change), max_iterations,
+            return _fit_hypers!(
+                priors[obs], view(curvature[obs], acting[obs]), systems[obs], tracks[obs][acting[obs]], eps() * scale[obs];
+                tolerance = hyper_tolerance, max_iterations,
             )
-            priors[obs][acting[obs]] = p
-            return ok
         end
         function propose(μ)
             steps = map((:phase, :amp)) do obs
-                fitted[obs] || return (obs === :phase ? φ : ℓ), 0.0
-                x′, _, model = _map_step(systems[obs], priors[obs][acting[obs]]; λ = μ * scale[obs])
+                fitted[obs] || return current[obs], 0.0
+                x′, _, model = _map_step(systems[obs], priors[obs]; λ = μ * scale[obs])
                 return x′, model
             end
             return (; phase = steps[1][1], amp = steps[2][1]), steps[1][2] + steps[2][2]
@@ -393,7 +396,7 @@ function solve_joint_bandpass!(
         end
         O0 = objective(ℓ, φ, S)
         E0 = energy(:phase, φ) + energy(:amp, ℓ)
-        accepted = false
+        accepted, decrease = false, Inf
         while isfinite(μ)
             x1, predicted = propose(μ)
             change, worst = _largest_weighted_change(x1.amp .- ℓ, x1.phase .- φ, lin.W)
@@ -403,6 +406,7 @@ function solve_joint_bandpass!(
             # The objective is known to its rounding.
             if O1 <= O0 + 16 * eps(abs(O0))
                 ρ = (O0 - O1) / (E0 - predicted)
+                decrease = O0 - O1
                 ℓ, φ, S = x1.amp, x1.phase, S1
                 μ = max(μ * max(1 / 3, 1 - (2ρ - 1)^3), eps())
                 ν = 2.0
@@ -420,6 +424,9 @@ function solve_joint_bandpass!(
             converged = !stalled
             break
         end
+        # A plateau: the step lowered the posterior by less than a step of
+        # `tolerance` standard errors would (`tolerance²/2`).
+        decrease < tolerance^2 / 2 && hypers_fit && (converged = true; break)
         near = change < tolerance
     end
     location = iszero(worst) ? "" : _slot_description(geom, loc, slot[worst]...)
@@ -431,12 +438,12 @@ function solve_joint_bandpass!(
     # prior or the gauge — the amplitude that fits it best is zero, and without an
     # amplitude prior the posterior has no mode: its log-amplitude runs off.
     if fitted.amp && (stalled || converged)
-        lin = _linearize(gains_of(ℓ, φ), S, data, jl, nslots)
+        final = _linearize(gains_of(ℓ, φ), S, data, jl, nslots)
         unpriored = free.amp .& .!filled.amp
         for t in tracks.amp, (j, p) in pairs(t.pieces)
             t.active[j] && (unpriored[t.slots[p]] .= false)
         end
-        modeless = [n for n in findall(unpriored) if lin.W[n] > 0 && real(1 + lin.c[n] / lin.W[n]) <= 0]
+        modeless = [n for n in findall(unpriored) if final.W[n] > 0 && real(1 + final.c[n] / final.W[n]) <= 0]
         isempty(modeless) || @warn "the joint bandpass posterior has no mode for the amplitude of " *
             "$(length(modeless)) gain slots, e.g.$(_slot_description(geom, loc, slot[first(modeless)]...)): " *
             "their phase is held more than π/2 from their data, by a phase prior or the gauge, so the " *
@@ -456,22 +463,26 @@ function solve_joint_bandpass!(
         gk.amp_valid[I] = free.amp[n]
     end
     levels = [(; phase = _level_values(phase_level[a]), amp = _level_values(amp_level[a])) for a in 1:nant]
-    fits = map((:phase, :amp)) do obs
-        x = obs === :phase ? φ : ℓ
+    solved = (; phase = φ, amp = ℓ)
+    results = map((:phase, :amp)) do obs
+        x = solved[obs]
         valid = obs === :phase ? free.phase .| (fitted.phase .& pinned) : free.amp
+        prior_of = zeros(Int, length(tracks[obs]))
+        prior_of[acting[obs]] = eachindex(acting[obs])
         map(eachindex(tracks[obs])) do i
             t = tracks[obs][i]
+            j = prior_of[i]
             status = map(t.pieces) do p
                 all(pinned[t.slots[p]]) && obs === :phase && return TrackSolved
                 return _band_track_status([valid[n] ? x[n] : NaN for n in t.slots[p]], flat_span)
             end
             if !isnothing(t.level) && any(t.active)
-                _, L = _track_energy(t, priors[obs][i], x)
+                _, L = _track_energy(track_layouts[obs][i], priors[obs][j], x)
                 for (g, v) in L
                     levels[t.a][obs][t.feed, g, t.ts] = v
                 end
             end
-            return (; track = t, prior = priors[obs][i], status, slip = obs === :phase ? slips[i] : nothing)
+            return (; track = t, prior = iszero(j) ? t.prior : priors[obs][j], status, slip = obs === :phase ? slips[i] : nothing)
         end
     end
     level_writers = [
@@ -479,7 +490,7 @@ function solve_joint_bandpass!(
             for a in 1:nant
     ]
     _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers)
-    return (; phase = fits[1], amp = fits[2])
+    return (; phase = results[1], amp = results[2])
 end
 
 # Record a joint solve's track fits (`solve_joint_bandpass!`) into one array per
@@ -501,7 +512,7 @@ end
 # piece → level map and level count against the station's shape segments, its
 # level block's leaf, feed tying and position, the level of each shape segment,
 # and its time-segment count.
-function _station_levels(level_blocks, segs, loc, geom::DataGeometry, θ, T)
+function _station_levels(level_blocks, segs, loc, geom::DataGeometry, θ, ::Type{T}) where {T}
     out = Vector{Any}(nothing, length(loc))
     for lb in level_blocks, (li, a) in pairs(lb.stations)
         k, _ = loc[a]
@@ -509,7 +520,7 @@ function _station_levels(level_blocks, segs, loc, geom::DataGeometry, θ, T)
         level, nlevel = _piece_levels(lb.plan, segs[k])
         out[a] = (;
             level, nlevel, leaf = lb.θ, tying = lb.plan.tying, ai = li,
-            seg = _segment_levels(level, segs[k]), nts = lb.plan.shape[4], geom.nfeed, T,
+            seg = _segment_levels(level, segs[k]), nts = lb.plan.shape.Ti, geom.nfeed, T,
         )
     end
     return out

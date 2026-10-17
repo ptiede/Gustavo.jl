@@ -39,19 +39,15 @@ end
 # Every scan's (AntennaPair, FeedPair, segment) residual, stacked over an added Scan
 # axis — not summed across scans, since the per-scan source coherence needs each
 # scan's own coherent visibility, in the scan accumulators' element types or
-# in the real type `eltype`.
-function _reduce_all_scans(scans, segs, cells::Frequency; eltype = nothing)
-    nscan = length(scans)
+# in the real type `eltype`. The segments are numbered along `Frequency`.
+function _reduce_all_scans(scans, segs; eltype = nothing)
     rl = first(scans).rl
-    nbl, npol = size(rl, AntennaPair), size(rl, FeedPair)
-    nseg = length(segs)
     T = something(eltype, real(Base.eltype(first(scans).wl)))
     C = isnothing(eltype) ? Base.eltype(rl) : complex(eltype)
-    d = (Scan(1:nscan), dims(rl, AntennaPair), dims(rl, FeedPair), cells)
-    rseg = DimensionalData.DimArray(zeros(C, nscan, nbl, npol, nseg), d)
-    wseg = DimensionalData.DimArray(zeros(T, nscan, nbl, npol, nseg), d)
-    for (si, sc) in enumerate(scans)
-        _reduce_scan_segments!(view(rseg, si, :, :, :), view(wseg, si, :, :, :), sc, segs)
+    d = (Scan(eachindex(scans)), dims(rl, AntennaPair), dims(rl, FeedPair), Frequency(eachindex(segs)))
+    rseg, wseg = zeros(C, d), zeros(T, d)
+    for (r, w, sc) in zip(eachslice(rseg; dims = Scan), eachslice(wseg; dims = Scan), scans)
+        _reduce_scan_segments!(r, w, sc, segs)
     end
     return rseg, wseg
 end
@@ -71,7 +67,8 @@ end
 _gain_blocks(phase_blocks, amp_blocks) = isempty(phase_blocks) ? amp_blocks : phase_blocks
 
 # One gain block's solved state over `(AntennaName, Feed, Frequency, Ti)` — its
-# stations, every feed, its frequency segments and its time segments: the
+# stations, every feed, its frequency segments and its time segments, both
+# numbered: the
 # complex gains `g`; their phases `φ` on the branches the solve chose; the slots
 # whose phase and whose log-amplitude the solve gave a value (`phase_valid`,
 # `amp_valid`), which differ where a prior fills one observable over a slot
@@ -80,8 +77,7 @@ _gain_blocks(phase_blocks, amp_blocks) = isempty(phase_blocks) ? amp_blocks : ph
 function _block_gains(block, geom::DataGeometry, C::Type)
     ax = (
         _station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed),
-        Frequency(_frequency_segment_lookup(block.plan, geom)),
-        Ti(_time_segment_lookup(block.plan, geom)),
+        Frequency(1:block.plan.shape.Frequency), Ti(1:block.plan.shape.Ti),
     )
     return DimStack((;
         g = ones(C, ax), φ = zeros(real(C), ax),
@@ -316,16 +312,29 @@ function _linearize(g, S, data, jl, nslots)
     return (; q, c, W)
 end
 
-# The curvature of the χ² in one observable's slot values: `Σ_e q_e·(x_a + s·x_b)²`
-# with `s = +1` for log-amplitude sums and `−1` for phase differences.
-function _data_curvature(q, slot_pairs, s, nslots)
-    Is, Js, Vs = Int[], Int[], Float64[]
-    for (e, (na, nb)) in pairs(slot_pairs)
+# The pattern of the χ²'s curvature in one observable's slot values, over the
+# slot pairs each correlation `e` joins: a matrix holding it and, per `e`, the
+# indices among its stored values of `(a, a)`, `(b, b)`, `(a, b)` and `(b, a)`.
+function _curvature_pattern(slot_pairs, nslots)
+    Is = [n for (na, nb) in slot_pairs for n in (na, nb, na, nb)]
+    Js = [n for (na, nb) in slot_pairs for n in (na, nb, nb, na)]
+    H = sparse(Is, Js, ones(length(Is)), nslots, nslots)
+    pos = [ntuple(r -> _position(H, Is[4(e - 1) + r], Js[4(e - 1) + r]), 4) for e in eachindex(slot_pairs)]
+    return H, pos
+end
+
+# Writes into `H` (`_curvature_pattern`) the curvature of the χ² in one
+# observable's slot values, `Σ_e q_e·(x_a + s·x_b)²`, with `s = +1` for
+# log-amplitude sums and `−1` for phase differences.
+function _data_curvature!(H, pos, q, s)
+    Hv = fill!(nonzeros(H), 0.0)
+    for (e, p) in pairs(pos)
         qe = q[e]
         qe > 0 || continue
-        append!(Is, (na, nb, na, nb))
-        append!(Js, (na, nb, nb, na))
-        append!(Vs, (qe, qe, s * qe, s * qe))
+        Hv[p[1]] += qe
+        Hv[p[2]] += qe
+        Hv[p[3]] += s * qe
+        Hv[p[4]] += s * qe
     end
-    return sparse(Is, Js, Vs, nslots, nslots)
+    return H
 end

@@ -277,12 +277,14 @@ end
 
 # The walk's model on `u = (x − x₁)/h`: `σ²` scaled by `h^(2m−1)`, and the init's
 # `j`-th derivative by `hʲ`.
-function _random_walk_model(order::Integer, σ, init, h, ::Type{S}) where {S}
-    σ2 = S(σ)^2 * h^(2order - 1)
-    isnothing(init) && return RandomWalkModel{Int(order)}(σ2)
+_random_walk_model(order::Integer, σ, init, h, ::Type{S}) where {S} = _random_walk_model(Val(order), σ, init, h, S)
+
+function _random_walk_model(::Val{M}, σ, init, h, ::Type{S}) where {M, S}
+    σ2 = S(σ)^2 * h^(2M - 1)
+    isnothing(init) && return RandomWalkModel{M}(σ2)
     μ, Σ = _init_moments(init)
-    d = [h^j for j in 0:(order - 1)]
-    return RandomWalkModel{Int(order)}(σ2, S.(d .* μ), S.(d .* Σ .* d'))
+    d = [h^j for j in 0:(M - 1)]
+    return RandomWalkModel{M}(σ2, S.(d .* μ), S.(d .* Σ .* d'))
 end
 
 # Seed for a random walk's σ: the m-th differences of consecutive usable

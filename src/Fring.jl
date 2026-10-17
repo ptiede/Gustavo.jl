@@ -29,7 +29,7 @@ import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack
 using Statistics: median, mean
 using LinearAlgebra
-using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nzrange, nonzeros, rowvals
+using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nnz, nzrange, nonzeros, rowvals, CHOLMOD
 import ForwardDiff
 using StaticArrays: SMatrix, SVector
 

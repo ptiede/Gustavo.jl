@@ -570,8 +570,8 @@ end
         fits = [(; phase = (; x = xf, pieces = [1:m], prior, level = nothing, nlevel = 0))]
         t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:m, 1, 1, m, 1)], [(1, 1)], [[1]], 1, trues(m)))
         sys = FP._posterior_system(FP.spdiagm(w), w .* y, zeros(m), trues(m), [t], xf)
-        K, h, c, key = FP._reduced(sys, FP._assembled(sys, [resolved]), 0.0)
-        G = FP._factor(K, key)
+        K, h, c = FP._reduce!(sys, FP._assemble!(sys.layout, [resolved]), 0.0)
+        G = FP._factor(K, sys.key)
         lp = dot(h, G \ h) / 2 - c - logdet(G) / 2 + FP._expected_log_prior(resolved, only(sys.chains), nothing, Float64)
         return lp, t, sys
     end

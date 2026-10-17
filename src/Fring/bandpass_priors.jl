@@ -14,61 +14,137 @@
 # profiled over that constant, so a proper prior acts on its track less a free
 # constant, as if beside a level. A flat-start walk is unchanged by a constant.
 
-# A quadratic `½uᵀKu − hᵀu + c` over a growing set of unknowns `u`, each with
-# the frequency `key` by which they are ordered for factoring.
-mutable struct _Quadratic
-    Is::Vector{Int}
-    Js::Vector{Int}
-    Vs::Vector{Float64}
-    h::Vector{Float64}
-    c::Float64
-    key::Vector{Float64}
-end
-_Quadratic(key) = _Quadratic(Int[], Int[], Float64[], zeros(length(key)), 0.0, collect(Float64, key))
-_unknown!(Q::_Quadratic, key) = (push!(Q.h, 0.0); push!(Q.key, key); length(Q.h))
-_matrix(Q::_Quadratic) = sparse(Q.Is, Q.Js, Q.Vs, length(Q.h), length(Q.h))
-Base.copy(Q::_Quadratic) = _Quadratic(copy(Q.Is), copy(Q.Js), copy(Q.Vs), copy(Q.h), Q.c, Q.key)
-
 # A linear form `Σ a·u[j] + b`: its terms `j => a` and its constant `b`.
 const _Form = Tuple{Vector{Pair{Int, Float64}}, Float64}
 
-# `Σ_j c_j·forms_j`.
-function _combine(forms, coefs)
-    terms = Pair{Int, Float64}[]
-    b = 0.0
-    for (f, a) in zip(forms, coefs)
-        iszero(a) && continue
-        append!(terms, (j => a * v) for (j, v) in f[1])
-        b += a * f[2]
-    end
-    return (terms, b)
+# A new unknown, ordered for factoring by the frequency `key`.
+_unknown!(keys, key) = (push!(keys, key); length(keys))
+
+# The index among `K`'s stored values of `K[i, j]`, which is on its pattern.
+function _position(K, i, j)
+    rng = nzrange(K, j)
+    return rng[searchsortedfirst(view(rowvals(K), rng), i)]
 end
 
-# Add `½ρᵀWρ` for the forms `ρ`.
-function _add_term!(Q::_Quadratic, ρ, W)
-    cols = unique(first(t) for f in ρ for t in f[1])
-    G = zeros(length(ρ), length(cols))
-    r = zeros(length(ρ))
-    for (i, f) in pairs(ρ)
-        for (j, a) in f[1]
-            G[i, findfirst(==(j), cols)] += a
+# A prior term `½sᵀWs` over the state rows `s` of the forms `fs`: the entries
+# `(row, unknown, coefficient)` of those rows, each row's constant and the fixed
+# slot (or 0) whose value adds to it, and the index among K's stored values of
+# each pair of entries (`_locate!`).
+function _prior_term(fs, xref)
+    entries = [(r, j, a) for (r, f) in pairs(fs) for (j, a) in f[1]]
+    return (; entries, base = [f[2] for f in fs], xref, pos = zeros(Int, length(entries), length(entries)))
+end
+
+function _locate!(term, K)
+    for (a, e) in pairs(term.entries), (b, g) in pairs(term.entries)
+        term.pos[a, b] = _position(K, e[2], g[2])
+    end
+    return term
+end
+
+# The prior terms of chain `ch` (`_track_chains!`): its start, which counts where
+# the prior's start is proper, and one per transition, over the stacked states
+# `(s_k, s_{k−1})`. With `fixed`, the first row of each state takes its slot's
+# value from `_fix_slots!`.
+function _chain_terms(ch, fixed)
+    xref(k) = [r == 1 && fixed ? ch.slots[k] : 0 for r in eachindex(ch.states[k])]
+    return (;
+        start = _prior_term(ch.states[1], xref(1)),
+        steps = [_prior_term([ch.states[k]; ch.states[k - 1]], [xref(k); xref(k - 1)]) for k in 2:length(ch.states)],
+        ch.u, ch.h, ch.dim,
+    )
+end
+
+# Calls `f` on every prior term of `terms` (per track, per chain).
+function _foreach_term(f, terms)
+    for ts in terms, t in ts
+        f(t.start)
+        foreach(f, t.steps)
+    end
+    return nothing
+end
+
+# The quadratic `½uᵀKu − hᵀu + c` over `n` unknowns: the data terms `(Is, Js,
+# Vs)` with gradient `h` and constant `c`, plus the prior terms of `chains` (per
+# track, per chain), the diagonal of the first `nf` unknowns held for damping.
+# Its pattern is fixed here; `_assemble!` writes its values for given priors.
+function _quadratic_layout(chains, n; data = (Int[], Int[], Float64[]), h = zeros(n), c = 0.0, nf = 0, fixed = false)
+    terms = [[_chain_terms(ch, fixed) for ch in cs] for cs in chains]
+    Is, Js = [data[1]; 1:nf], [data[2]; 1:nf]
+    _foreach_term(terms) do term
+        for e in term.entries, g in term.entries
+            push!(Is, e[2])
+            push!(Js, g[2])
         end
-        r[i] = -f[2]
     end
+    K = sparse(Is, Js, ones(length(Is)), n, n)
+    fill!(nonzeros(K), 0.0)
+    _foreach_term(term -> _locate!(term, K), terms)
+    base = zeros(nnz(K))
+    for (i, j, v) in zip(data...)
+        base[_position(K, i, j)] += v
+    end
+    return (; K, base, h0 = h, c0 = c, h = similar(h), diag = [_position(K, j, j) for j in 1:nf], terms)
+end
+
+# Writes the slot values `x` into the rows of `lay`'s prior terms that take a
+# fixed slot's value (`_chain_terms` with `fixed`).
+function _fix_slots!(lay, x)
+    _foreach_term(lay.terms) do term
+        for (p, n) in pairs(term.xref)
+            iszero(n) || (term.base[p] = x[n])
+        end
+    end
+    return lay
+end
+
+# Writes the quadratic under the resolved `priors` (one per track) into
+# `lay.K`'s stored values and `lay.h`, and returns its constant.
+function _assemble!(lay, priors)
+    Kv = nonzeros(lay.K)
+    T = eltype(Kv)
+    copyto!(Kv, lay.base)
+    copyto!(lay.h, lay.h0)
+    c = lay.c0
+    for (ts, prior) in zip(lay.terms, priors)
+        isempty(ts) && continue
+        c += _with_piece_models(prior, first(ts).dim, T) do model
+            sum((_add_chain!(Kv, lay.h, t, model(t.h)) for t in ts); init = zero(T))
+        end
+    end
+    return c
+end
+
+function _add_chain!(Kv, h, t, model)
+    T = eltype(Kv)
+    D = statedim(model)
+    c = zero(T)
+    start = initial(model, T)
+    if !isnothing(start)
+        μ0, P0 = start
+        c += _add_term!(Kv, h, t.start, inv(P0), μ0)
+    end
+    for (k, term) in pairs(t.steps)
+        A, Q = transition(model, t.u[k + 1] - t.u[k], T)
+        G = hcat(SMatrix{D, D, T}(I), -A)
+        c += _add_term!(Kv, h, term, G' * (Q \ G), zero(SVector{2D, T}))
+    end
+    return c
+end
+
+# Adds `½sᵀWs` over `term`'s state rows `s`, less `μ`, to K's stored values
+# `Kv` and to `h`, and returns its constant.
+function _add_term!(Kv, h, term, W::SMatrix{R, R}, μ) where {R}
     W = (W + W') / 2
-    GW = G' * W
-    K = GW * G
-    for a in eachindex(cols), b in eachindex(cols)
-        push!(Q.Is, cols[a])
-        push!(Q.Js, cols[b])
-        push!(Q.Vs, K[a, b])
+    r = SVector{R}(term.base) - μ
+    Wr = W * r
+    for (a, (p, j, α)) in pairs(term.entries)
+        h[j] -= α * Wr[p]
+        for (b, (q, _, β)) in pairs(term.entries)
+            Kv[term.pos[a, b]] += α * β * W[p, q]
+        end
     end
-    h = GW * r
-    for (a, j) in pairs(cols)
-        Q.h[j] += h[a]
-    end
-    Q.c += dot(r, W * r) / 2
-    return Q
+    return dot(r, Wr) / 2
 end
 
 # The coordinates a prior's state-space model runs on over one piece's
@@ -79,10 +155,11 @@ function _piece_coordinates(::RandomWalkPrior, x)
 end
 _piece_coordinates(::OUPrior, x) = float.(x), 1.0
 
-# The state-space model of a resolved prior on coordinates of unit `h`, in
-# element type `T`.
-_piece_model(prior::RandomWalkPrior, h, T = Float64) = _random_walk_model(prior.order, prior.σ, prior.init, h, T)
-_piece_model(prior::OUPrior, h, T = Float64) = OUModel(T(prior.scale), T(prior.σ)^2)
+# `f(model)` with `model(h)` the resolved `prior`'s state-space model of state
+# dimension `dim` (a chain's, `Val(_statedim(prior))`) on coordinates of unit
+# `h`, in element type `T`.
+_with_piece_models(f, prior::RandomWalkPrior, dim::Val, ::Type{T}) where {T} = f(h -> _random_walk_model(dim, prior.σ, prior.init, h, T))
+_with_piece_models(f, prior::OUPrior, ::Val, ::Type{T}) where {T} = f(_ -> OUModel(T(prior.scale), T(prior.σ)^2))
 _statedim(prior::RandomWalkPrior) = prior.order
 _statedim(::OUPrior) = 1
 
@@ -97,58 +174,42 @@ _samples_needed(::OUPrior) = 1
 _level_group(t, prior, j) = !isnothing(t.level) ? t.level[j] : _proper_prior(prior) ? 1 : nothing
 _level_groups(t, prior) = !isnothing(t.level) ? t.level : _proper_prior(prior) ? ones(Int, length(t.pieces)) : nothing
 
-# The state chain of each piece of track `t` its prior acts on, over the unknowns
-# of `Q`: per sample its state less the piece's level, as linear forms whose
-# first is the slot (`slot(n)` gives its unknown, or `0` and its fixed value) and
-# the rest new latent unknowns, with the coordinates its prior runs on. Returns
-# the chains and the unknown of each level group.
-function _track_chains!(Q::_Quadratic, t, slot)
+# The state chain of each piece of track `t` its prior acts on, over unknowns
+# whose frequencies `keys` holds: per sample its state less the piece's level, as
+# linear forms whose first is the slot (`slot(n)` gives its unknown, or `0` and
+# its fixed value) and the rest new latent unknowns, with the coordinates its
+# prior runs on, its samples' slots and its state dimension as a type
+# (`Val`). Returns the chains and the unknown of each level group.
+function _track_chains!(keys, t, slot)
     levels = Dict{Int, Int}()
-    chains = NamedTuple[]
-    for (j, p) in pairs(t.pieces)
-        t.active[j] || continue
-        group = _level_group(t, t.prior, j)
-        L = isnothing(group) ? 0 : get!(() -> _unknown!(Q, Inf), levels, group)
-        states = map(p) do k
-            j1, v1 = slot(t.slots[k])
-            value = (iszero(j1) ? Pair{Int, Float64}[] : [j1 => 1.0], iszero(j1) ? v1 : 0.0)
-            iszero(L) || push!(value[1], L => -1.0)
-            _Form[value; [([_unknown!(Q, t.x[k]) => 1.0], 0.0) for _ in 2:_statedim(t.prior)]]
-        end
-        u, h = _piece_coordinates(t.prior, t.x[p])
-        push!(chains, (; u, h, states))
-    end
+    chains = [_piece_chain!(keys, levels, t, slot, j, p) for (j, p) in pairs(t.pieces) if t.active[j]]
     return chains, levels
 end
 
-# Add the energy of `chains` under the resolved `prior` to `Q`: a term per
-# transition and, where the prior's start is proper, one for the first state.
-function _add_prior_terms!(Q::_Quadratic, chains, prior)
-    for ch in chains
-        model = _piece_model(prior, ch.h)
-        start = initial(model, Float64)
-        if !isnothing(start)
-            μ0, P0 = start
-            _add_term!(Q, [(f[1], f[2] - μ0[i]) for (i, f) in pairs(ch.states[1])], inv(Matrix(P0)))
-        end
-        for i in 2:length(ch.states)
-            A, Qk = transition(model, ch.u[i] - ch.u[i - 1], Float64)
-            ρ = [_combine([ch.states[i][r]; ch.states[i - 1]], [1.0; -A[r, :]]) for r in axes(A, 1)]
-            _add_term!(Q, ρ, inv(Matrix(Qk)))
-        end
+function _piece_chain!(keys, levels, t, slot, j, p)
+    group = _level_group(t, t.prior, j)
+    L = isnothing(group) ? 0 : get!(() -> _unknown!(keys, Inf), levels, group)
+    states = map(p) do k
+        j1, v1 = slot(t.slots[k])
+        value = (iszero(j1) ? Pair{Int, Float64}[] : [j1 => 1.0], iszero(j1) ? v1 : 0.0)
+        iszero(L) || push!(value[1], L => -1.0)
+        _Form[value; [([_unknown!(keys, t.x[k]) => 1.0], 0.0) for _ in 2:_statedim(t.prior)]]
     end
-    return Q
+    u, h = _piece_coordinates(t.prior, t.x[p])
+    return (; u, h, states, slots = t.slots[p], dim = Val(_statedim(t.prior)))
 end
 
 # The log density of `chains` under the resolved `prior`, in expectation over
 # the states' posterior with the moments `mom` (`_chain_moments`), or its
 # normalization alone without them; in element type `T`.
-_expected_log_prior(prior, chains, mom, T) = sum(
-    (_expected_chain_log_prior(_piece_model(prior, ch.h, T), ch.u, isnothing(mom) ? nothing : mom[c], T) for (c, ch) in pairs(chains));
-    init = zero(T),
-)
+function _expected_log_prior(prior, chains, mom, ::Type{T}) where {T}
+    isempty(chains) && return zero(T)
+    return _with_piece_models(prior, first(chains).dim, T) do model
+        sum((_expected_chain_log_prior(model(ch.h), ch.u, isnothing(mom) ? nothing : mom[c], T) for (c, ch) in pairs(chains)); init = zero(T))
+    end
+end
 
-function _expected_chain_log_prior(model, u, mom, T)
+function _expected_chain_log_prior(model, u, mom, ::Type{T}) where {T}
     D = statedim(model)
     out = zero(T)
     start = initial(model, T)
@@ -156,7 +217,7 @@ function _expected_chain_log_prior(model, u, mom, T)
         μ0, P0 = start
         out -= logdet(2π * P0) / 2
         if !isnothing(mom)
-            m, M = SVector{D}(mom.start[1]), SMatrix{D, D}(mom.start[2])
+            m, M = mom.start
             out -= tr(P0 \ (M - μ0 * m' - m * μ0' + μ0 * μ0')) / 2
         end
     end
@@ -165,37 +226,77 @@ function _expected_chain_log_prior(model, u, mom, T)
         out -= logdet(2π * Q) / 2
         isnothing(mom) && continue
         G = hcat(SMatrix{D, D, T}(I), -A)
-        out -= tr(Q \ (G * SMatrix{2D, 2D}(mom.pairs[i - 1]) * G')) / 2
+        out -= tr(Q \ (G * mom.pairs[i - 1] * G')) / 2
     end
     return out
 end
 
-# The posterior moments of each chain's states, from the mean `z` and covariance
-# `cov(i, j)` of the unknowns: the first state's mean and second moment, and the
-# second moment of each consecutive pair `(s_i, s_{i−1})`.
-function _chain_moments(chains, z, cov)
-    mean_of(f) = sum((a * z[j] for (j, a) in f[1]); init = 0.0) + f[2]
-    second(fs) = [
-        sum((a * b * cov(i, j) for (i, a) in f[1] for (j, b) in g[1]); init = 0.0) + mean_of(f) * mean_of(g)
-            for f in fs, g in fs
-    ]
+# The posterior moments of each chain's states of dimension `D`, from the mean
+# `z` and covariance `cov(i, j)` of the unknowns: the first state's mean and
+# second moment, and the second moment of each consecutive pair `(s_i, s_{i−1})`.
+function _chain_moments(chains, z, cov::C, ::Val{D}) where {C, D}
     return map(chains) do ch
+        s1 = ch.states[1]
         (;
-            start = (mean_of.(ch.states[1]), second(ch.states[1])),
-            pairs = [second([ch.states[i]; ch.states[i - 1]]) for i in 2:length(ch.states)],
+            start = (SVector{D}(ntuple(r -> _form_mean(s1[r], z), Val(D))), _second_moment(r -> s1[r], z, cov, Val(D))),
+            pairs = [
+                _second_moment(r -> r <= D ? ch.states[i][r] : ch.states[i - 1][r - D], z, cov, Val(2D))
+                    for i in 2:length(ch.states)
+            ],
         )
     end
 end
 
-# Track `t`'s prior energy at the slot values `x`, minimized over its latent
-# states and levels, and those levels by group.
-function _track_energy(t, prior, x)
-    Q = _Quadratic(Float64[])
-    chains, levels = _track_chains!(Q, t, n -> (0, x[n]))
-    _add_prior_terms!(Q, chains, prior)
-    isempty(Q.h) && return Q.c, Dict{Int, Float64}()
-    u = cholesky(Symmetric(_matrix(Q))) \ Q.h
-    return Q.c - dot(Q.h, u) / 2, Dict(g => u[j] for (g, j) in levels)
+function _form_mean(f, z)
+    m = f[2]
+    for (j, a) in f[1]
+        m += a * z[j]
+    end
+    return m
+end
+
+function _form_covariance(f, g, cov)
+    s = zero(f[2])
+    for (i, a) in f[1], (j, b) in g[1]
+        s += a * b * cov(i, j)
+    end
+    return s
+end
+
+# The second moment of the `R` forms `form(1), …, form(R)`.
+function _second_moment(form::F, z, cov::C, ::Val{R}) where {F, C, R}
+    return SMatrix{R, R}(
+        ntuple(Val(R * R)) do l
+            f, g = form((l - 1) % R + 1), form((l - 1) ÷ R + 1)
+            _form_covariance(f, g, cov) + _form_mean(f, z) * _form_mean(g, z)
+        end
+    )
+end
+
+# Track `t`'s prior over its latent states and levels with its slots fixed, for
+# `_track_energy`: the quadratic's layout, the unknown of each level group, and
+# the factorization of the prior it was last assembled under.
+function _track_layout(t)
+    keys = Float64[]
+    chains, levels = _track_chains!(keys, t, _ -> (0, 0.0))
+    layout = _quadratic_layout([chains], length(keys); fixed = true)
+    return (; layout, levels, factor = Ref{Union{Nothing, CHOLMOD.Factor{Float64, Int}}}(nothing), prior = Ref{Any}(nothing))
+end
+
+# A track's prior energy at the slot values `x`, minimized over its latent states
+# and levels, and those levels by group; `tl` is its `_track_layout`.
+function _track_energy(tl, prior, x)
+    (; layout) = tl
+    c = _assemble!(_fix_slots!(layout, x), (prior,))
+    isempty(layout.h) && return c, Dict{Int, Float64}()
+    F = tl.factor[]
+    if isnothing(F) || !isequal(tl.prior[], prior)
+        F = isnothing(F) ? cholesky(Symmetric(layout.K)) : cholesky!(F, Symmetric(layout.K))
+        tl.factor[] = F
+        tl.prior[] = prior
+    end
+    u = F \ layout.h
+    return c - dot(layout.h, u) / 2, Dict(g => u[j] for (g, j) in tl.levels)
 end
 
 """
@@ -206,7 +307,7 @@ The MAP problem of one observable's slot values `x` with the χ² to second orde
 energy of each of `tracks`, over the `free` slots (the other slots keep their
 values), the tracks' latent states and their levels: the data's quadratic and
 each track's state chains (`_track_chains!`), the priors added by
-`_assembled`. `gauge`, when given, holds constraint rows `(slot, coefficient)` and
+`_assemble!`. `gauge`, when given, holds constraint rows `(slot, coefficient)` and
 right-hand sides `d`; each row is solved for its free slot of largest
 coefficient, `x = T·u + t0` over the unknowns, so that `u`, the unknowns left,
 are unconstrained and the system positive definite. `key` gives each slot's
@@ -220,20 +321,25 @@ function _posterior_system(H, b, x, free, tracks, key; gauge = nothing)
     for n in eachindex(free)
         free[n] && (idx[n] = (nf += 1))
     end
-    data = _Quadratic(key[free])
+    keys = key[free]
     Hf = H[free, free]
-    Is, Js, Vs = findnz(Hf)
-    append!(data.Is, Is)
-    append!(data.Js, Js)
-    append!(data.Vs, Vs)
     xf = Float64.(x[free])
-    data.h .= b[free] .+ Hf * xf
-    data.c = dot(xf, Hf * xf) / 2 + dot(b[free], xf)
+    Hx = Hf * xf
     slot(n) = free[n] ? (idx[n], 0.0) : (0, Float64(x[n]))
-    built = [_track_chains!(data, t, slot) for t in tracks]
+    built = [_track_chains!(keys, t, slot) for t in tracks]
+    n = length(keys)
+    Is, Js, Vs = findnz(Hf)
+    stored = findall(!iszero, Vs)
+    layout = _quadratic_layout(
+        first.(built), n; data = (Is[stored], Js[stored], Vs[stored]), h = [b[free] .+ Hx; zeros(n - nf)],
+        c = dot(xf, Hx) / 2 + dot(b[free], xf), nf,
+    )
+    g = _gauge_map(gauge, x, free, idx, n)
+    damped = copy(layout.K)
     return (;
-        data, chains = first.(built), levels = last.(built), x = Float64.(x), free, xf,
-        gauge = _gauge_map(gauge, x, free, idx, length(data.h)),
+        layout, chains = first.(built), levels = last.(built), x = Float64.(x), free, xf, gauge = g,
+        damped, hλ = zeros(n), reduction = isnothing(g) ? nothing : _reduction(damped, g),
+        key = isnothing(g) ? keys : keys[g.keep], factors = Union{Nothing, CHOLMOD.Factor{Float64, Int}}[nothing, nothing, nothing],
     )
 end
 
@@ -269,32 +375,57 @@ function _gauge_map(gauge, x, free, idx, n)
     return (; T, t0, keep, Tt = sparse(T'))
 end
 
-# The system's quadratic with each track's energy under `priors` added.
-function _assembled(sys, priors)
-    Q = copy(sys.data)
-    for (chains, prior) in zip(sys.chains, priors)
-        _add_prior_terms!(Q, chains, prior)
+# `TᵀKT` for the gauge map `g`, on the pattern `K`'s fixes, with the sparse map
+# from `K`'s stored values to its own, and buffers for `_reduce!`.
+function _reduction(K, g)
+    unit(A) = SparseMatrixCSC(size(A)..., A.colptr, rowvals(A), ones(nnz(A)))
+    Kr = unit(g.Tt) * unit(K) * unit(g.T)
+    fill!(nonzeros(Kr), 0.0)
+    rows, cols, vals = Int[], Int[], Float64[]
+    rv, tv = rowvals(g.Tt), nonzeros(g.Tt)
+    for j in axes(K, 2), s in nzrange(K, j), p in nzrange(g.Tt, rowvals(K)[s]), q in nzrange(g.Tt, j)
+        push!(rows, _position(Kr, rv[p], rv[q]))
+        push!(cols, s)
+        push!(vals, tv[p] * tv[q])
     end
-    return Q
+    return (; K = Kr, map = sparse(rows, cols, vals, nnz(Kr), nnz(K)), Kt0 = zeros(size(K, 1)), h = zeros(size(Kr, 1)))
 end
 
-# `Q` plus `λ/2·‖x′ − x‖²` over the free slots, over the unknowns the gauge
-# leaves: `(K, h, c, key)` of `½uᵀKu − hᵀu + c`.
-function _reduced(sys, Q, λ)
-    nf = length(sys.xf)
-    K = _matrix(Q) + spdiagm([fill(Float64(λ), nf); zeros(length(Q.h) - nf)])
-    h = copy(Q.h)
-    h[1:nf] .+= λ .* sys.xf
-    c = Q.c + λ * dot(sys.xf, sys.xf) / 2
-    isnothing(sys.gauge) && return K, h, c, Q.key
-    (; T, t0, keep) = sys.gauge
-    return T' * K * T, T' * (h - K * t0), c + dot(t0, K * t0) / 2 - dot(h, t0), Q.key[keep]
+# The system's quadratic as last assembled (`_assemble!`, which returned `c`)
+# plus `λ/2·‖x′ − x‖²` over the free slots, over the unknowns the gauge leaves:
+# `(K, h, c)` of `½uᵀKu − hᵀu + c`, in buffers of `sys` the next call overwrites.
+function _reduce!(sys, c, λ)
+    (; layout, damped, xf) = sys
+    copyto!(nonzeros(damped), nonzeros(layout.K))
+    for p in layout.diag
+        nonzeros(damped)[p] += λ
+    end
+    h = copyto!(sys.hλ, layout.h)
+    view(h, eachindex(xf)) .+= λ .* xf
+    c += λ * dot(xf, xf) / 2
+    isnothing(sys.gauge) && return damped, h, c
+    r, t0 = sys.reduction, sys.gauge.t0
+    mul!(nonzeros(r.K), r.map, nonzeros(damped))
+    mul!(r.Kt0, damped, t0)
+    c += dot(t0, r.Kt0) / 2 - dot(h, t0)
+    r.Kt0 .= h .- r.Kt0
+    mul!(r.h, sys.gauge.Tt, r.Kt0)
+    return r.K, r.h, c
 end
 
 # The unknowns `u` in the system's own.
 _unreduced(sys, u) = isnothing(sys.gauge) ? u : sys.gauge.T * u + sys.gauge.t0
 
 _factor(K, key; check = true) = cholesky(Symmetric(K); perm = sortperm(key), check)
+
+# Factors `K` into `sys`'s factorization `i`, reusing its symbolic analysis: 1
+# and 2 for `_fit_hypers!`, 3 for `_map_step`.
+function _refactor!(sys, i, K; check = true)
+    F = sys.factors[i]
+    F = isnothing(F) ? _factor(K, sys.key; check) : cholesky!(F, Symmetric(K); check)
+    sys.factors[i] = F
+    return F
+end
 
 """
     _map_step(sys, priors; λ = 0) -> (x′, levels, model)
@@ -306,12 +437,13 @@ new slot values, each track's level values by group, and the undamped
 quadratic's value there, which is the prior energy alone at `x′ = x`.
 """
 function _map_step(sys, priors; λ = 0)
-    Q = _assembled(sys, priors)
-    K, h, _, key = _reduced(sys, Q, λ)
-    z = _unreduced(sys, _factor(K, key) \ h)
+    c = _assemble!(sys.layout, priors)
+    K, h, _ = _reduce!(sys, c, λ)
+    z = _unreduced(sys, _refactor!(sys, 3, K) \ h)
     x′ = copy(sys.x)
     x′[sys.free] .= z[eachindex(sys.xf)]
-    return x′, [Dict(g => z[j] for (g, j) in lv) for lv in sys.levels], dot(z, _matrix(Q) * z) / 2 - dot(Q.h, z) + Q.c
+    (; layout) = sys
+    return x′, [Dict(g => z[j] for (g, j) in lv) for lv in sys.levels], dot(z, layout.K * z) / 2 - dot(layout.h, z) + c
 end
 
 # ── Hyperparameters and branches ─────────────────────────────────────────────
@@ -375,20 +507,43 @@ end
 # The covariance of a system's own unknowns, from the covariance `cov` of the
 # unknowns `u` its gauge leaves.
 _covariance(cov, ::Nothing) = cov
-function _covariance(cov, gauge)
+function _covariance(cov::C, gauge) where {C}
     Tt = gauge.Tt
     rv, v = rowvals(Tt), nonzeros(Tt)
     return (a, b) -> sum((v[p] * v[q] * cov(rv[p], rv[q]) for p in nzrange(Tt, a) for q in nzrange(Tt, b)); init = 0.0)
 end
 
-# The hyperparameters `prior` gives as densities, by name; `prior` with those at
-# the values `vals`; and their hyperprior's log density over their logs.
-_hyper_names(::Nothing) = ()
-_hyper_names(p::RandomWalkPrior) = is_fixed_hyper(p.σ) ? () : (:σ,)
-_hyper_names(p::OUPrior) = Tuple(s for s in (:scale, :σ) if !is_fixed_hyper(getfield(p, s)))
-_with_hypers(p::RandomWalkPrior, vals) = RandomWalkPrior(; p.order, σ = get(vals, :σ, p.σ), p.init)
-_with_hypers(p::OUPrior, vals) = OUPrior(; scale = get(vals, :scale, p.scale), σ = get(vals, :σ, p.σ))
-_log_hyperprior(prior, vals) = sum(logdensityof(getfield(prior, k), v) + log(v) for (k, v) in pairs(vals))
+# How many hyperparameters `prior` gives as densities, to be estimated.
+_hyper_count(::Nothing) = 0
+_hyper_count(p::RandomWalkPrior) = is_fixed_hyper(p.σ) ? 0 : 1
+_hyper_count(p::OUPrior) = (is_fixed_hyper(p.scale) ? 0 : 1) + (is_fixed_hyper(p.σ) ? 0 : 1)
+
+# One hyperparameter `spec`, a value or a density: its value, from the log
+# value `lθ[i]` for a density, and the index of the next.
+_take(spec::Real, lθ, i) = spec, i
+_take(spec, lθ, i) = exp(lθ[i]), i + 1
+
+# `prior` with its hyperparameters given as densities at the log values `lθ`,
+# `scale` before `σ`.
+_with_log_hypers(p::RandomWalkPrior, lθ) = RandomWalkPrior(; p.order, σ = first(_take(p.σ, lθ, 1)), p.init)
+function _with_log_hypers(p::OUPrior, lθ)
+    scale, i = _take(p.scale, lθ, 1)
+    return OUPrior(; scale, σ = first(_take(p.σ, lθ, i)))
+end
+
+# The log values in `p`, the resolved `spec`, of the hyperparameters `spec`
+# gives as densities.
+_log_hypers(spec::RandomWalkPrior, p) = [log(p.σ)]
+_log_hypers(spec::OUPrior, p) = [v for (h, v) in ((spec.scale, log(p.scale)), (spec.σ, log(p.σ))) if !is_fixed_hyper(h)]
+
+# The hyperprior's log density over the log hyperparameters `lθ`.
+_hyperprior_term(spec::Real, lθ, i) = zero(eltype(lθ)), i
+_hyperprior_term(spec, lθ, i) = logdensityof(spec, exp(lθ[i])) + lθ[i], i + 1
+_log_hyperprior(p::RandomWalkPrior, lθ) = first(_hyperprior_term(p.σ, lθ, 1))
+function _log_hyperprior(p::OUPrior, lθ)
+    a, i = _hyperprior_term(p.scale, lθ, 1)
+    return a + first(_hyperprior_term(p.σ, lθ, i))
+end
 
 # The inverse of a symmetric curvature, its eigenvalues taken in magnitude.
 function _inverse_curvature(C)
@@ -421,25 +576,25 @@ tolerance²`, by every track's curvature measured along a step of its own, and
 returns whether it did within `max_iterations` steps.
 """
 function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterations)
-    est = [i for i in eachindex(tracks) if !isempty(_hyper_names(tracks[i].prior))]
+    est = [i for i in eachindex(tracks) if _hyper_count(tracks[i].prior) > 0]
     isempty(est) && return true
-    names = [_hyper_names(tracks[i].prior) for i in est]
-    vals(k, lθ) = NamedTuple{names[k]}(Tuple(exp.(lθ)))
-    θ = [log.([getfield(priors[i], s) for s in names[k]]) for (k, i) in pairs(est)]
-    function evaluate(θ)
+    θ = [_log_hypers(tracks[i].prior, priors[i]) for i in est]
+    # Each evaluation factors into one of two factorizations, the accepted point's
+    # kept while a trial point uses the other.
+    function evaluate(θ, slot)
         trial = copy(priors)
         for (k, i) in pairs(est)
-            trial[i] = _with_hypers(tracks[i].prior, vals(k, θ[k]))
+            trial[i] = _with_log_hypers(tracks[i].prior, θ[k])
         end
-        K, h, c, key = _reduced(sys, _assembled(sys, trial), λ)
-        F = _factor(K, key; check = false)
+        K, h, c = _reduce!(sys, _assemble!(sys.layout, trial), λ)
+        F = _refactor!(sys, slot, K; check = false)
         # Hyperparameters so extreme that the posterior's curvature is lost to
         # rounding are no candidate.
         issuccess(F) || return (; lp = -Inf, F, u = h, trial)
         u = F \ h
         lp = dot(h, u) / 2 - c - logdet(F) / 2
         lp += sum(_expected_log_prior(p, ch, nothing, Float64) for (p, ch) in zip(trial, sys.chains); init = 0.0)
-        lp += sum(_log_hyperprior(tracks[i].prior, vals(k, θ[k])) for (k, i) in pairs(est))
+        lp += sum(_log_hyperprior(tracks[i].prior, θ[k]) for (k, i) in pairs(est))
         return (; lp, F, u, trial)
     end
     # Each track's expected log prior density and hyperprior, as a function of
@@ -447,35 +602,36 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
     function expected(at)
         cov = _covariance(_selected_inverse(at.F), sys.gauge)
         z = _unreduced(sys, at.u)
-        moms = [_chain_moments(sys.chains[i], z, cov) for i in est]
+        moms = [_chain_moments(sys.chains[i], z, cov, first(sys.chains[i]).dim) for i in est]
         return [
-            lθ -> _expected_log_prior(_with_hypers(tracks[i].prior, vals(k, lθ)), sys.chains[i], moms[k], eltype(lθ)) +
-                _log_hyperprior(tracks[i].prior, vals(k, lθ))
+            lθ -> _expected_log_prior(_with_log_hypers(tracks[i].prior, lθ), sys.chains[i], moms[k], eltype(lθ)) +
+                _log_hyperprior(tracks[i].prior, lθ)
                 for (k, i) in pairs(est)
         ]
     end
-    at = evaluate(θ)
+    cur = 1
+    at = evaluate(θ, cur)
     isfinite(at.lp) || throw(PosDefException(0))
     fs = expected(at)
     for (k, i) in pairs(est)
         isnothing(curvature[i]) &&
             (curvature[i] = (; inverse = _inverse_curvature(-ForwardDiff.hessian(fs[k], θ[k])), measured = false))
     end
-    g = [ForwardDiff.gradient(fs[k], θ[k]) for k in eachindex(est)]
+    g = map(ForwardDiff.gradient, fs, θ)
     converged = false
     for _ in 1:max_iterations
         Hinv = [curvature[i].inverse for i in est]
-        if sum(k -> dot(g[k], Hinv[k] * g[k]), eachindex(est)) <= tolerance^2 && all(i -> curvature[i].measured, est)
+        if sum(dot.(g, Hinv .* g)) <= tolerance^2 && all(i -> curvature[i].measured, est)
             converged = true
             break
         end
-        d = [Hinv[k] * g[k] for k in eachindex(est)]
+        d = Hinv .* g
         α = 1.0
         next = nothing
         while true
-            θ1 = [θ[k] .+ α .* d[k] for k in eachindex(est)]
-            all(k -> _within_rounding(θ1[k], θ[k]), eachindex(est)) && break
-            trial = evaluate(θ1)
+            θ1 = θ .+ α .* d
+            all(map(_within_rounding, θ1, θ)) && break
+            trial = evaluate(θ1, 3 - cur)
             # The log posterior is known to its rounding.
             trial.lp >= at.lp - 16 * eps(abs(at.lp)) && (next = (θ1, trial); break)
             α /= 2
@@ -483,8 +639,9 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
         # No step changes the hyperparameters: they are at the maximum to rounding.
         isnothing(next) && (converged = true; break)
         θ1, at = next
+        cur = 3 - cur
         fs = expected(at)
-        g1 = [ForwardDiff.gradient(fs[k], θ1[k]) for k in eachindex(est)]
+        g1 = map(ForwardDiff.gradient, fs, θ1)
         for (k, i) in pairs(est)
             s, y = θ1[k] - θ[k], g[k] - g1[k]
             sy = dot(s, y)
