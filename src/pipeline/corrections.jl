@@ -146,10 +146,9 @@ function scale_weights!(ms::XRadio.MeasurementSet, scale::AbstractDict)
     )
     factor = Dict(String(n) => Float64(f) for (n, f) in scale)
     weight = ms[:weight]
-    for (bi, (a, b)) in pairs(collect(XRadio.baselines(ms)))
+    for (wb, (a, b)) in zip(eachslice(weight; dims = BaselineID), XRadio.baselines(ms))
         f = get(factor, String(a), 1.0) * get(factor, String(b), 1.0)
-        f == 1 && continue
-        view(weight, BaselineID(bi)) .*= f
+        f == 1 || (wb .*= f)
     end
     return ms
 end

@@ -717,10 +717,9 @@ function _solve_gp_joint!(phase, track_w, obs, sm::JointKalmanSmoother, priors, 
     # Per-cell measurement variance (1/snr²); 0 marks a gated-out cell, which the
     # filter skips. With one node per station, a cell's state pair is its stations.
     ends = map((((a, _), (b, _)),) -> (a, b), obs.nodes)
-    rs = [
-        map((m, wi) -> m ? inv(T(wi)) : zero(T), view(obs.mask, Ti(ap)), view(obs.w, Ti(ap)))
-            for ap in axes(obs.w, Ti)
-    ]
+    rs = map(eachslice(obs.mask; dims = Ti), eachslice(obs.w; dims = Ti)) do mk, wk
+        map((m, wi) -> m ? inv(T(wi)) : zero(T), mk, wk)
+    end
     ys = [similar(r) for r in rs]
 
     # Current full (uncentered) estimate, seeded from the per-AP solve.
@@ -806,8 +805,11 @@ function _solve_ap_sweep!(
     nnode = size(phase, 2)
     prev_phase = fill(convert(eltype(phase), NaN), nant, nnode)  # cells no anchor-present AP has covered yet
     prev_age = zeros(Int, nant, nnode)    # APs since a cell was last refreshed (staleness)
-    for ap in axes(val, Ti)
-        v, wk, mk = view(val, Ti(ap)), view(w, Ti(ap)), view(mask, Ti(ap))
+    slices = zip(
+        eachslice(val; dims = Ti), eachslice(w; dims = Ti), eachslice(mask; dims = Ti),
+        eachslice(phase; dims = 3), eachslice(covered; dims = 3), eachslice(track_w; dims = 3),
+    )
+    for (v, wk, mk, ph, cov, tw) in slices
         # The anchor has data this AP iff some observation touches it (⇒ the solve
         # is pinned at anchor=0). Seed only then, and only with fresh cells in the
         # anchor gauge.
@@ -815,8 +817,8 @@ function _solve_ap_sweep!(
         for I in eachindex(wk, mk, nodes)
             mk[I] || continue
             (a, na), (b, nb) = nodes[I]
-            track_w[a, na, ap] += wk[I]
-            track_w[b, nb, ap] += wk[I]
+            tw[a, na] += wk[I]
+            tw[b, nb] += wk[I]
             ref_here |= a == anchor || b == anchor
         end
         seed = nothing
@@ -834,7 +836,6 @@ function _solve_ap_sweep!(
         if seed === nothing || !any(isfinite, seed)
             seed = _circular_ap_seed(v, wk, mk, nodes, nant, nnode, anchor)
         end
-        ph, cov = view(phase, :, :, ap), view(covered, :, :, ap)
         _solve_observable!(ph, cov, v, wk, mk, nodes, PinAntenna(anchor); rewrap, seed_phase = seed)
         # Refresh the anchor-gauged snapshot only from anchor-present APs (keep the
         # last known value for a station absent this AP, so a brief dropout does not
@@ -1089,8 +1090,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, nfeed, nnode, gauge, 
     # on it being present. It is internal and independent of `gauge`, which is
     # applied once, after smoothing.
     anchor = let wtot = zeros(T, nant)
-        for ap in axes(obs.w, Ti)
-            wk, mk = view(obs.w, Ti(ap)), view(obs.mask, Ti(ap))
+        for (wk, mk) in zip(eachslice(obs.w; dims = Ti), eachslice(obs.mask; dims = Ti))
             for I in eachindex(wk, mk, nodes)
                 mk[I] || continue
                 (a, _), (b, _) = nodes[I]

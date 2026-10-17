@@ -117,7 +117,7 @@ function fringe_station_solutions(sol::CalibrationSolution)
     refplan = _perscan_delay_plan(model, layout)
     refplan === nothing &&
         error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
-    nscan = refplan.shape[4]                                # PerScan ⇒ ntseg == #scan groups
+    nscan = refplan.shape.Ti                                # PerScan ⇒ ntseg == #scan groups
     names = sol.geom.scan_names
     length(names) == nscan || error(
         "fringe_station_solutions: the solution's geometry names $(length(names)) scans for " *
@@ -162,7 +162,7 @@ every product with a flagged (station, feed) on either side in that scan
 function fringe_station_flags(sol::CalibrationSolution)
     info = _fringe_info(sol)
     d = (_scan_dim(info.scan_names), _station_dim(sol.geom.stations), Feed(1:sol.geom.nfeed))
-    flags = DimArray(fill(false, map(length, d)), d)
+    flags = fill(false, d)
     for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
         flags[
             Scan(At(sol.geom.scan_names[info.flagged_scan[i]])),
@@ -213,7 +213,7 @@ _filler(::Type{Bool}) = false
 _filler(::Type{T}) where {T <: AbstractFloat} = T(NaN)
 
 function _cat_scans(::AbstractDimArray, xs, out_dims)
-    out = DimArray(fill(_filler(eltype(first(xs))), map(length, out_dims)), out_dims)
+    out = fill(_filler(eltype(first(xs))), out_dims)
     for x in xs
         out[map(d -> DimensionalData.basetypeof(d)(At(collect(lookup(d)))), dims(x))] = parent(x)
     end
@@ -325,7 +325,7 @@ function freq_group_coherence(spectra::AbstractDimStack)
         dims(spec, Scan), dims(spec, FeedPair),
         FreqGroup(DimensionalData.Lookups.Categorical([(freqs[first(r)], freqs[last(r)]) for r in groups]; order = DimensionalData.Lookups.Unordered())),
     )
-    η = DimArray(fill(NaN, map(length, d)), d)
+    η = fill(NaN, d)
     for s in axes(spec, Scan), p in axes(spec, FeedPair), (k, r) in enumerate(groups)
         num = 0.0
         den = 0.0
@@ -379,7 +379,7 @@ function baseline_delays(spectra::AbstractDimStack)
     spec = spectra.vis
     freqs = collect(lookup(spec, Frequency))
     d = (dims(spec, Scan), dims(spec, AntennaPair), dims(spec, FeedPair))
-    delay = DimArray(fill(NaN, map(length, d)), d)
+    delay = fill(NaN, d)
     for I in DimensionalData.DimIndices(delay)
         delay[I] = _baseline_delay(collect(spec[I]), freqs)
     end
@@ -418,7 +418,7 @@ function delay_closure(spectra::AbstractDimStack)
         Triangle(DimensionalData.Lookups.Categorical(triangles; order = DimensionalData.Lookups.Unordered())),
         FeedPair(parallel),
     )
-    closure = DimArray(fill(NaN, map(length, d)), d)
+    closure = fill(NaN, d)
     # A baseline stored as (y, x) has the negated delay of (x, y).
     τ(s, e, f) = haskey(index, e) ? delay[Scan(s), AntennaPair(index[e]), FeedPair(At(f))] :
         -delay[Scan(s), AntennaPair(index[reverse(e)]), FeedPair(At(f))]
