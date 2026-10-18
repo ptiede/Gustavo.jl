@@ -462,36 +462,36 @@ function _regauge!(x, freedoms::GaugeFreedoms, gauge::AbstractGauge)
     return x
 end
 
-# Maximum-weight spanning-tree phase seed on `nnodes` nodes. Each tree edge
-# `(u, v, y, w)` observes `φ[u] − φ[v] = y`, wrapped, with weight `w`. The tree
-# grown from each anchor (Prim) attaches the heaviest edge leaving the visited
-# set, so a node joined to the tree by a weak edge and a strong one takes its
-# branch from the strong one. Anchors, and nodes no tree reaches, stay 0.
+# Maximum-weight spanning-tree phase seed on `nnodes` nodes. Each edge
+# `(u, v, y, w)` observes `φ[u] − φ[v] = y`, wrapped, with weight `w`; of parallel
+# edges the heaviest counts. Phases propagate from each anchor along the maximum
+# spanning forest, so a node joined by a weak edge and a strong one takes its
+# branch from the strong one. Anchors, and nodes no anchor reaches, stay 0.
 function _prim_seed(::Type{T}, nnodes::Integer, tree_edges, anchors) where {T}
-    x = zeros(T, nnodes)
-    adj = [Tuple{Int, T, T}[] for _ in 1:nnodes]
+    best = Dict{Tuple{Int, Int}, Tuple{T, T}}()   # (a, b), a < b ⇒ (φ[a] − φ[b], weight)
     for (u, v, y, w) in tree_edges
-        push!(adj[u], (v, -y, w))
-        push!(adj[v], (u, y, w))
+        key, d = u < v ? ((u, v), y) : ((v, u), -y)
+        w > last(get(best, key, (zero(T), T(-Inf)))) && (best[key] = (d, w))
     end
-    visited = falses(nnodes)
+    pairs_ = collect(keys(best))
+    g = Graphs.SimpleGraph(nnodes)
+    foreach(((a, b),) -> Graphs.add_edge!(g, a, b), pairs_)
+    w = [last(best[e]) for e in pairs_]
+    weight = sparse([first.(pairs_); last.(pairs_)], [last.(pairs_); first.(pairs_)], [w; w], nnodes, nnodes)
+    forest = Graphs.SimpleGraph(nnodes)
+    foreach(e -> Graphs.add_edge!(forest, e), Graphs.kruskal_mst(g, weight; minimize = false))
+    x = zeros(T, nnodes)
+    reached = falses(nnodes)
     for p in anchors
-        (1 <= p <= nnodes && !visited[p]) || continue
-        visited[p] = true
-        while true
-            best_w = T(-Inf)
-            best_u = best_v = 0
-            best_add = zero(T)
-            for u in eachindex(visited)
-                visited[u] || continue
-                for (v, add, w) in adj[u]
-                    (!visited[v] && w > best_w) || continue
-                    best_w, best_u, best_v, best_add = w, u, v, add
-                end
-            end
-            best_v == 0 && break
-            x[best_v] = x[best_u] + best_add
-            visited[best_v] = true
+        (1 <= p <= nnodes && !reached[p]) || continue
+        dist = Graphs.gdistances(forest, p)
+        parent = Graphs.bfs_parents(forest, p)
+        for v in sortperm(dist)
+            iszero(parent[v]) && continue
+            reached[v] = true
+            v == p && continue
+            u = parent[v]
+            x[v] = x[u] + (u < v ? -first(best[(u, v)]) : first(best[(v, u)]))
         end
     end
     return x

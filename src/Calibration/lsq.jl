@@ -28,8 +28,8 @@ end
 """
     connected_components(nnodes, edges) -> (compid, ncomp, touched)
 
-Union–find connected components of an undirected graph on `nnodes` nodes given
-`edges` (any iterable of `(u, v)` index pairs). Returns `compid::Vector{Int}`
+Connected components of an undirected graph on `nnodes` nodes given `edges`
+(any iterable of `(u, v)` index pairs). Returns `compid::Vector{Int}`
 (dense component id `1:ncomp` for each node that appears in an edge, `0` for
 isolated/untouched nodes), the component count `ncomp`, and `touched::Vector{Bool}`
 marking nodes that appear in at least one edge.
@@ -39,37 +39,17 @@ connected piece of the (station, feed) graph independently (so disconnected
 array subgraphs each get their own reference pin).
 """
 function connected_components(nnodes::Integer, edges)
-    parent = collect(1:nnodes)
-    function findroot(x)
-        root = x
-        while parent[root] != root
-            root = parent[root]
-        end
-        while parent[x] != root           # path compression
-            parent[x], x = root, parent[x]
-        end
-        return root
-    end
+    g = Graphs.SimpleGraph(nnodes)
     touched = falses(nnodes)
     for (u, v) in edges
-        touched[u] = true
-        touched[v] = true
-        ru, rv = findroot(u), findroot(v)
-        ru == rv || (parent[ru] = rv)
+        touched[u] = touched[v] = true
+        Graphs.add_edge!(g, u, v)
     end
     compid = zeros(Int, nnodes)
-    label = Dict{Int, Int}()
     ncomp = 0
-    for n in eachindex(touched)
-        touched[n] || continue
-        r = findroot(n)
-        id = get(label, r, 0)
-        if id == 0
-            ncomp += 1
-            label[r] = ncomp
-            id = ncomp
-        end
-        compid[n] = id
+    for c in Graphs.connected_components(g)
+        touched[first(c)] || continue
+        compid[c] .= (ncomp += 1)
     end
     return compid, ncomp, touched
 end
