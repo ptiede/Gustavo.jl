@@ -1177,3 +1177,47 @@ end
     leaf = _jb_leaf(sol, :logamp)
     @test all(abs(leaf[1, f, c, 1, a] - (abp_true[a, f, c] - sum(abp_true[a, f, :]) / nchan)) < 1.0e-3 for a in 1:nant, f in 1:2, c in 1:nchan)
 end
+
+# ── A log-amplitude bandpass the data cannot divide ─────────────────────────
+
+@testset "JointSmoother: baselines without an odd loop leave the amplitude split free" begin
+    nchan = 8
+    feeds = [(1, 1), (2, 2)]
+    comp(prior) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
+    function solve(nant, bl_pairs; amp_prior = nothing)
+        geom = _seg_geometry(nchan; nant)
+        l = CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = comp(nothing)), logamp = (; bandpass = comp(amp_prior))), geom.stations, geom)
+        setup = (; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase), logamp = FP._bandpass_paths(l.plantree, :logamp)))
+        rng = MersenneTwister(304)
+        gtrue = exp.(complex.(0.3 .* randn(rng, nant, 2, 1, nchan), 0.5 .* randn(rng, nant, 2, 1, nchan)))
+        S = [(0.5 + rand(rng)) * cis(2π * rand(rng)) for _ in 1:4, _ in bl_pairs, _ in feeds]
+        results = _joint_scan_accumulators(gtrue, S, fill(1, nant, 4), bl_pairs, feeds, geom)
+        θ = zeros(l.nθ)
+        pb, ab = FP._bandpass_blocks(setup, θ, :phase), FP._bandpass_blocks(setup, θ, :logamp)
+        FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1), tolerance = 1.0e-10)
+        return only(ab).θ[1, :, :, 1, :], log.(abs.(gtrue[:, :, 1, :]))   # (feed, channel, station), (station, feed, channel)
+    end
+    undetermined = (:warn, r"frequency-dependent log-amplitude directions undetermined")
+    centered(v) = v .- sum(v) / length(v)
+
+    # Two stations: each channel's amplitude sum is measured, its split is not; the
+    # solve splits it evenly and keeps the measured sum.
+    la, ltrue = @test_logs undetermined match_mode = :any solve(2, [(1, 2)])
+    @test la[:, :, 1] ≈ la[:, :, 2] atol = 1.0e-8
+    for f in 1:2
+        @test centered(la[f, :, 1] .+ la[f, :, 2]) ≈ centered(ltrue[1, f, :] .+ ltrue[2, f, :]) atol = 1.0e-8
+    end
+    # A chain has no odd loop either; a triangle does.
+    @test_logs undetermined match_mode = :any solve(3, [(1, 2), (2, 3)])
+    @test_logs solve(3, [(1, 2), (1, 3), (2, 3)])
+
+    # A proper prior leaves only each track's band constant free, which the source
+    # term absorbs; a flat-start walk of order 2 also leaves a linear trend free,
+    # and the even split takes it off the two stations' difference.
+    @test_logs solve(2, [(1, 2)]; amp_prior = CAL.OUPrior(; scale = 5.0e6, σ = 0.3))
+    la, _ = @test_logs undetermined match_mode = :any solve(2, [(1, 2)]; amp_prior = CAL.RandomWalkPrior(; order = 2, σ = 1.0e-9))
+    x = centered(collect(1.0:nchan))
+    for f in 1:2
+        @test abs(sum(x .* (la[f, :, 1] .- la[f, :, 2]))) < 1.0e-8
+    end
+end

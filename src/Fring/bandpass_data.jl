@@ -205,8 +205,10 @@ frequency-flat, so it absorbs a band-constant factor on any one station, and
 a prior is profiled over that constant (see the header of bandpass_priors.jl). Pinning `|g|` as well
 would assert the reference antenna has a flat amplitude bandpass, discarding
 structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
-over the band eliminates `ls` and leaves the full-rank signless-Laplacian
-system) and biasing every other station through the inconsistency.
+over the band eliminates `ls` and leaves a signless-Laplacian system, full rank
+wherever each connected group of baselines has an odd loop; see
+`_split_free_amplitudes!` for a group without one) and biasing every other
+station through the inconsistency.
 """
 function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     T = real(eltype(first(gains).g))

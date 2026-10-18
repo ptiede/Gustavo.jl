@@ -31,6 +31,7 @@ using Statistics: median, mean
 using LinearAlgebra
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nnz, nzrange, nonzeros, rowvals, CHOLMOD
 import ForwardDiff
+import Graphs
 using StaticArrays: SMatrix, SVector
 
 include("Fring/search.jl")

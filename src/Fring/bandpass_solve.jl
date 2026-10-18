@@ -274,9 +274,11 @@ function solve_joint_bandpass!(
     nslots = length(slot)
     pinned = [gains[k].pinned[I] for (k, I) in slot]
     hasdata = falses(nslots)
+    measured = falses(length(jl.slot_pairs))
     for I in CartesianIndices(jl.edge)
         e = jl.edge[I]
         (iszero(e) || !(w[I] > 0)) && continue
+        measured[e] = true
         foreach(n -> hasdata[n] = true, jl.slot_pairs[e])
     end
     any(hasdata) || throw(ArgumentError("solve_joint_bandpass!: no gain slot has data to fit."))
@@ -429,6 +431,18 @@ function solve_joint_bandpass!(
         decrease < tolerance^2 / 2 && hypers_fit && (converged = true; break)
         near = change < tolerance
     end
+    free_amp = fitted.amp ? _split_free_amplitudes!(ℓ, jl.slot_pairs[measured], free.amp, tracks.amp) : NamedTuple[]
+    if !isempty(free_amp)
+        g = first(free_amp)
+        names = unique(geom.stations[findfirst(==((slot[n][1], slot[n][2][1])), loc)] for n in g.slots)
+        @warn "the joint bandpass data leave $(sum(x -> x.ndir, free_amp)) frequency-dependent " *
+            "log-amplitude directions undetermined in $(length(free_amp)) groups of gain slots, e.g. " *
+            "stations $(join(sort!(names), ", "))$(_slot_description(geom, loc, slot[first(g.slots)]...)): " *
+            "each group is joined only by baselines with no odd loop (two stations, a chain or an even " *
+            "ring), which measure the sum of two sides' log-amplitudes but not how it divides between " *
+            "them, and the amplitude prior, if any, does not fix it. The solve splits each group evenly " *
+            "(the minimum-norm solution)."
+    end
     location = iszero(worst) ? "" : _slot_description(geom, loc, slot[worst]...)
     stalled && @warn "the joint bandpass solve stopped at a step that could not lower its MAP " *
         "objective at any damping; that step would have moved a gain by $change of its standard " *
@@ -491,6 +505,102 @@ function solve_joint_bandpass!(
     ]
     _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers)
     return (; phase = results[1], amp = results[2])
+end
+
+# The log-amplitude directions neither the data nor the priors determine,
+# beyond each track's band constant (which the per-scan source term absorbs and
+# the write-out gauges), with `ℓ` moved to the minimum-norm point along them.
+# They are the shifts `δ` with `δ_a + δ_b = 0` on every measured baseline, the
+# data measuring only `ℓ_a + ℓ_b`, and, on each piece a prior acts on, `δ` in the
+# prior's null space (`_prior_projectors`). Only a connected group of measured
+# slots with no odd loop (two stations, a chain, an even ring) is bipartite and
+# can shift, its two sides oppositely, besides the slots only a prior fills.
+# Returns, per cluster of slots that kept free directions, its slots and how many
+# it kept.
+function _split_free_amplitudes!(ℓ, data_pairs, movable, tracks)
+    groups = @NamedTuple{slots::Vector{Int}, ndir::Int}[]
+    measured = Graphs.SimpleGraph(length(ℓ))
+    for (a, b) in data_pairs
+        movable[a] && movable[b] && Graphs.add_edge!(measured, a, b)
+    end
+    free = movable .& iszero.(Graphs.degree(measured))
+    any_bipartite = false
+    for c in Graphs.connected_components(measured)
+        length(c) > 1 && Graphs.is_bipartite(first(Graphs.induced_subgraph(measured, c))) || continue
+        free[c] .= true
+        any_bipartite = true
+    end
+    any_bipartite || return groups
+
+    # Clusters: free slots linked by a measured baseline or a shared track.
+    track_slots = [[s for s in t.slots if movable[s]] for t in tracks]
+    track_of = Dict{Int, Int}()
+    links = copy(measured)
+    for (ti, ts) in pairs(track_slots)
+        foreach(s -> track_of[s] = ti, ts)
+        fs = filter(s -> free[s], ts)
+        foreach(s -> s == first(fs) || Graphs.add_edge!(links, first(fs), s), fs)
+    end
+    projectors = Dict{Int, Vector{Tuple{Vector{Int}, Matrix{Float64}}}}()
+    for c in Graphs.connected_components(links)
+        free[first(c)] && any(s -> Graphs.degree(measured, s) > 0, c) || continue
+        at = Dict(s => i for (i, s) in pairs(c))
+        rows = Vector{Float64}[]
+        for s in c, b in Graphs.neighbors(measured, s)
+            b > s || continue
+            row = zeros(length(c))
+            row[at[s]] = row[at[b]] = 1
+            push!(rows, row)
+        end
+        touched = unique(track_of[s] for s in c)
+        for ti in touched, (slots, R) in get!(() -> _prior_projectors(tracks[ti]), projectors, ti), i in axes(R, 1)
+            row = zeros(length(c))
+            for (j, s) in pairs(slots)
+                haskey(at, s) && (row[at[s]] = R[i, j])
+            end
+            any(!iszero, row) && push!(rows, row)
+        end
+        N = nullspace(permutedims(reduce(hcat, rows)))
+        ext = unique([c; reduce(vcat, track_slots[touched])])
+        pos = Dict(s => i for (i, s) in pairs(ext))
+        M = zeros(length(ext), size(N, 2) + length(touched))
+        M[axes(c, 1), axes(N, 2)] .= N
+        for (i, ti) in pairs(touched), s in track_slots[ti]
+            M[pos[s], size(N, 2) + i] = 1
+        end
+        F = svd(M)
+        r = count(>(first(F.S) * length(ext) * eps()), F.S)
+        Q = F.U[:, 1:r]
+        ℓ[ext] .-= Q * (Q' * ℓ[ext])
+        r > length(touched) && push!(groups, (; slots = sort(c), ndir = r - length(touched)))
+    end
+    return groups
+end
+
+# The constraints track `t`'s prior puts on a shift `δ` of its slots: per piece the
+# prior acts on, or per level group for a proper prior, its slots and the
+# projector `R = I − B·B⁺` off the null space `B` of the prior there, so that
+# `R·δ = 0`. A proper prior is profiled over its level group's constant; a
+# flat-start walk is unchanged by a polynomial of degree below its order.
+function _prior_projectors(t)
+    out = Tuple{Vector{Int}, Matrix{Float64}}[]
+    active = [(j, p) for (j, p) in pairs(t.pieces) if t.active[j]]
+    if _proper_prior(t.prior)
+        for g in unique(_level_group(t, t.prior, j) for (j, _) in active)
+            slots = reduce(vcat, [t.slots[p] for (j, p) in active if _level_group(t, t.prior, j) == g])
+            push!(out, (slots, I - fill(1 / length(slots), length(slots), length(slots))))
+        end
+    else
+        for (_, p) in active
+            u, _ = _piece_coordinates(t.prior, t.x[p])
+            v = u .- first(u)
+            scale = maximum(abs, v)
+            iszero(scale) || (v ./= scale)
+            B = [x^k for x in v, k in 0:(_statedim(t.prior) - 1)]
+            push!(out, (t.slots[p], I - B * pinv(B)))
+        end
+    end
+    return out
 end
 
 # Record a joint solve's track fits (`solve_joint_bandpass!`) into one array per
