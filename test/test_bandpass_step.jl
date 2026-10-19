@@ -616,13 +616,13 @@ end
     @test only(priors).σ ≈ FP._estimate_hypers(rw, [y], [w], [xf]).σ rtol = 1.0e-3
 
     # A carried-over curvature far too flat for a start 10⁻⁴ below the maximum:
-    # steps of at most a factor of 10 reach the same maximum.
+    # the line search's sufficient increase keeps the first step from overshooting,
+    # and the fit reaches the same maximum.
     σ̂ = only(priors).σ
     priors = Any[walk(1.0e-4 * σ̂)]
     stale = Any[(; inverse = fill(1.0e6, 1, 1), measured = true)]
     fit = FP._fit_hypers!(priors, stale, sys, [t], 0.0; tolerance = 1.0e-4, max_iterations = 50)
     @test fit.converged
-    @test fit.steps >= 4
     @test only(priors).σ ≈ σ̂ rtol = 1.0e-3
 
     # An OU prior, both hyperparameters, its band constant integrated out.

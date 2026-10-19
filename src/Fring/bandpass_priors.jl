@@ -675,8 +675,8 @@ covariances `_selected_inverse` gives.
 
 The search is quasi-Newton with one secant (BFGS) block per track, started from
 the curvature of that expected log density and kept in `curvature` from call to
-call, each track's step shortened to change no hyperparameter by more than a
-factor of 10 and backtracked until the log posterior is no lower. It stops once
+call, and backtracked until the log posterior rises by at least `10⁻⁴` of the
+increase its slope promises (Armijo). It stops once
 the Newton step is within `tolerance` of its standard error, `gᵀH⁻¹g ≤
 tolerance²`, by every track's curvature measured along a step of its own, and
 returns whether it did within `max_iterations` steps and how many steps it took.
@@ -753,17 +753,21 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
             converged = true
             break
         end
-        # At most a factor of 10 per step: the curvature carried over from the last
-        # call may not fit this linearization, and a no-worse step can overshoot far.
-        d = map(v -> v .* min(1, log(10) / maximum(abs, v)), Hinv .* g)
+        d = Hinv .* g
+        gd = sum(dot.(g, d))
         α = 1.0
         next = nothing
         while true
             θ1 = θ .+ α .* d
             all(map(_within_rounding, θ1, θ)) && break
+            # Hyperparameters beyond the floating-point range are no candidate.
+            all(v -> 0 < exp(v) < Inf, Iterators.flatten(θ1)) || (α /= 2; continue)
             trial = evaluate(θ1, 3 - cur)
+            # Armijo: the step must raise the log posterior by a share of what its
+            # slope promises, so a curvature carried over from the last call that
+            # does not fit this linearization cannot carry it far onto a plateau.
             # The log posterior is known to its rounding.
-            trial.lp >= at.lp - 16 * eps(abs(at.lp)) && (next = (θ1, trial); break)
+            trial.lp >= at.lp + 1.0e-4 * α * gd - 16 * eps(abs(at.lp)) && (next = (θ1, trial); break)
             α /= 2
         end
         # No step changes the hyperparameters: they are at the maximum to rounding.
