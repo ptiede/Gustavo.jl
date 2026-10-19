@@ -878,20 +878,6 @@ function _undetermined_slots(tracks, acting, priors, y, wy, max_slip)
     return out
 end
 
-# `_choose_branches!`, undone unless it leaves track `t`'s prior energy no
-# higher (`tl` is its `_track_layout`). A shift leaves every gain unchanged, so
-# this keeps the branch choice a descent move of the posterior.
-function _choose_descending_branches!(φ, tl, t, prior, y, wy, free; slip = nothing)
-    e0 = first(_track_energy(tl, prior, φ))
-    before = φ[t.slots]
-    shift = _choose_branches!(φ, t, prior, y, wy, free; slip)
-    if any(!iszero, shift) && first(_track_energy(tl, prior, φ)) > e0
-        φ[t.slots] .= before
-        fill!(shift, 0.0)
-    end
-    return shift
-end
-
 # Move each gauge row's right-hand side by the branch shifts of its slots, so
 # the constraint still holds on the gains after a change of branch.
 function _shift_gauge!(gauge, shift)

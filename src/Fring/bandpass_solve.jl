@@ -188,8 +188,7 @@ profiled over that constant as well. Each iteration:
    gains, with `S` held;
 2. moves each phase slot to the 2π branch nearest the track fitted to the most
    probable branches of every slot's own estimate given all the other gains and
-   `S` (`_choose_branches!`), keeping a track's new branches only if they do not
-   raise its prior energy;
+   `S` (`_choose_branches!`);
 3. fits the hyperparameters given as densities, all tracks together, by type-II
    MAP on the marginal likelihood of the linearized posterior (`_fit_hypers!`),
    as closely as the last step moved the gains; an observable whose last fit
@@ -377,9 +376,7 @@ function solve_joint_bandpass!(
         if fitted.phase
             y, wy = _slot_estimates(φ, lin, :phase)
             for (j, i) in pairs(acting.phase)
-                shift = _choose_descending_branches!(
-                    φ, track_layouts.phase[i], tracks.phase[i], priors.phase[j], y, wy, free.phase; slip = slips[i],
-                )
+                shift = _choose_branches!(φ, tracks.phase[i], priors.phase[j], y, wy, free.phase; slip = slips[i])
                 isnothing(gauge_rows) || _shift_gauge!(gauge_rows, shift)
                 any(!iszero, shift) && delete!(settled, :phase)
             end
