@@ -561,6 +561,90 @@ _hyper_chunk(spec) = ForwardDiff.Chunk{_hyper_count(spec)}()
 _hyper_gradient(f, lθ, spec) = ForwardDiff.gradient(f, lθ, ForwardDiff.GradientConfig(f, lθ, _hyper_chunk(spec)))
 _hyper_hessian(f, lθ, spec) = ForwardDiff.hessian(f, lθ, ForwardDiff.HessianConfig(f, lθ, _hyper_chunk(spec)))
 
+# The unknowns of `sys`'s reduced system (`_reduce!`) that its priors leave free
+# — the flat starts, the levels, the slots no prior acts on — one per free
+# direction, so that its prior quadratic with them held at zero is positive
+# definite: the trailing columns of a rank-revealing QR of the priors' state
+# equations `s_k − A_k·s_{k−1}` (and proper starts), unweighted, over those
+# unknowns. Those directions do not depend on the hyperparameters, so neither
+# does the choice; returns the other unknowns.
+function _prior_determined_unknowns(sys, priors)
+    lay = sys.layout
+    Is, Js, Vs = Int[], Int[], Float64[]
+    row = 0
+    for (ts, prior) in zip(lay.terms, priors), t in ts
+        row = _with_piece_models(prior, t.dim, Float64) do model
+            m = model(t.h)
+            D = statedim(m)
+            r = row
+            if !isnothing(initial(m, Float64))
+                for (q, j, a) in t.start.entries
+                    push!(Is, r + q); push!(Js, j); push!(Vs, a)
+                end
+                r += D
+            end
+            for (k, term) in pairs(t.steps)
+                A, _ = transition(m, t.u[k + 1] - t.u[k], Float64)
+                G = hcat(SMatrix{D, D, Float64}(I), -A)
+                for d in 1:D, (q, j, a) in term.entries
+                    iszero(G[d, q]) || (push!(Is, r + d); push!(Js, j); push!(Vs, G[d, q] * a))
+                end
+                r += D
+            end
+            r
+        end
+    end
+    M = sparse(Is, Js, Vs, row, size(lay.K, 1))
+    isnothing(sys.gauge) || (M = M * sys.gauge.T)
+    F = qr(M)
+    return sort!(F.pcol[1:rank(F)])
+end
+
+# The prior quadratic of `sys` alone over the unknowns `rest`
+# (`_prior_determined_unknowns`), for `_conditional_prior_normalization`: its
+# pattern, the positions in the reduced system's stored values of its own, and
+# buffers, with two factorizations as `_fit_hypers!` alternates them.
+function _conditional_prior_layout(sys, rest)
+    K = isnothing(sys.reduction) ? sys.layout.K : sys.reduction.K
+    numbered = SparseMatrixCSC(size(K)..., K.colptr, rowvals(K), collect(1.0:nnz(K)))[rest, rest]
+    sel = Int.(nonzeros(numbered))
+    fill!(nonzeros(numbered), 0.0)
+    return (;
+        K = numbered, sel, rest, prior = copy(sys.layout.K), Kt0 = zeros(size(sys.layout.K, 1)),
+        key = sys.key[rest], factors = Union{Nothing, CHOLMOD.Factor{Float64, Int}}[nothing, nothing],
+    )
+end
+
+# The log normalization `log ∫ exp(−E(u)) du` of the prior quadratic of `sys`
+# alone, conditioned on all `sys` holds fixed (its fixed slots and its gauge),
+# up to a constant independent of the hyperparameters: over the unknowns of `cp`
+# (`_conditional_prior_layout`), the prior being flat along the rest. Reads the
+# quadratic `_assemble!` last wrote, whose constant is `c`, and factors into
+# `cp`'s factorization `slot`. Returns `-Inf` where the prior's curvature is lost
+# to rounding, with the factorization and the minimizing unknowns.
+function _conditional_prior_normalization(sys, c, cp, slot)
+    lay = sys.layout
+    v = nonzeros(cp.prior)
+    v .= nonzeros(lay.K) .- lay.base
+    h = lay.h .- lay.h0
+    c -= lay.c0
+    if !isnothing(sys.gauge)
+        (; Tt, t0) = sys.gauge
+        mul!(cp.Kt0, cp.prior, t0)
+        c += dot(t0, cp.Kt0) / 2 - dot(h, t0)
+        h = Tt * (h .- cp.Kt0)
+        v = sys.reduction.map * v
+    end
+    nonzeros(cp.K) .= view(v, cp.sel)
+    F = cp.factors[slot]
+    F = isnothing(F) ? _factor(cp.K, cp.key; check = false) : cholesky!(F, Symmetric(cp.K); check = false)
+    cp.factors[slot] = F
+    hr = h[cp.rest]
+    issuccess(F) || return (; lz = -Inf, F, u = hr)
+    u = F \ hr
+    return (; lz = dot(hr, u) / 2 - c - logdet(F) / 2, F, u)
+end
+
 # The inverse of a symmetric curvature, its eigenvalues taken in magnitude.
 function _inverse_curvature(C)
     E = eigen(Symmetric(C))
@@ -574,15 +658,20 @@ Type-II MAP of the hyperparameters `tracks`' priors give as densities, written
 into `priors` (each track's resolved prior, the current values on entry): the
 maximum over their logs of the hyperprior density times the Laplace
 approximation of the marginal likelihood of the system `sys`
-(`_posterior_system`, damped by `λ`). That quadratic is Gaussian in its
-unknowns, so the marginal is exact for it:
+(`_posterior_system`, damped by `λ`), under the prior conditioned on all the
+system holds fixed — its fixed slots and its gauge — and normalized there. That
+quadratic is Gaussian in its unknowns, so the marginal is exact for it:
 
-    log p(data | θ) = −min_u f_θ(u) − ½·log det ∇²f_θ + Σ_k log N-normalization of each prior term,
+    log p(data | θ) = −min_u f_θ(u) − ½·log det ∇²f_θ − log ∫ exp(−E_θ(u)) du,
 
-the levels and flat starts integrated under their flat priors. Its gradient in
-a track's hyperparameters is that of the track's prior log density in
-expectation over the posterior of its states (Fisher's identity), whose moments
-need only the covariances `_selected_inverse` gives.
+with `E_θ` the prior part of `f_θ`, the last term from
+`_conditional_prior_normalization`, the levels and flat starts integrated under
+their flat priors. Without that normalization the prior density of the fixed
+values, the gauge's among them, would rise without bound as the priors stiffen.
+Its gradient in a track's hyperparameters is that of the track's prior log
+density in expectation over the posterior of its states, less the same under
+the conditioned prior (Fisher's identity), whose moments need only the
+covariances `_selected_inverse` gives.
 
 The search is quasi-Newton with one secant (BFGS) block per track, started from
 the curvature of that expected log density and kept in `curvature` from call to
@@ -597,6 +686,8 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
     isempty(est) && return (; converged = true, steps = 0)
     specs = [tracks[i].prior for i in est]
     θ = [_log_hypers(tracks[i].prior, priors[i]) for i in est]
+    rest = _prior_determined_unknowns(sys, priors)
+    cp = _conditional_prior_layout(sys, rest)
     # Each evaluation factors into one of two factorizations, the accepted point's
     # kept while a trial point uses the other.
     function evaluate(θ, slot)
@@ -604,36 +695,55 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
         for (k, i) in pairs(est)
             trial[i] = _with_log_hypers(tracks[i].prior, θ[k])
         end
-        K, h, c = _reduce!(sys, _assemble!(sys.layout, trial), λ)
+        c = _assemble!(sys.layout, trial)
+        prior = _conditional_prior_normalization(sys, c, cp, slot)
+        K, h, c = _reduce!(sys, c, λ)
         F = _refactor!(sys, slot, K; check = false)
         # Hyperparameters so extreme that the posterior's curvature is lost to
         # rounding are no candidate.
-        issuccess(F) || return (; lp = -Inf, F, u = h, trial)
+        (issuccess(F) && isfinite(prior.lz)) || return (; lp = -Inf, F, u = h, prior, trial)
         u = F \ h
-        lp = dot(h, u) / 2 - c - logdet(F) / 2
-        lp += sum(_expected_log_prior(p, ch, nothing, Float64) for (p, ch) in zip(trial, sys.chains); init = 0.0)
+        lp = dot(h, u) / 2 - c - logdet(F) / 2 - prior.lz
         lp += sum(_log_hyperprior(tracks[i].prior, θ[k]) for (k, i) in pairs(est))
-        return (; lp, F, u, trial)
+        return (; lp, F, u, prior, trial)
     end
-    # Each track's expected log prior density and hyperprior, as a function of
-    # its log hyperparameters.
-    function expected(at)
-        cov = _covariance(_selected_inverse(at.F), sys.gauge)
-        z = _unreduced(sys, at.u)
-        moms = [_chain_moments(sys.chains[i], z, cov, first(sys.chains[i]).dim) for i in est]
+    # Each track's moments under the posterior and under the conditioned prior
+    # at `at`, the latter with the free unknowns held at zero, where the prior's
+    # gradient in the hyperparameters is the same.
+    pos = zeros(Int, isnothing(sys.gauge) ? size(sys.layout.K, 1) : size(sys.gauge.T, 2))
+    pos[rest] = eachindex(rest)
+    function moments(at)
+        post = _covariance(_selected_inverse(at.F), sys.gauge)
+        S = _selected_inverse(at.prior.F)
+        cond = _covariance((a, b) -> iszero(pos[a]) || iszero(pos[b]) ? 0.0 : S(pos[a], pos[b]), sys.gauge)
+        u = zeros(length(pos))
+        u[rest] = at.prior.u
+        zp, zc = _unreduced(sys, at.u), _unreduced(sys, u)
         return [
-            lθ -> _expected_log_prior(_with_log_hypers(tracks[i].prior, lθ), sys.chains[i], moms[k], eltype(lθ)) +
-                _log_hyperprior(tracks[i].prior, lθ)
-                for (k, i) in pairs(est)
+            (
+                _chain_moments(sys.chains[i], zp, post, first(sys.chains[i]).dim),
+                _chain_moments(sys.chains[i], zc, cond, first(sys.chains[i]).dim),
+            ) for i in est
         ]
+    end
+    # Each track's term of the log posterior's gradient, as a function of its
+    # log hyperparameters, and its posterior expected log prior density, whose
+    # curvature starts the search.
+    function expected(at)
+        moms = moments(at)
+        elp(k, lθ, m) = _expected_log_prior(_with_log_hypers(tracks[est[k]].prior, lθ), sys.chains[est[k]], m, eltype(lθ))
+        return [
+            lθ -> elp(k, lθ, moms[k][1]) - elp(k, lθ, moms[k][2]) + _log_hyperprior(tracks[est[k]].prior, lθ)
+                for k in eachindex(est)
+        ], [lθ -> elp(k, lθ, moms[k][1]) + _log_hyperprior(tracks[est[k]].prior, lθ) for k in eachindex(est)]
     end
     cur = 1
     at = evaluate(θ, cur)
     isfinite(at.lp) || throw(PosDefException(0))
-    fs = expected(at)
+    fs, posterior = expected(at)
     for (k, i) in pairs(est)
         isnothing(curvature[i]) &&
-            (curvature[i] = (; inverse = _inverse_curvature(-_hyper_hessian(fs[k], θ[k], specs[k])), measured = false))
+            (curvature[i] = (; inverse = _inverse_curvature(-_hyper_hessian(posterior[k], θ[k], specs[k])), measured = false))
     end
     g = map(_hyper_gradient, fs, θ, specs)
     converged, steps = false, 0
@@ -661,7 +771,7 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
         θ1, at = next
         steps += 1
         cur = 3 - cur
-        fs = expected(at)
+        fs, _ = expected(at)
         g1 = map(_hyper_gradient, fs, θ1, specs)
         for (k, i) in pairs(est)
             s, y = θ1[k] - θ[k], g[k] - g1[k]

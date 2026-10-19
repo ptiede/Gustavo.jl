@@ -1173,6 +1173,24 @@ end
 
 # ── One observable ──────────────────────────────────────────────────────────
 
+@testset "JointSmoother: a pinned track's hyperparameters are fit like the others" begin
+    # A pin holds the reference's track fixed; the hyperparameters' marginal
+    # likelihood is that of the prior conditioned on the pin, so the pinned
+    # track's prior is not driven to zero width.
+    nant, nspw, nchan, ntime, nscans = 4, 2, 16, 6, 3
+    rng = MersenneTwister(0xDEC1)
+    bp_true = cumsum(cumsum(0.02 .* randn(rng, nant, 2, nspw * nchan); dims = 3); dims = 3)
+    ps, _ = _build_fringe_ps(; nant, nspw, nchan, ntime, nscans, antenna_gains = false, bandpass = bp_true, noise = 0.3, seed = 31)
+    unit = sqrt(3 / (2 * 2.0e6^3))
+    bpc = GainComponent(
+        ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(),
+        prior = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(0.05 * unit), 1.0)),
+    )
+    sol = fit(Bandpass(; model = CAL.GainModel(; phase = (; bandpass = bpc)), gauge = PinAntenna(1)), ps)
+    lσ = log.(map(p -> p.σ, parent(sol.info.phase_priors)[:, :, 1]))
+    @test abs(lσ[1, 1] - median(lσ[2:end, :])) < 1.5
+end
+
 @testset "JointSmoother: a piece whose phase branches the data do not determine is declined" begin
     nant, nspw, nchan, ntime, nscans = 4, 2, 16, 6, 3
     rng = MersenneTwister(0xDEC1)

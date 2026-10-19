@@ -522,27 +522,44 @@ states and levels), so for it the Laplace approximation (Tierney & Kadane
 
 ```math
 \log p(\text{data} \mid \theta) = -\min_u f_\theta(u) - \tfrac12 \log\det \nabla^2 f_\theta
-  - \tfrac12 \sum_k \log\det(2\pi Q_k) - \tfrac12 \log\det(2\pi P_0) + \text{const},
+  - \log \int e^{-E_\theta(u)}\, du + \text{const},
 ```
 
-with ``f_\theta`` the step's objective, the sums over the prior terms of the
-previous section, and the levels and flat starts integrated under their flat
-priors. One sparse factorization gives the minimum and the determinant. For a
-single track whose slots are measured independently, this is the restricted
-Kalman marginal of [The marginal likelihood](@ref).
+with ``f_\theta`` the step's objective, ``E_\theta`` its prior part (the
+energy of the prior terms of the previous section), and the levels and flat
+starts integrated under their flat priors. The unknowns ``u`` are those the
+step leaves free: the gauge's constraints are solved for one slot each, and
+slots without data curvature are held at their values. The prior is therefore
+conditioned on those values, and the last term normalizes it there; where
+nothing is held, it equals the prior terms' own normalization,
+``\tfrac12 \sum_k \log\det(2\pi Q_k) + \tfrac12 \log\det(2\pi P_0)``.
+Without it the marginal likelihood would carry the prior density of the held
+values, the gauge's among them, which grows without bound as the priors
+stiffen: under a pin it drives the pinned track's prior to zero width. The
+prior is flat along the directions the flat starts and levels leave free, so
+the integral is taken over the others, which a rank-revealing QR of the prior's
+state equations picks once per step. Two sparse factorizations, of
+``\nabla^2 f_\theta`` and of the prior part alone, give the minima and the
+determinants. For a single track whose slots are measured independently, this
+is the restricted Kalman marginal of [The marginal likelihood](@ref).
 
 All tracks' hyperparameters are fit together, because the data couple the
 stations. The gradient in one track's hyperparameters is that of its prior's
-log density in expectation over the posterior of its states (Louis 1982):
+log density in expectation over the posterior of its states, less the same
+expectation under the conditioned prior (Louis 1982):
 
 ```math
 \partial_\theta \log p(\text{data} \mid \theta) = \mathrm{E}\big[\partial_\theta \log p(u \mid \theta)\big]
-= \partial_\theta \sum_k \Big(-\tfrac12 \log\det(2\pi Q_k)
-  - \tfrac12 \operatorname{tr}\big(Q_k^{-1} G_k\, \mathrm{E}[v_k v_k^\top]\, G_k^\top\big)\Big),
+  - \mathrm{E}_0\big[\partial_\theta \log p(u \mid \theta)\big],
+\qquad
+\partial_\theta \log p(u \mid \theta) = \partial_\theta \sum_k \Big(-\tfrac12 \log\det(2\pi Q_k)
+  - \tfrac12 \operatorname{tr}\big(Q_k^{-1} G_k\, v_k v_k^\top\, G_k^\top\big)\Big),
 ```
 
-where ``v_k = (s_k, s_{k-1})`` and ``G_k = [I, -A_k]``. The second moments need
-only the posterior covariances of unknowns that share a term. Those lie on the
+where ``v_k = (s_k, s_{k-1})``, ``G_k = [I, -A_k]``, and ``\mathrm{E}_0`` is
+over the prior conditioned as above (the normalization terms cancel between the
+two). The second moments need only the covariances of unknowns that share a
+term. Those lie on the
 sparsity pattern of the Cholesky factor, whose entries of the inverse the
 recursion of Takahashi, Fagan & Chen (1973) gives without forming the rest. The
 search is quasi-Newton (BFGS; Nocedal & Wright 2006) with one block per track,
