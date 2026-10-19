@@ -185,9 +185,10 @@ profiled over that constant as well. Each iteration:
 
 1. linearizes the χ² in every slot's log-amplitude and phase about the current
    gains, with `S` held;
-2. puts each phase spectral window on its most probable 2π branches, from every
-   slot's own estimate given all the other gains and `S` (`_choose_branches!`),
-   keeping a track's new branches only if they do not raise its prior energy;
+2. moves each phase slot to the 2π branch nearest the track fitted to the most
+   probable branches of every slot's own estimate given all the other gains and
+   `S` (`_choose_branches!`), keeping a track's new branches only if they do not
+   raise its prior energy;
 3. fits the hyperparameters given as densities, all tracks together, by type-II
    MAP on the marginal likelihood of the linearized posterior (`_fit_hypers!`),
    as closely as the last step moved the gains; an observable whose last fit

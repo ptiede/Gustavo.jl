@@ -707,32 +707,49 @@ end
 
 # Put phase track `t` on the branches `_branch_filter` finds most probable for its
 # slot estimates `y` under the resolved `prior`: each free slot of `φ` moves by the
-# multiple of 2π its estimate moves, which leaves its gain unchanged. A piece's
-# branches are first moved together by the multiple of 2π nearest its estimates,
-# and the pieces sharing a level group onto one branch. Writes each piece's
-# `_slip_probability` into `slip` and returns the per-slot shifts (radians).
+# multiple of 2π that brings it nearest the track fitted to those branches, which
+# leaves its gain unchanged. The fitted track, not the slot's own estimate, sets
+# the branch: a slot whose data barely constrain it can have an estimate π from
+# the track while its value lies on the track. A piece's branches are first moved
+# together by the multiple of 2π nearest its estimates, and the pieces sharing a
+# level group onto one branch. Writes each piece's `_slip_probability` into
+# `slip` and returns the per-slot shifts (radians).
 function _choose_branches!(φ, t, prior, y, wy, free; slip = nothing)
     groups = _level_groups(t, prior)
+    level = !isnothing(groups)
     ys = [y[t.slots[p]] for p in t.pieces]
     ws = [wy[t.slots[p]] for p in t.pieces]
-    lifts = map(eachindex(t.pieces)) do j
-        p = t.pieces[j]
-        model, θ, r, u = _filter_inputs(prior, ys[j], ws[j], float.(t.x[p]))
-        any(isfinite, θ) || return θ
-        bf = _branch_filter(model, θ, r, u; level = !isnothing(groups))
-        isnothing(slip) || (slip[j] = _slip_probability(model, bf.histories, r, u; level = !isnothing(groups)))
+    inputs = map(eachindex(t.pieces)) do j
+        model, θ, r, u = _filter_inputs(prior, ys[j], ws[j], float.(t.x[t.pieces[j]]))
+        any(isfinite, θ) || return nothing
+        bf = _branch_filter(model, θ, r, u; level)
+        isnothing(slip) || (slip[j] = _slip_probability(model, bf.histories, r, u; level))
         lift = first(bf.histories).lift
-        return lift .+ 2π * round(_weighted_mean_finite(θ .- lift, ws[j]) / 2π)
+        return (; model, r, u, lift = lift .+ 2π * round(_weighted_mean_finite(θ .- lift, ws[j]) / 2π))
     end
-    isnothing(groups) || _align_branches!(lifts, ws, groups)
+    lifts = [isnothing(v) ? ys[j] : v.lift for (j, v) in pairs(inputs)]
+    level && _align_branches!(lifts, ws, groups)
     shift = zeros(length(φ))
-    for (j, p) in pairs(t.pieces), (i, k) in pairs(p)
-        n = t.slots[k]
-        (free[n] && isfinite(lifts[j][i])) || continue
-        shift[n] = 2π * round((lifts[j][i] - ys[j][i]) / 2π)
-        φ[n] += shift[n]
+    for (j, p) in pairs(t.pieces)
+        isnothing(inputs[j]) && continue
+        (; model, r, u) = inputs[j]
+        fitted = _fitted_track(model, lifts[j], r, u; level)
+        for (i, k) in pairs(p)
+            n = t.slots[k]
+            (free[n] && isfinite(fitted[i])) || continue
+            shift[n] = 2π * round((fitted[i] - φ[n]) / 2π)
+            φ[n] += shift[n]
+        end
     end
     return shift
+end
+
+# The track `smooth_track` fits to `y` under `model`; with `level`, the track's
+# estimated level plus the smoothed remainder.
+function _fitted_track(model, y, r, x; level::Bool)
+    level || return smooth_track(model, y, r, x)
+    _, b, c = _level_sums(model, y, r, x)
+    return b / c .+ smooth_track(model, y .- b / c, r, x)
 end
 
 # `_choose_branches!`, undone unless it leaves track `t`'s prior energy no

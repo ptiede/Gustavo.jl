@@ -426,6 +426,37 @@ function _fit_one_track(y, w, x, pieces, prior; level = nothing, nlevel = 0, pha
     return (; values, status, prior = only(priors), levels = any(t.active) ? only(levels) : Dict{Int, Float64}(), slip)
 end
 
+@testset "Bandpass: a slot takes the branch nearest the fitted track" begin
+    n = 128
+    pieces = [1:n]
+    x = collect(range(8.6e10, 8.6e10 + 6.4e7; length = n))
+    prior = CAL.RandomWalkPrior(; order = 2, σ = 0.01 * sqrt(3 / (2 * (x[2] - x[1])^3)))
+    known = trues(n)
+    fits = [(; phase = (; x, pieces, prior, level = nothing, nlevel = 0))]
+    t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:n, 1, 1, n, 1)], [(1, 1)], [[1]], 1, known))
+
+    # A stiff track; slot k barely measured, its value 0.2 off the track and its
+    # estimate π + 0.1 from the track, so the estimate's most probable branch is
+    # one turn below it while the value already sits on the track's branch.
+    track = collect(0.02 .* (1:n))
+    k = 70
+    φ = copy(track)
+    φ[k] += 0.2
+    y = copy(φ)
+    y[k] = φ[k] + π - 0.1
+    w = fill(1.0e4, n)
+    w[k] = 0.3
+    @test all(iszero, FP._choose_branches!(φ, t, prior, y, w, known))
+    @test φ[k] == track[k] + 0.2
+
+    # A well-measured track left wrapped is unwrapped onto the fitted track.
+    steep = collect(0.5 .* (1:n))
+    wrapped = rem2pi.(steep, RoundNearest)
+    φ = copy(wrapped)
+    FP._choose_branches!(φ, t, prior, wrapped, fill(1.0e4, n), known)
+    @test φ .- φ[1] ≈ steep .- steep[1]
+end
+
 @testset "Bandpass: a branch choice that raises the prior energy is undone" begin
     nband, nchan = 2, 64
     n = nband * nchan
