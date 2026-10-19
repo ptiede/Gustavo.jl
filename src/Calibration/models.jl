@@ -285,29 +285,7 @@ _leaf_paths(_, prefix::Tuple = ()) = Tuple[prefix]
 phase_components(m::GainModel) = _flatten_components(m.phase)
 logamp_components(m::GainModel) = _flatten_components(m.logamp)
 
-# ── Model elements ───────────────────────────────────────────────────────────
-
-"""
-    model_components(element, spec) -> GainComponent | NamedTuple | Nothing
-
-Compile one model element — a component whose form depends on the data — for
-an observation. `spec = (; geom, antennas)`
-carries the `DataGeometry` and the antenna table (the same spec a pipeline
-step's `model_components` receives). The caller names the result, so an
-element returns only its own internal structure:
-
-- a single [`GainComponent`](@ref), named by the caller's key (`θ.phase.<key>`);
-- a `NamedTuple` of `GainComponent`s — one element that compiles to several
-  components, nested under the caller's key (`θ.phase.<key>.<part>`);
-- `nothing` — the geometry cannot constrain the element, so it contributes no
-  component (and no key).
-
-A bare `GainComponent` compiles to itself; wrapper elements consult
-`spec.geom`.
-"""
 function model_components end
-
-model_components(e::GainComponent, spec) = e
 
 # ── Per-component / per-model time-segmentation queries ─────────────────────────
 # Used by solvers to route global-time vs per-scan components.

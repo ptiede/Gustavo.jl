@@ -288,10 +288,6 @@ end
             (CAL.Rate, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
         ]
 
-        # A bare GainComponent compiles to itself.
-        tc = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SingleFeed(2))
-        @test CAL.model_components(tc, (; geom)) === tc
-
         # Exact duplicate components are rejected by message.
         dup = merge(
             default_fringe_terms();
@@ -357,16 +353,15 @@ end
         norate = GainModel(; phase = Base.structdiff(default_fringe_terms().phase, (; rate = nothing)))
         @test_throws "requires a rate component" fit(BaselineFringeFit(; model = norate, gauge = PinAntenna(1)), ps)
 
-        # The kind is PRESENT and the router signature is not: the inter-feed delay is
-        # still a `:delay`, so only a signature-level check catches a wideband
-        # delay tied across the whole track.
+    end
+
+    @testset "per-scan station solutions need a per-scan feed-common delay" begin
         globaldelay = map(default_fringe_terms().phase) do t
             FP._is_perscan_delay(t) ?
                 CAL.GainComponent(t.term; Ti = CAL.GlobalTime(), Frequency = t.Frequency, Feed = t.Feed) : t
         end
-        @test_throws "requires a per-scan feed-common wideband delay" fit(
-            BaselineFringeFit(; model = GainModel(; phase = globaldelay), gauge = PinAntenna(1)), ps,
-        )
+        sol = fit(BaselineFringeFit(; model = GainModel(; phase = globaldelay), gauge = PinAntenna(1)), ps)
+        @test_throws "no per-scan (feed-common) delay component" FP.fringe_station_solutions(sol)
     end
 
     @testset "a time segmentation finer than a scan is rejected, not half-solved" begin

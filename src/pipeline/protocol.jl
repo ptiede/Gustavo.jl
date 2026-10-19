@@ -21,10 +21,6 @@ abstract type SolveStep end
 The [`GainModel`](@ref) `step` solves. `spec = (; geom)` carries the data
 geometry (with the run's `stations`) the step may consult (e.g. to resolve an
 `:auto` option). Default: no components.
-
-A method of the same generic compiles a data-dependent model element,
-`model_components(element, spec)`, so steps and model elements compose through
-one mechanism.
 """
 model_components(step::SolveStep, spec) = GainModel()
 

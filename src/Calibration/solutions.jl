@@ -17,8 +17,9 @@ using OrderedCollections: OrderedDict
     ComponentFit(path, component, params)
 
 One fitted gain component: `component` (a [`GainComponent`](@ref): term,
-segmentation, feed tying, prior) and its parameters `params`, a `DimArray`
-over `(param, Feed or node, Frequency, Ti, AntennaName)`. Each `Frequency`/`Ti`
+segmentation, feed tying, and one prior for all of its parameters) and its
+parameters `params`, a `DimArray` over `(param, Feed or node, Frequency, Ti,
+AntennaName)`. Each `Frequency`/`Ti`
 segment is labeled by the midpoint of the channels or samples it covers, with
 intervals so `Contains(x)` selects the segment covering `x`; `AntennaName` names the
 stations that carry the component.

@@ -158,8 +158,7 @@ end
 # What the matched filter requires of a `(; phase, logamp)` model tree. Each
 # absent item costs the step its own output silently rather than crashing:
 # `solve_station_systems!` skips a kind with no components, dropping every
-# scan's search estimate for that observable, and `fringe_station_solutions`
-# decodes each scan through the per-scan delay plan.
+# scan's search estimate for that observable.
 function validate_fringe_model(model)
     name = "BaselineFringeFit"
     isempty(_flatten_components(model.logamp)) || throw(
@@ -181,15 +180,6 @@ function validate_fringe_model(model)
             ),
         )
     end
-    any(_is_perscan_delay, comps) || throw(
-        ArgumentError(
-            "$name requires a per-scan feed-common wideband delay " *
-                "component (a `Delay` with a non-`GlobalTime` time segmentation, " *
-                "`Frequency = GlobalFrequency()`, `Feed = SharedFeeds()`). Add one to " *
-                "the fringe model's `phase` tree — see " *
-                "`default_fringe_terms`.",
-        ),
-    )
     return nothing
 end
 

@@ -475,11 +475,9 @@ end
     bp = zeros(nant, 2, nchg)
     # Reference (ant 1): feed 1 flat (the true per-channel gauge), feed 2 a smooth
     # NONZERO shape — the relative inter-feed phase bandpass under test. The shape is
-    # orthogonalized against per-band constant + slope: those components are
-    # legitimately (and feed-COMMONLY) absorbed by the per-band SBD delay/const
-    # and inter-feed delay stages, so leaving them in would make the earlier solves fight
-    # an unmodeled feed-2-only per-band ramp instead of exercising the band shape
-    # this test is about.
+    # orthogonalized against a constant + slope in each band, which the fringe fit's
+    # inter-feed delay can trade with the bandpass, so the test exercises the band
+    # shape alone.
     for b in 1:nspw
         cs = ((b - 1) * nchan + 1):(b * nchan)
         s = [0.6 * sin(2π * k / nchan + 0.9 * b) for k in 1:nchan]   # full period per band
@@ -524,8 +522,8 @@ end
     @test R_off < 0.95                  # ...and survives with the stage off
 
     # θ recovery: the (ref, feed 2) bandpass slots carry the injected shape up
-    # to per-band constant + slope components (the parts the per-band SBD and inter-feed
-    # delay terms legitimately absorb). Remove the per-band best-fit constant +
+    # to a constant + slope in each band, which the fringe fit's inter-feed delay can
+    # trade with the bandpass. Remove the per-band best-fit constant +
     # slope from the difference; the residual shape must match.
     bp_on = only(CAL._applied(sols_on[2][:phase, :bandpass]).groups)
     plan = only(bp_on.layout.plans)

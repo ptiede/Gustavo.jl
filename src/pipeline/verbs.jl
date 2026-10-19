@@ -53,20 +53,26 @@ StatsAPI.fit(step::SolveStep, ms::XRadio.MeasurementSet; kwargs...) =
     fit(step, _one_member(ms); kwargs...)
 
 """
-    calibrate(sol::CalibrationSolution, ps::ProcessingSet; kwargs...) -> ProcessingSet
-    calibrate(sol::CalibrationSolution, ms::MeasurementSet; kwargs...) -> MeasurementSet
+    calibrate(sol::CalibrationSolution, ps::ProcessingSet; exec = ExecutionConfig(), kwargs...) -> ProcessingSet
+    calibrate(sol::CalibrationSolution, ms::MeasurementSet; exec = ExecutionConfig(), kwargs...) -> MeasurementSet
 
 [`calibrate!`](@ref) applied to an in-memory copy of the data whose arrays are
-its own; the data passed in is left as it was.
+its own; the data passed in is left as it was. The Measurement Sets are read on
+`exec`'s `inner_executor`. The whole copy is held in memory; for data larger
+than memory, calibrate each unit of a [`mapsets`](@ref) pass with `calibrate!`
+and store it with [`write!`](@ref).
 """
-calibrate(sol::CalibrationSolution, data::Union{XRadio.ProcessingSet, XRadio.MeasurementSet}; kwargs...) =
-    calibrate!(sol, materialize(data); kwargs...)
+calibrate(
+    sol::CalibrationSolution, data::Union{XRadio.ProcessingSet, XRadio.MeasurementSet};
+    exec::ExecutionConfig = ExecutionConfig(), kwargs...,
+) = calibrate!(sol, _read_unit(data, inner_executor(exec)); exec, kwargs...)
 
 """
     calibrate!(sol::CalibrationSolution, ps::ProcessingSet;
                flag_bad = true, apply_flags = true, post = identity,
                exec = ExecutionConfig()) -> ps
-    calibrate!(sol::CalibrationSolution, ms::MeasurementSet; flag_bad = true, apply_flags = true) -> ms
+    calibrate!(sol::CalibrationSolution, ms::MeasurementSet;
+               flag_bad = true, apply_flags = true, exec = ExecutionConfig()) -> ms
 
 Apply a fitted solution, or any selection of one (`sol[:phase]`,
 `sol[:phase, :mbd]`, `filter(pred, sol)`), to the data in place: each
@@ -107,7 +113,7 @@ Stations are matched by name against the solution's geometry. The baselines of
 a station the solution does not name are flagged under `apply_flags`, as an
 unconstrained station's are, and otherwise left uncorrected; either way with a
 warning. A solution that shares no station with the data is refused. `exec` supplies the schedulers and
-progress callback.
+progress callback; a single Measurement Set uses only its `inner_executor`.
 """
 function calibrate!(
         sol::CalibrationSolution, ps::XRadio.ProcessingSet;
@@ -127,10 +133,13 @@ end
 
 function calibrate!(
         sol::CalibrationSolution, ms::XRadio.MeasurementSet;
-        flag_bad::Bool = true, apply_flags::Bool = true,
+        flag_bad::Bool = true, apply_flags::Bool = true, exec::ExecutionConfig = ExecutionConfig(),
     )
     flagged = apply_flags ? _solution_flag_sets(sol) : nothing
-    return _apply_solution!(ms, Calibration._applied(sol), DataGeometry(_one_member(ms)), flagged; flag_bad, apply_flags)
+    return _apply_solution!(
+        ms, Calibration._applied(sol), DataGeometry(_one_member(ms)), flagged;
+        flag_bad, apply_flags, executor = inner_executor(exec),
+    )
 end
 
 # `app`'s gains divided out of `ms`, then the baselines of `flagged` flagged.
