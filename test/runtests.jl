@@ -59,7 +59,7 @@ include("test_pipeline.jl")
 
 # The calibration surface: fit and calibrate, gauges, the step record, defaults.
 # Reuses _build_fringe_ps + CAL/FP aliases from test_pipeline.jl.
-include("test_pipeline_config.jl")
+include("test_steps.jl")
 
 # Solve-step interface (step protocol, selections, solutions of a chain of
 # steps, fit/calibrate). Reuses the same aliases.

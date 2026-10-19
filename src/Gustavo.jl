@@ -42,7 +42,7 @@ import .Calibration: model_components
 include("Fring.jl")
 using .Fring
 
-include("pipeline.jl")
+include("steps.jl")
 
 export Calibration, Fring
 # Axis names for every array Gustavo stores or returns, so scripts can index
