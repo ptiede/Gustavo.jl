@@ -109,7 +109,12 @@ function _assemble!(lay, priors)
     for (ts, prior) in zip(lay.terms, priors)
         isempty(ts) && continue
         c += _with_piece_models(prior, first(ts).dim, T) do model
-            sum((_add_chain!(Kv, lay.h, t, model(t.h)) for t in ts); init = zero(T))
+            # A loop: inference widens a sum over a generator here to Any when _fit_hypers! calls it.
+            ct = zero(T)
+            for t in ts
+                ct += _add_chain!(Kv, lay.h, t, model(t.h))
+            end
+            ct
         end
     end
     return c
@@ -205,7 +210,12 @@ end
 function _expected_log_prior(prior, chains, mom, ::Type{T}) where {T}
     isempty(chains) && return zero(T)
     return _with_piece_models(prior, first(chains).dim, T) do model
-        sum((_expected_chain_log_prior(model(ch.h), ch.u, isnothing(mom) ? nothing : mom[c], T) for (c, ch) in pairs(chains)); init = zero(T))
+        # A loop: inference widens a sum over a generator here to Any when _fit_hypers! calls it.
+        out = zero(T)
+        for (c, ch) in pairs(chains)
+            out += _expected_chain_log_prior(model(ch.h), ch.u, isnothing(mom) ? nothing : mom[c], T)
+        end
+        out
     end
 end
 
@@ -545,6 +555,12 @@ function _log_hyperprior(p::OUPrior, lθ)
     return a + first(_hyperprior_term(p.σ, lθ, i))
 end
 
+# Derivatives of `f` over the log hyperparameters `lθ` of `spec`, in one chunk
+# whose size the type of `spec` fixes, so their types infer.
+_hyper_chunk(spec) = ForwardDiff.Chunk{_hyper_count(spec)}()
+_hyper_gradient(f, lθ, spec) = ForwardDiff.gradient(f, lθ, ForwardDiff.GradientConfig(f, lθ, _hyper_chunk(spec)))
+_hyper_hessian(f, lθ, spec) = ForwardDiff.hessian(f, lθ, ForwardDiff.HessianConfig(f, lθ, _hyper_chunk(spec)))
+
 # The inverse of a symmetric curvature, its eigenvalues taken in magnitude.
 function _inverse_curvature(C)
     E = eigen(Symmetric(C))
@@ -578,6 +594,7 @@ returns whether it did within `max_iterations` steps.
 function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterations)
     est = [i for i in eachindex(tracks) if _hyper_count(tracks[i].prior) > 0]
     isempty(est) && return true
+    specs = [tracks[i].prior for i in est]
     θ = [_log_hypers(tracks[i].prior, priors[i]) for i in est]
     # Each evaluation factors into one of two factorizations, the accepted point's
     # kept while a trial point uses the other.
@@ -615,9 +632,9 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
     fs = expected(at)
     for (k, i) in pairs(est)
         isnothing(curvature[i]) &&
-            (curvature[i] = (; inverse = _inverse_curvature(-ForwardDiff.hessian(fs[k], θ[k])), measured = false))
+            (curvature[i] = (; inverse = _inverse_curvature(-_hyper_hessian(fs[k], θ[k], specs[k])), measured = false))
     end
-    g = map(ForwardDiff.gradient, fs, θ)
+    g = map(_hyper_gradient, fs, θ, specs)
     converged = false
     for _ in 1:max_iterations
         Hinv = [curvature[i].inverse for i in est]
@@ -641,7 +658,7 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
         θ1, at = next
         cur = 3 - cur
         fs = expected(at)
-        g1 = map(ForwardDiff.gradient, fs, θ1)
+        g1 = map(_hyper_gradient, fs, θ1, specs)
         for (k, i) in pairs(est)
             s, y = θ1[k] - θ[k], g[k] - g1[k]
             sy = dot(s, y)

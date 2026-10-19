@@ -811,6 +811,8 @@ end
         @test all(p -> CAL.is_fixed_hyper(p.scale) && CAL.is_fixed_hyper(p.σ), only(amp_priors))
         rep = FP._bandpass_track_report(nothing, nothing; amp_priors = only(amp_priors))
         @test rep.amp_priors === only(amp_priors)
+        @test (@inferred FP._hyper_gradient(sum, [0.1, 0.2], ou)) == [1.0, 1.0]
+        @test (@inferred FP._hyper_hessian(x -> x[1] * x[2], [0.1, 0.2], ou)) == [0.0 1.0; 1.0 0.0]
     end
 end
 
