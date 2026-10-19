@@ -54,7 +54,7 @@ end
         nant, nspw = 2, nchan = 8, nscans = 3,
         bandpass = bp_true, amp_bandpass = abp_true,
     )
-    fm = default_fringe_terms()
+    fm = default_fringe_model()
     steps = (BaselineFringeFit(; model = fm, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge))
     sols_n = _fit_chain(steps, ps; exec = ExecutionConfig())
     ad_n = last(sols_n)

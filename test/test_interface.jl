@@ -70,20 +70,20 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         # the base model or in one station's entry).
         @test !Gustavo._scan_local_solve(BaselineFringeFit(; rounds = 2, gauge))
         @test !Gustavo._scan_local_solve(
-            BaselineFringeFit(; model = default_fringe_terms(rel_time = CAL.GlobalTime()), gauge),
+            BaselineFringeFit(; model = default_fringe_model(rel_time = CAL.GlobalTime()), gauge),
         )
         @test !Gustavo._scan_local_solve(
             BaselineFringeFit(;
                 model = with_station(
-                    default_fringe_terms(), "AA";
-                    phase = default_fringe_terms(rel_time = CAL.GlobalTime()).phase,
+                    default_fringe_model(), "AA";
+                    phase = default_fringe_model(rel_time = CAL.GlobalTime()).phase,
                 ),
                 gauge,
             ),
         )
-        @test_throws "must be a `GainComponent`" merge(default_fringe_terms(); phase = (; x = _OpaqueTerm()))
+        @test_throws "must be a `GainComponent`" merge(default_fringe_model(); phase = (; x = _OpaqueTerm()))
         # A step's model is a GainModel, never a bare NamedTuple.
-        @test_throws MethodError BaselineFringeFit(; model = (; phase = default_fringe_terms().phase), gauge)
+        @test_throws MethodError BaselineFringeFit(; model = (; phase = default_fringe_model().phase), gauge)
     end
 
     @testset "a step fit on a scan subset, carried into the full fit" begin

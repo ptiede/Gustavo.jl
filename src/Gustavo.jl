@@ -55,8 +55,8 @@ export GUSTAVO_VISIBILITY_SCHEMA, feed_pairs
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate, calibrate!
-export BaselineFringeFit, default_fringe_terms, Bandpass, default_bandpass_terms, AdhocPhase,
-    default_adhoc_terms, JointSmoother
+export BaselineFringeFit, default_fringe_model, Bandpass, default_bandpass_model, AdhocPhase,
+    default_adhoc_model, JointSmoother
 # The gain-model vocabulary: everything a step's `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare
 # `using Gustavo`.

@@ -63,7 +63,7 @@ The step carries the `GainModel` it solves and the solver options:
 
 ```julia
 Base.@kwdef struct AdhocPhase{M <: GainModel, S <: Fring.AbstractAdhocSmoother} <: SolveStep
-    model::M = Fring.default_adhoc_terms()
+    model::M = Fring.default_adhoc_model()
     smoother::S = Fring.PerTrackAdhocSmoother()
 end
 provides(::AdhocPhase) = :adhoc

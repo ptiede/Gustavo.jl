@@ -10,7 +10,7 @@
         @test length(mg.phase) == length(mp.phase)
         # Exactly the one `ExceptFeed`-tied offset differs between the models,
         # and only in its time-segmentation type. (There is no inter-feed
-        # CONSTANT — see `default_fringe_terms`.)
+        # CONSTANT — see `default_fringe_model`.)
         diff = findall(
             i -> typeof(mg.phase[i].Ti) != typeof(mp.phase[i].Ti),
             eachindex(mg.phase)

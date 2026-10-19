@@ -49,7 +49,7 @@ end
     src_phase = (2 .* rand(rng, nscans, nbl, npol) .- 1) .* pi
     _scale_sources!(ps, src_amp, src_phase)
 
-    fm = default_fringe_terms()
+    fm = default_fringe_model()
     # `ref_ant` indexes the truth arrays below; `gauge` is what the solve takes.
     ref_ant = 1
     gauge = PinAntenna(ref_ant)     # the gauge every test here passes to `fit`
@@ -100,7 +100,7 @@ end
         nant, nspw, nchan, ntime, nscans,
         bandpass = bp_true, amp_bandpass = abp_true, seed = 21,
     )
-    fm = default_fringe_terms()
+    fm = default_fringe_model()
     bpc(prior) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
     runbp(sm; prior = nothing) = last(
         _fit_chain(
@@ -172,7 +172,7 @@ end
     sph = (2 .* rand(rng, nscans, nbl, npol) .- 1) .* pi
     _scale_sources!(ps, samp, sph)
 
-    fm = default_fringe_terms()
+    fm = default_fringe_model()
     runbp(sm) = last(
         _fit_chain(
             (BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; smoother = sm, gauge = PinAntenna(1))),
@@ -1177,8 +1177,8 @@ end
     nant, nchan, ntime, nscans = 4, 8, 6, 6
     rng = MersenneTwister(0x0515)
     gauge = PinAntenna(1)
-    fm = default_fringe_terms()
-    terms = default_bandpass_terms()
+    fm = default_fringe_model()
+    terms = default_bandpass_model()
     # Where the data hold no bandpass in the other observable, a one-sided model
     # gives the same answer as the two-sided one.
     function compare(obs, data_kw)

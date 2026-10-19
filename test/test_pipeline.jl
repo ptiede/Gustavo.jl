@@ -162,8 +162,8 @@ end
     # revert to `PerFeed` lets a spurious inter-feed rate (rate₂ − rate₁) / adhoc phase
     # float on noise and — multiplied by the whole-track Rate lever arm
     # `2π·rate·(t − t0_global)`, hours long — inject large, arbitrary scan-to-scan
-    # cross-hand phase jumps (see the `default_fringe_terms` and
-    # `default_adhoc_terms` docstrings for the tying rationale).
+    # cross-hand phase jumps (see the `default_fringe_model` and
+    # `default_adhoc_model` docstrings for the tying rationale).
     #
     # The end-to-end coherence test injects FEED-COMMON truth, so a `PerFeed` revert
     # would still recover it at high SNR and pass — it does NOT guard this decision.
@@ -208,18 +208,18 @@ end
     sm = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     # One-argument form: the smoother, with the default model.
     gauge = PinAntenna(1)
-    @test AdhocPhase(sm; gauge).model == default_adhoc_terms()
+    @test AdhocPhase(sm; gauge).model == default_adhoc_model()
     @test AdhocPhase(sm; gauge).smoother === sm
 
     # Compile-time vetting. The joint smoother cannot solve a per-feed model
     # (its Kalman state is one node per station)...
-    pf = default_adhoc_terms(feed = CAL.PerFeed())
+    pf = default_adhoc_model(feed = CAL.PerFeed())
     @test_throws "JointKalmanSmoother cannot fit" Gustavo.model_components(
         AdhocPhase(; model = pf, smoother = FP.JointKalmanSmoother(), gauge), nothing,
     )
     # ...no adhoc smoother can address a single-feed tying...
     @test_throws "cannot fit the component" Gustavo.model_components(
-        AdhocPhase(; model = default_adhoc_terms(feed = CAL.SingleFeed(2)), gauge),
+        AdhocPhase(; model = default_adhoc_model(feed = CAL.SingleFeed(2)), gauge),
         nothing,
     )
     # ...and the stage solves exactly one phase component, nothing in logamp.
@@ -229,12 +229,12 @@ end
     )
     # ...the joint smoother needs an OU prior...
     @test_throws "JointKalmanSmoother cannot fit" Gustavo.model_components(
-        AdhocPhase(; model = default_adhoc_terms(; prior = RandomWalkPrior(; σ = 0.1)), smoother = FP.JointKalmanSmoother(), gauge),
+        AdhocPhase(; model = default_adhoc_model(; prior = RandomWalkPrior(; σ = 0.1)), smoother = FP.JointKalmanSmoother(), gauge),
         nothing,
     )
     # ...and the prior is a random walk or OU process along time.
     @test_throws "cannot fit the component" Gustavo.model_components(
-        AdhocPhase(; model = default_adhoc_terms(; prior = IIDPrior(0.1)), gauge), nothing,
+        AdhocPhase(; model = default_adhoc_model(; prior = IIDPrior(0.1)), gauge), nothing,
     )
     la = GainModel(; phase = pf.phase, logamp = pf.phase)
     @test_throws "phase only" Gustavo.model_components(
@@ -578,7 +578,7 @@ end
     larec(θ, plan, a, f, gc) = CAL._component_leaf(plan, θ)[1, f, plan.fseg_id[gc], 1, a]
     # The phase has no prior, so over a killed channel only the amplitude has a value.
     amp_model(prior) = GainModel(;
-        phase = default_bandpass_terms().phase,
+        phase = default_bandpass_model().phase,
         logamp = (;
             bandpass = CAL.GainComponent(
                 CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(), prior,
@@ -602,7 +602,7 @@ end
     sols_off = _fit_chain(
         (
             ff,
-            Bandpass(; model = GainModel(; phase = default_bandpass_terms().phase), gauge),
+            Bandpass(; model = GainModel(; phase = default_bandpass_model().phase), gauge),
             AdhocPhase(adhoc; gauge),
         ), ps,
     )
@@ -777,7 +777,7 @@ end
     end
     gauge = PinAntenna(1)
     ff = BaselineFringeFit(;
-        model = default_fringe_terms(),
+        model = default_fringe_model(),
         search = FP.FringeSearch(algorithm = FP.FullGrid()),
         gauge,
     )

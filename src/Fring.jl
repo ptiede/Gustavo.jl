@@ -100,8 +100,8 @@ export FringeSearchMap, FringeDelay, FringeRate, baseline_fringe_map, fringe_sea
 export Stationization, station_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointKalmanSmoother
-export solve_adhoc_phasing, default_adhoc_terms, default_adhoc_prior
-export default_bandpass_terms
+export solve_adhoc_phasing, default_adhoc_model, default_adhoc_prior
+export default_bandpass_model
 export JointSmoother
 export TrackStatus, TrackNoData, TrackSolved, TrackFlat
 export fringe_snr_table, fringe_detections, cat_scans
@@ -110,7 +110,7 @@ export baseline_spectra, freq_group_coherence, fringe_freq_groups, FreqGroup, Tr
 export fringe_station_flags
 export baseline_delays, delay_closure
 export can_fit, validate_model
-export BandGroups, default_fringe_terms
+export BandGroups, default_fringe_model
 export search_scan
 export plot_fringe_search, plot_coherence
 export coherence_report, AveragingTime, AveragingBandwidth

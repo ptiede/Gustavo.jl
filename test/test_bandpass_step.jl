@@ -43,7 +43,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         nant, nspw, nchan, bandpass = bp_true, amp_bandpass = abp_true,
     )
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
-    fm = default_fringe_terms()
+    fm = default_fringe_model()
 
     fr_n, bp_n = _fit_chain(
         (BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))),
@@ -250,7 +250,7 @@ end
     )
 
     @testset "compile-time model vetting (can_fit / validate_model)" begin
-        phase_only = GainModel(; phase = default_bandpass_terms().phase)
+        phase_only = GainModel(; phase = default_bandpass_model().phase)
         # An empty tree compiles no component at all, so the step would
         # accumulate every scan and write nowhere — rejected at compile time,
         # before any data is read.
@@ -306,7 +306,7 @@ end
         # A `stations` entry is vetted like the base, with the can_fit error
         # naming the station whose entry carries the unfittable component.
         bad_entry = with_station(
-            default_bandpass_terms(), "A1";
+            default_bandpass_model(), "A1";
             phase = (;
                 bandpass = CAL.GainComponent(
                     CAL.Delay(); Ti = CAL.GlobalTime(),
@@ -322,7 +322,7 @@ end
         # model that differs across stations.
         @test supports_station_heterogeneity(Bandpass(; gauge = PinAntenna(1)))
         het = with_station(
-            default_bandpass_terms(), "A1";
+            default_bandpass_model(), "A1";
             phase = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
             logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
         )
@@ -345,7 +345,7 @@ end
             ),
         )
 
-        lu = CAL.plan_parameters(default_bandpass_terms(), anames, geom)
+        lu = CAL.plan_parameters(default_bandpass_model(), anames, geom)
         @test FP._bandpass_paths(lu.plantree, :phase) == (; shape = (:phase, :bandpass), level = nothing)
         @test only(FP._bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).stations == 1:3
         @test isempty(FP._bandpass_level_blocks(_setup(lu), zeros(lu.nθ), :phase))
@@ -372,7 +372,7 @@ end
         # the flat `plans` list, so its positions no longer name the two
         # observables — the blocks still resolve, one per signature group.
         mh = with_station(
-            default_bandpass_terms(), "A1";
+            default_bandpass_model(), "A1";
             phase = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
             logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
         )
@@ -385,7 +385,7 @@ end
 
         # An observable the model omits resolves to no path and no blocks.
         lp = CAL.plan_parameters(
-            CAL.GainModel(; phase = default_bandpass_terms().phase), anames, geom,
+            CAL.GainModel(; phase = default_bandpass_model().phase), anames, geom,
         )
         @test FP._bandpass_paths(lp.plantree, :logamp) == (; shape = nothing, level = nothing)
         @test isempty(FP._bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
@@ -823,7 +823,7 @@ end
     @testset "a time-global model is untouched by the change" begin
         # The break path must reduce exactly to the old one-segment solve.
         a = fit(Bandpass(; model = model(GlobalTime()), gauge = PinAntenna(1)), broken)
-        b = fit(Bandpass(; model = default_bandpass_terms(), gauge = PinAntenna(1)), broken)
+        b = fit(Bandpass(; model = default_bandpass_model(), gauge = PinAntenna(1)), broken)
         @test _bp_phase(a) == _bp_phase(b)
     end
 

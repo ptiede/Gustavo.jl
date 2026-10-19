@@ -16,7 +16,7 @@
     end
 
     # A track-global inter-feed delay couples the scans without moving the gauge.
-    glob = BaselineFringeFit(; model = FP.default_fringe_terms(; rel_time = CAL.GlobalTime()), gauge = PinAntenna(1))
+    glob = BaselineFringeFit(; model = FP.default_fringe_model(; rel_time = CAL.GlobalTime()), gauge = PinAntenna(1))
     sol, warned = fit_unlinked(glob, ps)
     @test all(iszero, at_ref(sol, :mbd))
     @test !warned
@@ -43,7 +43,7 @@
 
     # Two feed-2 delays that every detection sees only as their sum.
     twice = merge(
-        FP.default_fringe_terms();
+        FP.default_fringe_model();
         phase = (; rel_delay_global = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
     )
     @test_throws "delay station system is not determined" fit(BaselineFringeFit(; model = twice, gauge = PinAntenna(1)), ps)
@@ -132,7 +132,7 @@ end
         # stations that DID observe are constrained by their own closure, so none
         # of them is flagged and their data is calibrated rather than blanked.
         ps, _ = _build_fringe_ps(nant = 4, omit_station = 4)
-        model = default_fringe_terms()
+        model = default_fringe_model()
 
         sol = fit(BaselineFringeFit(; model, gauge = PinAntenna("A4")), ps)
         @test isempty(sol.info.flagged_ant)
@@ -152,7 +152,7 @@ end
         # component; the estimator detects it structurally and includes the
         # cross-hand rows in the rate system.
         rel_terms = merge(
-            default_fringe_terms();
+            default_fringe_model();
             phase = (; rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
         )
 
@@ -236,7 +236,7 @@ end
             (
                 BaselineFringeFit(;
                     model = merge(
-                        default_fringe_terms();
+                        default_fringe_model();
                         phase = (; rel_rate = CAL.GainComponent(CAL.Rate(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
                     ),
                     closure = FP.Stationization(pfa_max = 1.0e-2),
@@ -272,8 +272,8 @@ end
         )
 
         # The default model compiles in order to the standard sequence, with no
-        # constant phase (see `default_fringe_terms`).
-        comps = fringe_phase(default_fringe_terms())
+        # constant phase (see `default_fringe_model`).
+        comps = fringe_phase(default_fringe_model())
         @test collect(map(sig, CAL._flatten_components(comps))) == [
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.ExceptFeed),
@@ -281,7 +281,7 @@ end
         ]
 
         # `rel_time` moves the inter-feed delay onto a track-global column.
-        gcomps = fringe_phase(default_fringe_terms(rel_time = CAL.GlobalTime()))
+        gcomps = fringe_phase(default_fringe_model(rel_time = CAL.GlobalTime()))
         @test collect(map(sig, CAL._flatten_components(gcomps))) == [
             (CAL.Delay, CAL.PerScan, CAL.GlobalFrequency, CAL.SharedFeeds),
             (CAL.Delay, CAL.GlobalTime, CAL.GlobalFrequency, CAL.ExceptFeed),
@@ -290,7 +290,7 @@ end
 
         # Exact duplicate components are rejected by message.
         dup = merge(
-            default_fringe_terms();
+            default_fringe_model();
             phase = (; mbd2 = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())),
         )
         @test_throws "two identical components" fringe_phase(dup)
@@ -298,12 +298,12 @@ end
         # A second component matching a findfirst router's signature — without
         # being an exact duplicate — is rejected naming the signature.
         collide = merge(
-            default_fringe_terms();
+            default_fringe_model();
             phase = (; mbd_tb = CAL.GainComponent(CAL.Delay(); Ti = CAL.TimeBlocks(1.0e6), Feed = CAL.SharedFeeds())),
         )
         @test_throws "per-scan feed-common delay signature" fringe_phase(collide)
 
-        withphase(; kw...) = merge(default_fringe_terms(); phase = NamedTuple(kw))
+        withphase(; kw...) = merge(default_fringe_model(); phase = NamedTuple(kw))
 
         # A constant phase is not fitted: the data do not determine it.
         @test_throws "It fits a `Delay` or `Rate`" fringe_phase(
@@ -321,7 +321,7 @@ end
 
         # The fringe step fits phase only.
         @test_throws "`logamp` group must be empty" fringe_phase(
-            merge(default_fringe_terms(); logamp = (; a = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds()))),
+            merge(default_fringe_model(); logamp = (; a = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds()))),
         )
     end
 end
@@ -330,7 +330,7 @@ end
 
 @testset "fringe step capability" begin
     ps, _ = _build_fringe_ps()
-    model = default_fringe_terms()
+    model = default_fringe_model()
 
     @testset "the solution records the search configuration" begin
         sol = fit(BaselineFringeFit(; model, gauge = PinAntenna(1)), ps)
@@ -344,19 +344,19 @@ end
         # while the solution looked fitted.
         poly = CAL.GainComponent(CAL.PolynomialFreq(2); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())
         @test_throws "BaselineFringeFit cannot fit the component" fit(
-            BaselineFringeFit(; model = merge(default_fringe_terms(); phase = (; poly)), gauge = PinAntenna(1)), ps,
+            BaselineFringeFit(; model = merge(default_fringe_model(); phase = (; poly)), gauge = PinAntenna(1)), ps,
         )
     end
 
     @testset "a model missing a term the step requires is rejected by name" begin
         # The kind is missing outright: nothing to write the rate search into.
-        norate = GainModel(; phase = Base.structdiff(default_fringe_terms().phase, (; rate = nothing)))
+        norate = GainModel(; phase = Base.structdiff(default_fringe_model().phase, (; rate = nothing)))
         @test_throws "requires a rate component" fit(BaselineFringeFit(; model = norate, gauge = PinAntenna(1)), ps)
 
     end
 
     @testset "per-scan station solutions need a per-scan feed-common delay" begin
-        globaldelay = map(default_fringe_terms().phase) do t
+        globaldelay = map(default_fringe_model().phase) do t
             FP._is_perscan_delay(t) ?
                 CAL.GainComponent(t.term; Ti = CAL.GlobalTime(), Frequency = t.Frequency, Feed = t.Feed) : t
         end
@@ -372,7 +372,7 @@ end
         # `_build_fringe_ps` gives one 330 s scan, so 150 s blocks split it.
         subscan = map(
             t -> CAL.GainComponent(t.term; Ti = CAL.TimeBlocks(150.0), Frequency = t.Frequency, Feed = t.Feed),
-            default_fringe_terms().phase,
+            default_fringe_model().phase,
         )
         @test_throws "BaselineFringeFit cannot fit the component" fit(
             BaselineFringeFit(; model = GainModel(; phase = subscan), gauge = PinAntenna(1)), ps,

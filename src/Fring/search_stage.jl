@@ -2,7 +2,7 @@
 #
 # The composable pipeline's fringe stage in three parts:
 #
-# - `default_fringe_terms` — what is solved by default: a `(; phase)` tree of
+# - `default_fringe_model` — what is solved by default: a `(; phase)` tree of
 #   named components, each declaring its own feed scope through its tying. The
 #   gauge pin is run-wide, an argument of `fit`.
 # - What the matched filter (the per-baseline search and the station solve)
@@ -12,7 +12,7 @@
 #   the detection/flag tables recorded on the solution.
 
 """
-    default_fringe_terms(; rel_time = PerScan()) -> GainModel
+    default_fringe_model(; rel_time = PerScan()) -> GainModel
 
 The default model of a [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit) step — the
 standard VLBI fringe model, phase components only (each key names its
@@ -25,7 +25,7 @@ component; the order is the parameter order):
 3. `rate` — per-scan rate, feed-common. There is no feed-specific rate: the
    inter-feed rate is negligible (EHT-HOPS convention). A genuine offset is
    added with
-   `merge(default_fringe_terms(); phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = ExceptFeed(1))))`.
+   `merge(default_fringe_model(); phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = ExceptFeed(1))))`.
 
 `rel_time` is the inter-feed delay's time segmentation: `PerScan()` (the
 default) fits an offset per scan, so its scan-to-scan scatter is an
@@ -44,7 +44,7 @@ decoheres across the band, so leaving it in costs signal.
 
 Add or replace a component with [`merge`](@ref Base.merge(::GainModel)).
 """
-default_fringe_terms(; rel_time::AbstractTimeSegmentation = PerScan()) = GainModel(
+default_fringe_model(; rel_time::AbstractTimeSegmentation = PerScan()) = GainModel(
     phase = (
         mbd = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds()),
         rel_delay = GainComponent(Delay(); Ti = rel_time, Feed = ExceptFeed(1)),
@@ -176,7 +176,7 @@ function validate_fringe_model(model)
         kind in kinds || throw(
             ArgumentError(
                 "$name requires $what. Add one to the fringe model's `phase` " *
-                    "tree — see `default_fringe_terms`.",
+                    "tree — see `default_fringe_model`.",
             ),
         )
     end

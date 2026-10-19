@@ -224,7 +224,7 @@ A copy of `m` with the named components added to its base `phase` and
 as they are.
 
 ```julia
-merge(default_fringe_terms();
+merge(default_fringe_model();
     phase = (; rel_rate = GainComponent(Rate(); Ti = GlobalTime(), Feed = ExceptFeed(1))))
 ```
 """

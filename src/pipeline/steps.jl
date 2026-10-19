@@ -4,14 +4,14 @@
 # components and implements `solve`, reading the data through `each_group`.
 
 """
-    BaselineFringeFit(; gauge = ZeroSumPhase(), model = default_fringe_terms(), search = FringeSearch(),
+    BaselineFringeFit(; gauge = ZeroSumPhase(), model = default_fringe_model(), search = FringeSearch(),
                       closure = Stationization(), rounds = 1, steer_cells = 9.0)
 
 The fringe-fitting stage: a per-baseline delay/rate matched-filter `search` on
 every scan group, then the closure-screened station WLS (`closure`) that ties
 the feeds. What is solved is `model`, a phase-only [`GainModel`](@ref):
 per-scan constant/delay/rate and the inter-feed offsets; see
-[`Fring.default_fringe_terms`](@ref) for the default. `gauge`, an
+[`Fring.default_fringe_model`](@ref) for the default. `gauge`, an
 [`AbstractGauge`](@ref), fixes the station systems' undetermined values, with
 its full constraints; a [`ByComponent`](@ref) names components of `model`.
 
@@ -23,7 +23,7 @@ on the residual of the current solution, reading the data once per round.
 The models it fits: a `Delay` or `Rate` spanning the whole band
 (`Frequency = GlobalFrequency()`), under any feed scope, with a time
 segmentation no finer than a scan. It fits no constant phase (see
-[`Fring.default_fringe_terms`](@ref)). One search per scan group measures one
+[`Fring.default_fringe_model`](@ref)). One search per scan group measures one
 delay and rate per scan, so a segmentation that splits a scan (a
 `TimeBlocks` shorter than the scans, `PerIntegration`) asks for θ columns the
 search has no measurement to fill and is rejected when the step compiles the
@@ -47,7 +47,7 @@ ionospheric dispersion (`Dispersion`) nor a per-band-group delay (a
 `FreqGroups`-segmented `Delay`), and no shipped step does.
 """
 Base.@kwdef struct BaselineFringeFit{M <: GainModel, C <: Fring.Stationization, R <: Real, G <: AbstractGauge} <: SolveStep
-    model::M = Fring.default_fringe_terms()
+    model::M = Fring.default_fringe_model()
     search::Fring.FringeSearch = Fring.FringeSearch()
     closure::C = Fring.Stationization()
     rounds::Int = 1
@@ -61,12 +61,12 @@ end
 provides(::BaselineFringeFit) = :fringe
 
 """
-    Bandpass(; gauge = ZeroSumPhase(), model = default_bandpass_terms(), smoother = JointSmoother())
+    Bandpass(; gauge = ZeroSumPhase(), model = default_bandpass_model(), smoother = JointSmoother())
 
 The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier steps have already applied
 their gains, over every scan it is given. What is fit
-is `model`, a [`GainModel`](@ref) — see [`Fring.default_bandpass_terms`](@ref) for the
+is `model`, a [`GainModel`](@ref) — see [`Fring.default_bandpass_model`](@ref) for the
 default and the component form `JointSmoother` accepts; each component's prior
 states how its values relate within a spectral window. How it is solved
 lives on `smoother`, a [`Fring.JointSmoother`](@ref), which fits the complex visibilities
@@ -90,7 +90,7 @@ example on calibrator scans held in memory:
     bp = fit(Bandpass(; gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
 """
 Base.@kwdef struct Bandpass{M <: GainModel, G <: AbstractGauge} <: SolveStep
-    model::M = Fring.default_bandpass_terms()
+    model::M = Fring.default_bandpass_model()
     smoother::Fring.JointSmoother = Fring.JointSmoother()
     gauge::G = ZeroSumPhase()
     function Bandpass(model::M, smoother, gauge::G) where {M, G}
@@ -101,13 +101,13 @@ end
 provides(::Bandpass) = :bandpass
 
 """
-    AdhocPhase(; gauge = ZeroSumPhase(), model = default_adhoc_terms(), smoother = PerTrackAdhocSmoother())
+    AdhocPhase(; gauge = ZeroSumPhase(), model = default_adhoc_model(), smoother = PerTrackAdhocSmoother())
     AdhocPhase(smoother; gauge = ZeroSumPhase())
 
 The per-integration atmospheric-phase stage (adhoc phasing): solves the
 globally-closing per-AP station phase on the fringe/bandpass residual. What is
 fit is `model`, a [`GainModel`](@ref) holding the single adhoc component and
-its prior along time — see [`Fring.default_adhoc_terms`](@ref) for the default
+its prior along time — see [`Fring.default_adhoc_model`](@ref) for the default
 (feed-common, OU prior) form. How the tracks are fit under that prior lives on
 `smoother`, a pluggable [`Fring.AbstractAdhocSmoother`](@ref)
 ([`Fring.PerTrackAdhocSmoother`](@ref) or [`Fring.JointKalmanSmoother`](@ref), which
@@ -123,7 +123,7 @@ track was fit under, its hyperparameters resolved, over `(AntennaName, Feed, Ti)
 one `Ti` value per scan, its first AP epoch.
 """
 Base.@kwdef struct AdhocPhase{M <: GainModel, S <: Fring.AbstractAdhocSmoother, G <: AbstractGauge} <: SolveStep
-    model::M = Fring.default_adhoc_terms()
+    model::M = Fring.default_adhoc_model()
     smoother::S = Fring.PerTrackAdhocSmoother()
     gauge::G = ZeroSumPhase()
     function AdhocPhase(model::M, smoother::S, gauge::G) where {M, S, G}
@@ -219,7 +219,7 @@ model_components(s::Bandpass, spec) = _vet_step_model(
         "OUPrior along Frequency>)` — a time segmentation whose segments each span " *
         "several scans. A segment holding one scan (`PerScan`, `PerIntegration`) is " *
         "not fitted: the band mean of its gain is degenerate with that scan's source " *
-        "coherence. See `default_bandpass_terms`.",
+        "coherence. See `default_bandpass_model`.",
     spec,
 )
 
@@ -230,7 +230,7 @@ model_components(s::AdhocPhase, spec) = _vet_step_model(
     "The adhoc smoothers fit `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
         "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed(), prior = " *
         "<nothing, or a RandomWalkPrior or OUPrior along Ti>)` " *
-        "(`JointKalmanSmoother`: `SharedFeeds()` and an `OUPrior` only) — see `default_adhoc_terms`.",
+        "(`JointKalmanSmoother`: `SharedFeeds()` and an `OUPrior` only) — see `default_adhoc_model`.",
     spec,
 )
 

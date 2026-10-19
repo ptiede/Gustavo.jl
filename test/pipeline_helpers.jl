@@ -25,7 +25,7 @@ include("synthetic_ps.jl")
 function _full_fringe_model(; rel_time = PerScan())
     return GainModel(
         phase = merge(
-            default_fringe_terms(; rel_time).phase,
+            default_fringe_model(; rel_time).phase,
             (
                 bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed()),
                 adhoc = GainComponent(ConstantTerm(); Ti = PerIntegration(), Frequency = GlobalFrequency(), Feed = SharedFeeds()),

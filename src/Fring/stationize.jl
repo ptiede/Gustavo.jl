@@ -223,7 +223,7 @@ end
 #
 # Every correlation product's detection becomes a row of the delay and rate
 # systems, whatever feeds it relates: the tying alone decides what a row
-# touches. Under `default_fringe_terms` the rows relating different feeds are
+# touches. Under `default_fringe_model` the rows relating different feeds are
 # what constrain `rel_delay`'s common mode.
 #
 # `scans` is a vector of `AntennaPair × FeedPair` Detection `DimStack`s, the shape

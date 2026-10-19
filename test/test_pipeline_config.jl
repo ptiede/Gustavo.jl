@@ -54,9 +54,9 @@
 
     @testset "defaults" begin
         f = BaselineFringeFit(; gauge = PinAntenna(1))
-        @test f.model == default_fringe_terms()
+        @test f.model == default_fringe_model()
         # The default model: delay, inter-feed delay and rate, and no constant
-        # phase — see `default_fringe_terms`.
+        # phase — see `default_fringe_model`.
         @test isempty(f.model.logamp)
         @test length(f.model.phase) == 3
         @test !haskey(f.model.phase, :rel_phase)
@@ -72,12 +72,12 @@
         @test f.steer_cells == 9.0
 
         b = Bandpass(; gauge = PinAntenna(1))
-        @test b.model == default_bandpass_terms()
+        @test b.model == default_bandpass_model()
         @test b.smoother isa FP.JointSmoother
         @test isnothing(b.model.phase.bandpass.prior) && isnothing(b.model.logamp.bandpass.prior)
 
         t = AdhocPhase(; gauge = PinAntenna(1))
-        @test t.model == default_adhoc_terms()
+        @test t.model == default_adhoc_model()
         @test t.smoother == FP.PerTrackAdhocSmoother()
         @test t.model.phase.adhoc.prior == FP.default_adhoc_prior()
     end

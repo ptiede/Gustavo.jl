@@ -18,7 +18,7 @@
         gauge = PinAntenna(1)
         steps = (
             BaselineFringeFit(; gauge), Bandpass(; gauge),
-            AdhocPhase(; model = default_adhoc_terms(; prior = nothing), gauge),
+            AdhocPhase(; model = default_adhoc_model(; prior = nothing), gauge),
         )
         base = let sols = _fit_chain(steps, ps)
             (sols, _calibrate_chain(sols, ps))

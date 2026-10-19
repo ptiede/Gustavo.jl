@@ -3,7 +3,7 @@
 # The `Bandpass` step reads every scan (accumulate → return the scan's
 # contribution) and folds the contributions in group order, which keeps the
 # result deterministic at any concurrency.
-# What is fit is the step's model tree (see [`default_bandpass_terms`](@ref)):
+# What is fit is the step's model tree (see [`default_bandpass_model`](@ref)):
 # per observable, a shape component with a value per `ChannelBlocks` segment,
 # optionally beside a level component at spectral-window resolution or coarser.
 # A prior on the shape relates its values within each spectral window. How it is
@@ -17,7 +17,7 @@
 # bandpass_solve.jl. The prior fits live in prior_fits.jl.
 
 """
-    default_bandpass_terms(; freq = ChannelBlocks(1)) -> GainModel
+    default_bandpass_model(; freq = ChannelBlocks(1)) -> GainModel
 
 The default [`Bandpass`](@ref Gustavo.Bandpass) step model: a time-stable, per-feed
 `ConstantTerm` per frequency segment for each observable — a `phase.bandpass`
@@ -27,7 +27,7 @@ sets the segments; `ChannelBlocks(1)` is a free value per channel.
 Either group of a `Bandpass` model may be empty. Fit one observable only by
 keeping just that group, e.g.
 
-    Bandpass(model = GainModel(; phase = default_bandpass_terms().phase))
+    Bandpass(model = GainModel(; phase = default_bandpass_model().phase))
 
 fits the phase bandpass alone. Uniform across every antenna.
 
@@ -42,7 +42,7 @@ spectral window or coarser, with no prior — beside a shape under a zero-mean
                           Feed = PerFeed())
     GainModel(; phase = (; level, shape), logamp = (; level, shape))
 """
-function default_bandpass_terms(; freq::ChannelBlocks = ChannelBlocks(1))
+function default_bandpass_model(; freq::ChannelBlocks = ChannelBlocks(1))
     bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = freq, Feed = PerFeed())
     return GainModel(phase = (; bandpass), logamp = (; bandpass))
 end
@@ -72,7 +72,7 @@ function _validate_bandpass_groups(model)
         ArgumentError(
             "Bandpass model fits nothing: the model compiles no components, so the step " *
                 "would accumulate every scan and write nowhere. Add a phase and/or logamp " *
-                "component — `default_bandpass_terms()` is the standard model.",
+                "component — `default_bandpass_model()` is the standard model.",
         ),
     )
     for name in (:phase, :logamp)

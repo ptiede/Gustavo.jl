@@ -208,7 +208,7 @@ _requires_single_node(::AbstractAdhocSmoother) = false
 _requires_single_node(::JointKalmanSmoother) = true
 
 """
-    default_adhoc_terms(; feed = SharedFeeds(), prior = default_adhoc_prior()) -> GainModel
+    default_adhoc_model(; feed = SharedFeeds(), prior = default_adhoc_prior()) -> GainModel
 
 The default [`AdhocPhase`](@ref Gustavo.AdhocPhase) step model: one per-AP constant phase
 over the global band — a `phase.adhoc` component with `Ti = PerIntegration()`.
@@ -225,7 +225,7 @@ leaves the per-AP solve unsmoothed.
 
 The adhoc stage solves exactly one phase component and no logamp.
 """
-default_adhoc_terms(; feed::AbstractFeedTying = SharedFeeds(), prior = default_adhoc_prior()) =
+default_adhoc_model(; feed::AbstractFeedTying = SharedFeeds(), prior = default_adhoc_prior()) =
     GainModel(phase = (; adhoc = GainComponent(ConstantTerm(); Ti = PerIntegration(), Feed = feed, prior)))
 
 """
@@ -268,7 +268,7 @@ function validate_model(sm::AbstractAdhocSmoother, model)
             "the adhoc stage solves exactly one per-integration phase component; the " *
                 "model's phase group holds $(length(ph)). A second (e.g. per-scan) " *
                 "component is not identifiable: a constant on a station's track trades " *
-                "against every baseline's free source term. `default_adhoc_terms()` is " *
+                "against every baseline's free source term. `default_adhoc_model()` is " *
                 "the standard model.",
         ),
     )

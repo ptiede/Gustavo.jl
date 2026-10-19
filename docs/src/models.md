@@ -162,17 +162,17 @@ component's constructor spelling, never solves to silent zeros), plus
 whole-tree requirements via
 [`validate_model`](@ref Gustavo.Fring.validate_model).
 
-- [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_terms(), smoother = ...)`,
-  [`AdhocPhase`](@ref Gustavo.AdhocPhase)`(model = default_adhoc_terms(), smoother = ...)`
-  and [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit)`(model = default_fringe_terms(), search = ...)`
+- [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_model(), smoother = ...)`,
+  [`AdhocPhase`](@ref Gustavo.AdhocPhase)`(model = default_adhoc_model(), smoother = ...)`
+  and [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit)`(model = default_fringe_model(), search = ...)`
   take a `GainModel`; the fringe step's model has phase components only
-  ([`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms)).
+  ([`default_fringe_model`](@ref Gustavo.Fring.default_fringe_model)).
 
 [`merge`](@ref Base.merge(::GainModel)) builds a variant of a model by adding
 or replacing named components:
 
 ```julia
-BaselineFringeFit(model = merge(default_fringe_terms();
+BaselineFringeFit(model = merge(default_fringe_model();
     phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = ExceptFeed(1)))))
 ```
 
@@ -190,7 +190,7 @@ physics decision:
 There is no per-scan constant phase. A station's per-scan phase trades
 against the source's own phase, so the data do not determine it without a
 source model; it is left for imaging or self-calibration — see
-[`default_fringe_terms`](@ref Gustavo.Fring.default_fringe_terms).
+[`default_fringe_model`](@ref Gustavo.Fring.default_fringe_model).
 
 **`mbd` — per-scan wideband (multi-band) delay, feed-common.** One slope
 across the whole band per scan.
