@@ -41,6 +41,28 @@ end
         @test isempty(XRadio.check(ps; schemas = [schema]))
     end
 
+    @testset "a baseline stored in reverse order is read in one order" begin
+        _, base = uvfits_fixture()
+        nrec = length(base.times)
+        vis = ComplexF32[complex(r + p / 4, c / 8 + p) for r in 1:nrec, p in 1:4, c in 1:2]
+        weights = fill(2.0f0, nrec, 4, 2)
+        kw = (; stokes = [-1, -2, -3, -4], weights)
+        ref = load_uvfits(first(uvfits_fixture(; vis, kw...)))
+        # Record 4 (AA–BB at the second time) written as BB–AA.
+        rvis, ruvw, rbls = copy(vis), copy(base.uvw), copy(base.baselines)
+        rbls[4] = reverse(rbls[4])
+        rvis[4, :, :] .= conj.(vis[4, [1, 2, 4, 3], :])
+        ruvw[4, :] .= .-base.uvw[4, :]
+        rev = load_uvfits(first(uvfits_fixture(; vis = rvis, uvw = ruvw, baselines = rbls, kw...)))
+        @test collect(keys(rev)) == collect(keys(ref))
+        for (m, n) in zip(ref, rev)
+            @test collect(n[:baseline_antenna1_name]) == collect(m[:baseline_antenna1_name])
+            @test isequal(parent(n[:visibility]), parent(m[:visibility]))
+            @test isequal(parent(n[:uvw]), parent(m[:uvw]))
+            @test parent(n[:flag]) == parent(m[:flag])
+        end
+    end
+
     @testset "without an NX table, scans split at time gaps over 60 s" begin
         nonx = load_uvfits(first(uvfits_fixture(; scans = nothing)))
         @test collect(keys(nonx)) == collect(keys(ps))

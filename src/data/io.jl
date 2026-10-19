@@ -8,6 +8,9 @@ Measurement Set per (scan, FQ row, subarray), keyed
 each subarray's Measurement Set takes its antennas from its own. The scans are
 the rows of the NX table; a file without one is split into scans where more
 than 60 s pass between consecutive record times, as `XRadio.fitsidi2msv4` does.
+Each baseline is stored in one order, the lower antenna number first: a record
+whose BASELINE names the higher one first is conjugated, its `uvw` negated and
+its cross-hand products swapped (`RL` with `LR`).
 
 Each Measurement Set conforms to [`GUSTAVO_VISIBILITY_SCHEMA`](@ref): dense
 `(polarization, frequency, baseline_id, time)` visibility, flag and weight

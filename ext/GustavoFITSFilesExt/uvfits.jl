@@ -821,7 +821,19 @@ end
 
 function _measurement_set(shared, records, scan_name, spw_id, window, tab)
     times = sort!(unique(shared.obs_time[records]))
-    pairs_ = sort!(unique(shared.bl_pairs[records]))
+    # Each baseline in one order, lower antenna number first: a record stored
+    # the other way is conjugated, its uvw negated and its cross hands swapped.
+    pairs_ = sort!(unique(minmax(p...) for p in shared.bl_pairs[records]))
+    swapped = map(shared.pol_labels) do label
+        p = findfirst(==(reverse(label)), shared.pol_labels)
+        isnothing(p) && any(((a, b),) -> a > b, shared.bl_pairs[records]) && throw(
+            ArgumentError(
+                "load_uvfits: scan $(scan_name) stores a baseline in both antenna orders, and " *
+                    "its $(label) products have no $(reverse(label)) to swap with"
+            )
+        )
+        something(p, 0)
+    end
     time_of = Dict(t => k for (k, t) in pairs(times))
     base_of = Dict(p => b for (b, p) in pairs(pairs_))
     name_of = Dict(zip(tab.numbers, tab.names))
@@ -843,7 +855,8 @@ function _measurement_set(shared, records, scan_name, spw_id, window, tab)
     record_of = zeros(Int, length(pairs_), length(times))
     for r in records
         k = time_of[shared.obs_time[r]]
-        b = base_of[shared.bl_pairs[r]]
+        b = base_of[minmax(shared.bl_pairs[r]...)]
+        reversed = >(shared.bl_pairs[r]...)
         if record_of[b, k] != 0
             a1, a2 = map(antenna_name, shared.bl_pairs[r])
             throw(
@@ -857,7 +870,7 @@ function _measurement_set(shared, records, scan_name, spw_id, window, tab)
         end
         record_of[b, k] = r
         for axis in 1:3
-            uvw[axis, b, k] = Float64(shared.uvw_raw[r, axis]) * _C_LIGHT
+            uvw[axis, b, k] = (reversed ? -1 : 1) * Float64(shared.uvw_raw[r, axis]) * _C_LIGHT
         end
         isnothing(effective) || (effective[b, k] = shared.inttim[r])
         for c in 1:nchan, p in 1:npol
@@ -865,11 +878,12 @@ function _measurement_set(shared, records, scan_name, spw_id, window, tab)
             isfinite(w) || throw(
                 ArgumentError("load_uvfits: record $r carries weight $w, which states neither a weight nor a flag")
             )
-            vis[p, c, b, k] = vis_raw[r, p, c]
+            q = reversed ? swapped[p] : p
+            vis[q, c, b, k] = reversed ? conj(vis_raw[r, p, c]) : vis_raw[r, p, c]
             # UVFITS records a flag as a negative weight, `-0.0` included; its
             # magnitude is the weight the sample would have had.
-            weight[p, c, b, k] = abs(w)
-            flag[p, c, b, k] = signbit(w)
+            weight[q, c, b, k] = abs(w)
+            flag[q, c, b, k] = signbit(w)
         end
     end
 
