@@ -97,6 +97,24 @@
     end
 end
 
+@testset "calibrate! into a store from parallel tasks" begin
+    ps, _ = _build_fringe_ps(; nscans = 2, nspw = 2)
+    sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
+    expected = calibrate(sol, ps)
+    schemas = [GUSTAVO_VISIBILITY_SCHEMA]
+    exec = ExecutionConfig(; outer_executor = GreedyScheduler(; ntasks = 4), inner_executor = DynamicScheduler())
+    store(time) = (p = joinpath(mktempdir(), "inplace.ps.zarr"); write(p, ps; chunks = (; time), schemas); p)
+
+    path = store(1)
+    calibrate!(sol, open(XRadio.ProcessingSet, path; mode = "r+"); exec)
+    back = read(XRadio.ProcessingSet, path)
+    for (name, ms) in pairs(expected), layer in (:visibility, :weight, :flag)
+        @test isequal(parent(back[name][layer]), parent(ms[layer]))
+    end
+
+    @test_throws "stored in chunks of 4 times" calibrate!(sol, open(XRadio.ProcessingSet, store(4); mode = "r+"); exec)
+end
+
 @testset "write! fills a template from concurrent units" begin
     ps, _ = _build_fringe_ps(; nscans = 3, nspw = 2)
     schemas = [GUSTAVO_VISIBILITY_SCHEMA]

@@ -112,7 +112,10 @@ refused.
 Stations are matched by name against the solution's geometry. The baselines of
 a station the solution does not name are flagged under `apply_flags`, as an
 unconstrained station's are, and otherwise left uncorrected; either way with a
-warning. A solution that shares no station with the data is refused. `exec` supplies the schedulers and
+warning. A solution that shares no station with the data is refused. A store
+opened with `mode = "r+"` is calibrated in place only if its visibility, weight
+and flag layers hold one time per chunk; one chunked over several times is
+refused, since tasks writing into one chunk would lose each other's writes. `exec` supplies the schedulers and
 progress callback; a single Measurement Set uses only its `inner_executor`.
 """
 function calibrate!(
@@ -147,10 +150,31 @@ function _apply_solution!(
         ms::XRadio.MeasurementSet, app::Calibration._AppliedSolution, geom::DataGeometry, flagged;
         flag_bad::Bool, apply_flags::Bool, executor = DynamicScheduler(),
     )
+    _check_time_chunks(ms)
     win = GeometryWindow(geom, ms)
     _divide_gains!(ms, win, app; flag_bad, executor)
     _flag_absent_antennas!(ms, win, app.geom.antennas; apply_flags)
     return _flag_unconstrained!(ms, win, app.geom, flagged)
+end
+
+# Tasks divide out whole time samples, so a stored layer chunked over several
+# times loses writes: each task reads a chunk, changes its own samples and
+# writes the whole chunk back.
+function _check_time_chunks(ms::XRadio.MeasurementSet)
+    for key in (:visibility, :weight, :flag)
+        z = parent(ms[key])
+        z isa Zarr.ZArray || continue
+        n = maximum(length, DiskArrays.eachchunk(z).chunks[DimensionalData.dimnum(ms[key], Ti)])
+        n == 1 || throw(
+            ArgumentError(
+                "`$key` is stored in chunks of $n times, and `calibrate!` writes each time " *
+                    "from its own task, so writes into one chunk would be lost. Calibrate the " *
+                    "data in memory (`calibrate`, or `calibrate!` on each unit of `mapsets`) and " *
+                    "store it with `write!`, or write the store with `chunks = (; time = 1)`"
+            )
+        )
+    end
+    return nothing
 end
 
 # The cross baselines of stations `solved` does not name have no gains to divide
