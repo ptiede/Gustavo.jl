@@ -79,7 +79,7 @@ robust_weight(::Cauchy, u::Real) = inv(1 + u)
                      irls_iters, systematic_delay, systematic_rate)
     Stationization{T}(; kw...)
 
-Options for [`solve_station_systems!`](@ref).
+Options for [`solve_antenna_systems!`](@ref).
 
 `eltype` (or `T`) is the floating-point type the station systems are built and
 solved in, whatever the detections' own type. The default `Float64` is
@@ -201,7 +201,7 @@ function _require_spread(spread, kind::Symbol, loss::AbstractRobustLoss)
             "a $(nameof(typeof(loss))) loss on the $kind system needs the scan's " *
                 "$(what[2]) to express residuals in units of σ, but `$(what[1])` is " *
                 "$(isnothing(spread) ? "missing" : "$spread"). Supply it (see " *
-                "`detection_stack`/`solve_station_systems!`), or set " *
+                "`detection_stack`/`solve_antenna_systems!`), or set " *
                 "`Stationization(loss = LeastSquares())` to weight rows by the " *
                 "noise model alone.",
         ),
@@ -210,7 +210,7 @@ end
 
 # ── Generic, model-driven station solve ─────────────────────────────────────
 #
-# `solve_station_systems!` has no node space of its own: the unknowns are the θ
+# `solve_antenna_systems!` has no node space of its own: the unknowns are the θ
 # columns the model declares. For each stage-B phase component,
 # `_block_index(plan, _feed_node(tying, feed), 1, tseg_id[ti], ant)` is the θ
 # slot a (station, feed, time) observation maps to. The plan's segmentation
@@ -228,7 +228,7 @@ end
 #
 # `scans` is a vector of `AntennaPair × FeedPair` Detection `DimStack`s, the shape
 # `search_scan` returns, read by label: each antenna pair names its stations,
-# which `stations` numbers, and a representative global time index `:ti` in
+# which `antennas` numbers, and a representative global time index `:ti` in
 # metadata selects the `tseg_id`. θ slots are accumulated into
 # with `+=`, so `rounds > 1` — search on the residual — adds each round's
 # increment to the last.
@@ -242,7 +242,7 @@ Package a plain `[antenna pair, feed pair]` detection matrix as the
 antenna-name pairs `antenna_pairs` and the feed-index pairs `feeds` (see
 [`feed_pairs`](@ref)), carrying `ti` (the representative global time index) in
 metadata — so a scan built directly (the refine stage, or a
-direct `solve_station_systems!` call) has the same shape as
+direct `solve_antenna_systems!` call) has the same shape as
 one that came from the search, and every consumer reads pairs/feeds/ti off the
 stack uniformly.
 """
@@ -252,7 +252,7 @@ function detection_stack(
         freq_rms::Union{Nothing, Real} = nothing,
         time_rms::Union{Nothing, Real} = nothing,
     )
-    gdims = (_station_pair_dim(collect(antenna_pairs)), FeedPair(collect(feeds)))
+    gdims = (_antenna_pair_dim(collect(antenna_pairs)), FeedPair(collect(feeds)))
     layers = (;
         delay = DimArray(getfield.(D, :delay), gdims),
         rate = DimArray(getfield.(D, :rate), gdims),
@@ -282,18 +282,18 @@ _with_ti(
 _scan_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, AntennaPair))
 _scan_feeds(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, FeedPair))
 
-_station_slot(slot, name) = get(slot, name) do
-    throw(ArgumentError("detection antenna `$name` is not among the stations " * join(keys(slot), ", ")))
+_antenna_slot(slot, name) = get(slot, name) do
+    throw(ArgumentError("detection antenna `$name` is not among the antennas " * join(keys(slot), ", ")))
 end
 _scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc).ti
 _scan_spread(sc::AbstractDimStack, key::Symbol) = getproperty(DimensionalData.metadata(sc), key)
 
 """
-    solve_station_systems!(θ, scans, components, stations; gauge, opts) -> (ncomp, covered, unlinked)
+    solve_antenna_systems!(θ, scans, components, antennas; gauge, opts) -> (ncomp, covered, unlinked)
 
 Solve the stage-B fringe systems (delay and rate) over `scans` and
 accumulate the per-(station, feed) values into `θ` at the columns the model
-declares. `stations` are the station names the layout numbers; each
+declares. `antennas` are the station names the layout numbers; each
 detection's antenna pair is matched to them by name. `components` is a vector
 of `(plan::ComponentPlan, kind::Symbol)` with
 `kind ∈ (:delay, :rate)`. Multiple components of the same kind are summed
@@ -302,7 +302,7 @@ plus a `GlobalTime × ExceptFeed(1)` inter-feed offset both feed the delay
 system, so a row on feed `k ≠ 1` touches both columns and a stable inter-feed offset is solved
 once across the track (bright scans pin it; weak scans inherit it, tying feeds
 that would otherwise split). Returns the delay system's component count and
-`covered` — the `(station name, feed, scan index)` triples the solve CONSTRAINS
+`covered` — the `(antenna name, feed, scan index)` triples the solve CONSTRAINS
 in every solved kind: those an accepted detection (`pfa ≤ pfa_max`) touches on
 that feed. Coverage is independent of the gauge (see `Stationization` for how
 inconsistent rows are weighted). A θ column no accepted detection touches —
@@ -315,13 +315,13 @@ detections leave the offset between some station's feeds free: no accepted
 detection relates different feeds of that fringe group. The gauge then sets
 it, at the gauge's preferred station, so it is not measured.
 """
-function solve_station_systems!(
-        θ::AbstractVector, scans, components, stations;
+function solve_antenna_systems!(
+        θ::AbstractVector, scans, components, antennas;
         gauge::AbstractGauge, opts::Stationization{T} = Stationization(),
     ) where {T}
     # θ columns are numbered from 1 (`_block_index`).
     Base.require_one_based_indexing(θ)
-    slot = Dict(n => i for (i, n) in pairs(stations))
+    slot = Dict(n => i for (i, n) in pairs(antennas))
     ncomp = 0
     # (station, feed, scan-index) triples the solve constrains, intersected over
     # the solved kinds: a station's feed must be constrained in delay and rate to
@@ -344,7 +344,7 @@ function solve_station_systems!(
     for col in unconstrained
         θ[col] = zero(eltype(θ))
     end
-    return ncomp, Set{Tuple{eltype(stations), Int, Int}}((stations[a], f, si) for (a, f, si) in covered), unlinked
+    return ncomp, Set{Tuple{eltype(antennas), Int, Int}}((antennas[a], f, si) for (a, f, si) in covered), unlinked
 end
 
 # Solve one observable kind across all scans, accumulating into θ. Each detection
@@ -367,7 +367,7 @@ function _solve_kind_cols!(
     colnode = Dict{Int, Int}()               # θ column → local node id
     node_col = Int[]                         # local node → θ column
     node_feed = Int[]                        # exclusive feed, or 0 if a column is shared by several feeds
-    node_station = Int[]
+    node_antenna = Int[]
     node_scan = Int[]                        # scan id, or 0 if a column spans scans (global)
     node_path = Tuple{Vararg{Symbol}}[]      # the owning component's path
     function getnode(col, st, fd, sidx, path)
@@ -377,7 +377,7 @@ function _solve_kind_cols!(
             node_scan[n] == sidx || (node_scan[n] = 0)      # spans scans → global
             return n
         end
-        push!(node_col, col); push!(node_feed, fd); push!(node_station, st); push!(node_scan, sidx)
+        push!(node_col, col); push!(node_feed, fd); push!(node_antenna, st); push!(node_scan, sidx)
         push!(node_path, path)
         return colnode[col] = length(node_col)
     end
@@ -394,7 +394,7 @@ function _solve_kind_cols!(
     raccept = Bool[]
     for (sidx, sc) in enumerate(scans)
         bl_pairs = map(_scan_pairs(sc)) do (a, b)
-            (_station_slot(slot, a), _station_slot(slot, b))
+            (_antenna_slot(slot, a), _antenna_slot(slot, b))
         end
         feeds = _scan_feeds(sc)
         ti = _scan_ti(sc)
@@ -440,7 +440,7 @@ function _solve_kind_cols!(
         A = rowA, B = rowB, links = rlinks, val = rval, accept = raccept,
         sta_a = rsta_a, feed_a = rfeed_a, sta_b = rsta_b, feed_b = rfeed_b, scan = rscan,
     )
-    nodes = (; feed = node_feed, station = node_station, scan = node_scan, component = node_path)
+    nodes = (; feed = node_feed, antenna = node_antenna, scan = node_scan, component = node_path)
     x, ncomp, resid = _solve_tagged_system(rows, w, nodes, gauge, kind)
     if !(opts.loss isa LeastSquares)
         for _ in 1:max(opts.irls_iters, 0)
@@ -457,7 +457,7 @@ function _solve_kind_cols!(
         node_col[n] for i in eachindex(rowA, rowB, raccept) if raccept[i]
             for n in Iterators.flatten((rowA[i], rowB[i]))
     )
-    covered = _covered_station_feeds(rsta_a, rfeed_a, rsta_b, rfeed_b, rscan, raccept)
+    covered = _covered_antenna_feeds(rsta_a, rfeed_a, rsta_b, rfeed_b, rscan, raccept)
     A = _incidence(rows, length(node_col), T)
     return ncomp, covered, solved, constrained, _unlinked_scans(A, rows)
 end
@@ -483,7 +483,7 @@ end
 # looks like; the robust loss then arbitrates inconsistency among those rows
 # without removing any. A station with no accepted detection is uncalibrated
 # however the surviving rows are weighted.
-function _covered_station_feeds(sta_a, feed_a, sta_b, feed_b, rscan, raccept)
+function _covered_antenna_feeds(sta_a, feed_a, sta_b, feed_b, rscan, raccept)
     cov = Set{Tuple{Int, Int, Int}}()
     for i in eachindex(sta_a, feed_a, sta_b, feed_b, rscan, raccept)
         raccept[i] || continue
@@ -520,7 +520,7 @@ function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol
     freedoms = map(1:nfree) do c
         cn = [n for n in eachindex(compid) if compid[n] == c]
         GaugeFreedom(;
-            nodes = cn, station = nodes.station[cn], feed = nodes.feed[cn], scan = nodes.scan[cn],
+            nodes = cn, antenna = nodes.antenna[cn], feed = nodes.feed[cn], scan = nodes.scan[cn],
             component = nodes.component[cn], observable = fill(kind, length(cn)),
             direction = ones(T, length(cn)), weight = nodew[cn],
         )
@@ -536,7 +536,7 @@ function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol
         err isa ArgumentError || rethrow()
         throw(
             ArgumentError(
-                "the $kind station system is not determined after its gauge ($(err.msg)): " *
+                "the $kind antenna system is not determined after its gauge ($(err.msg)): " *
                     "the detections leave a combination of the model's columns free, such " *
                     "as two components of this observable that every detection sees only " *
                     "as their sum.",
@@ -623,7 +623,7 @@ function _pin_leftover_freedoms(C, d, A, rows, nodew, gauge::AbstractGauge)
     for ((st, _, _), cols) in sides
         weight[st] = get(weight, st, zero(T)) + sum(n -> nodew[n], cols)
     end
-    preferred = collect(gauge_station_order(gauge))
+    preferred = collect(gauge_antenna_order(gauge))
     rank_of(st) = (something(findfirst(==(st), preferred), length(preferred) + 1), -weight[st], st)
     keys_in_order = sort!(collect(keys(sides)); by = ((st, f, sc),) -> (rank_of(st), sc, f))
 
@@ -654,7 +654,7 @@ end
 # connectivity cut: where weak rows bridge two accepted components, each keeps
 # its own gauge row, and those rows fix the offset between them. Nodes no
 # accepted row links form islands over all rows, gauged the same way;
-# `_covered_station_feeds` excludes them from coverage.
+# `_covered_antenna_feeds` excludes them from coverage.
 function _gauge_components(rows, nodes)
     nnodes = length(nodes.feed)
     accepted = (l for i in eachindex(rows.links, rows.accept) if rows.accept[i] for l in rows.links[i])
@@ -711,7 +711,7 @@ function _node_weights(nnodes::Integer, rows, w::AbstractVector{T}) where {T}
 end
 
 """
-    station_closure_residuals(dets; observable = :phase, feeds = (1, 1), pfa_max) -> Vector
+    antenna_closure_residuals(dets; observable = :phase, feeds = (1, 1), pfa_max) -> Vector
 
 For every closed triangle of antenna pairs in the detection stack `dets` (the
 `AntennaPair × FeedPair` shape [`search_scan`](@ref) returns), the residual
@@ -726,7 +726,7 @@ A triangle counts only when all three legs are accepted detections
 (`pfa <= pfa_max`); a leg above that threshold carries an arbitrary value,
 which would enter the sum as noise rather than as evidence of non-closure.
 """
-function station_closure_residuals(
+function antenna_closure_residuals(
         dets::AbstractDimStack; observable::Symbol = :phase, feeds::Tuple{Integer, Integer} = (1, 1),
         pfa_max::Real = Stationization().pfa_max,
     )

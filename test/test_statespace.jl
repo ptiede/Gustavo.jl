@@ -205,7 +205,7 @@ end
     @test maximum(abs(xs[i, k] - Xgp[i, k]) for k in 1:T for i in 1:n) < 1.0e-8
 end
 
-@testset "Joint filter over mixed OU and random-walk stations ≡ dense GP" begin
+@testset "Joint filter over mixed OU and random-walk antennas ≡ dense GP" begin
     rng = MersenneTwister(0x5A1D)
     T = 9
     times = sort(cumsum(0.5 .+ rand(rng, T)) .* 2.0)
@@ -269,7 +269,7 @@ end
     )
 end
 
-@testset "Multivariate OU: a τ = 0 station is temporally independent" begin
+@testset "Multivariate OU: a τ = 0 antenna is temporally independent" begin
     # A τ = 0 station has a fresh N(0, σ²) value at every step and no temporal coupling,
     # so the RTS pass has nothing to propagate back: the smoothed track equals the
     # filtered one exactly. Every station here is independent AND observed, so the

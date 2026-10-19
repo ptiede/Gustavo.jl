@@ -24,7 +24,7 @@
     again, _ = _build_fringe_ps(; nant = 3, nspw = 2, nchan = 4, ntime = 5, nscans = 2)
     @test all(parent(x[:visibility]) == parent(y[:visibility]) for (x, y) in zip(values(ps), values(again)))
 
-    dropped, _ = _build_fringe_ps(; nant = 4, nspw = 1, omit_station = 2)
+    dropped, _ = _build_fringe_ps(; nant = 4, nspw = 1, omit_antenna = 2)
     ms = only(values(dropped))
     @test "A2" ∉ ms[:baseline_antenna1_name] && "A2" ∉ ms[:baseline_antenna2_name]
     @test "A2" in collect(lookup(ms.antenna, AntennaName))

@@ -5,8 +5,8 @@
 
 @testset "Fringe diagnostics" begin
     # Rates large enough that the uncorrected scan average decorrelates.
-    station_rate = [0.0, 0.8e-3, -0.9e-3, 1.0e-3]
-    ps, _truth = _build_fringe_ps(; station_rate)
+    antenna_rate = [0.0, 0.8e-3, -0.9e-3, 1.0e-3]
+    ps, _truth = _build_fringe_ps(; antenna_rate)
     gauge = PinAntenna(1)
     sols = _fit_chain(
         (
@@ -74,19 +74,19 @@
         t = FP.cat_scans(FP.fringe_snr_table.(values(per_scan)))
         @test lookup(t, Gustavo.Scan) == lookup(FP.fringe_snr_table(whole), Gustavo.Scan)
         @test t.max_snr == FP.fringe_snr_table(whole).max_snr
-        st = FP.cat_scans(FP.fringe_station_solutions.(values(per_scan)))
-        @test st.delay ≈ FP.fringe_station_solutions(whole).delay
+        st = FP.cat_scans(FP.fringe_antenna_solutions.(values(per_scan)))
+        @test st.delay ≈ FP.fringe_antenna_solutions(whole).delay
         det = FP.cat_scans(FP.fringe_detections.(values(per_scan)))
         @test count(det.detected) == count(FP.fringe_detections(whole).detected)
 
         # Differing labels form a union; a cell an input lacks is NaN (false for Bool).
-        a = DimArray([1.0 2.0], (FP._scan_dim(["s1"]), FP._station_dim(["A", "B"])))
-        b = DimArray([3.0 4.0], (FP._scan_dim(["s2"]), FP._station_dim(["B", "C"])))
+        a = DimArray([1.0 2.0], (FP._scan_dim(["s1"]), FP._antenna_dim(["A", "B"])))
+        b = DimArray([3.0 4.0], (FP._scan_dim(["s2"]), FP._antenna_dim(["B", "C"])))
         ab = FP.cat_scans([a, b])
         @test collect(lookup(ab, Gustavo.AntennaName)) == ["A", "B", "C"]
         @test isequal(parent(ab), [1.0 2.0 NaN; NaN 3.0 4.0])
-        fa = DimArray([true;;], (FP._scan_dim(["s1"]), FP._station_dim(["A"])))
-        fb = DimArray([true;;], (FP._scan_dim(["s2"]), FP._station_dim(["B"])))
+        fa = DimArray([true;;], (FP._scan_dim(["s1"]), FP._antenna_dim(["A"])))
+        fb = DimArray([true;;], (FP._scan_dim(["s2"]), FP._antenna_dim(["B"])))
         @test parent(FP.cat_scans([fa, fb])) == [true false; false true]
 
         @test_throws "cat_scans: scans repeat: s1" FP.cat_scans([a, a])
@@ -99,20 +99,20 @@
         # time series as `gains(sol; Frequency = ci)` — an integer selector
         # windows the evaluation to that sample and drops the dimension.
         g = gains(sol; Ti = 1)
-        @test size(g) == (length(sol.geom.channel_freqs), length(sol.geom.stations), 2)
+        @test size(g) == (length(sol.geom.channel_freqs), length(sol.geom.antennas), 2)
         @test eltype(g) <: Complex
         @test lookup(g, Gustavo.Frequency) == sol.geom.channel_freqs
 
         gt = gains(sol; Frequency = 1)
-        @test size(gt) == (length(sol.geom.times), length(sol.geom.stations), 2)
+        @test size(gt) == (length(sol.geom.times), length(sol.geom.antennas), 2)
         @test lookup(gt, Ti) == sol.geom.times
 
         @test_throws BoundsError gains(sol; Ti = 10_000)
     end
 
-    @testset "station codes available for plot labels" begin
+    @testset "antenna codes available for plot labels" begin
         # Spectrum/phase plots read codes from the solution's geometry.
-        @test sol.geom.stations == ["A1", "A2", "A3", "A4"]
+        @test sol.geom.antennas == ["A1", "A2", "A3", "A4"]
     end
 
     scan_average(data) = XRadio.average(data, XRadio.ByScan())
@@ -406,7 +406,7 @@ end
     # 3 bands of 4 channels with gaps; flat phase gives η = 1, a ramp less.
     freqs = vcat(1.0e9 .+ (0:3) .* 1.0e6, 1.1e9 .+ (0:3) .* 1.0e6, 1.3e9 .+ (0:3) .* 1.0e6)
     @test FP._freq_group_ranges(freqs) == [1:4, 5:8, 9:12]
-    d = (FP._scan_dim(["1"]), FP._station_pair_dim([("A", "B")]), FeedPair([(1, 1)]), Frequency(freqs))
+    d = (FP._scan_dim(["1"]), FP._antenna_pair_dim([("A", "B")]), FeedPair([(1, 1)]), Frequency(freqs))
     spectra(z) = DimStack((; vis = DimArray(reshape(z, 1, 1, 1, :), d)))
     ramp = FP.freq_group_coherence(spectra(ComplexF64[cis(2π * c / 6) for c in eachindex(freqs)]))
     flat = FP.freq_group_coherence(spectra(fill(1.0 + 0.0im, length(freqs))))

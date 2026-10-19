@@ -31,8 +31,8 @@ end
 # levels (`fits[a]`), with `active` marking the pieces its prior acts on — those
 # with data or fixed values at enough slots (`known`) to determine its states.
 function _bandpass_tracks(fits, observable, ids, loc, present, nfeed, known)
-    stations = [a for a in eachindex(fits, loc) if !isnothing(fits[a]) && !isnothing(fits[a][observable])]
-    return [_bandpass_track(fits[a][observable], a, loc[a], feed, ts, ids, known) for a in stations for feed in 1:nfeed for ts in present[a]]
+    antennas = [a for a in eachindex(fits, loc) if !isnothing(fits[a]) && !isnothing(fits[a][observable])]
+    return [_bandpass_track(fits[a][observable], a, loc[a], feed, ts, ids, known) for a in antennas for feed in 1:nfeed for ts in present[a]]
 end
 
 function _bandpass_track(f, a, (k, ai), feed, ts, ids, known)
@@ -56,11 +56,11 @@ function _largest_weighted_change(Δℓ, Δφ, W)
     return worst, at
 end
 
-# `" (station, feed f, frequency segment s, time segment t)"` for gain `I` of block `k`.
+# `" (antenna, feed f, frequency segment s, time segment t)"` for gain `I` of block `k`.
 function _slot_description(geom::DataGeometry, loc, k, I)
     ai, f, fs, ts = Tuple(I)
     ant = findfirst(==((k, ai)), loc)
-    return " ($(geom.stations[ant]), feed $f, frequency segment $fs, time segment $ts)"
+    return " ($(geom.antennas[ant]), feed $f, frequency segment $fs, time segment $ts)"
 end
 
 # A joint level writer's values at time segment `ts`.
@@ -90,7 +90,7 @@ function _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_w
         T = eltype(block.θ)
         (; g, φ, phase_valid, amp_valid) = gk
         node(b, f) = isnothing(b) ? 0 : _feed_node(b.plan.tying, f)
-        for (ai, a) in pairs(block.stations), f in axes(g, Feed), ts in layout.present[a]
+        for (ai, a) in pairs(block.antennas), f in axes(g, Feed), ts in layout.present[a]
             pnode, anode = node(pb, f), node(ab, f)
             lw = map(l -> _level_at(l, ts), level_writers[a])
             pv = view(phase_valid, ai, f, :, ts)
@@ -164,8 +164,8 @@ rest of the track is then fit with the pinned segment held at zero.
 `accumulate_bandpass` — not summed across scans, since the source term
 needs each scan's own coherent visibility.
 
-`tseg`, when given, is the `(station, scan)` time-segment table
-([`_station_time_segments`](@ref)): station `a`'s gain is solved separately for
+`tseg`, when given, is the `(antenna, scan)` time-segment table
+([`_antenna_time_segments`](@ref)): station `a`'s gain is solved separately for
 each distinct `tseg[a, :]` value, in that station's own segment numbering, and a
 station whose entry is `0` is left out of the solve. Every station shares one
 segment when it is omitted. `scans` must hold the scans `tseg`'s columns
@@ -232,15 +232,15 @@ function solve_joint_bandpass!(
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
     )
     isempty(scans) && return (; phase = [], amp = [])
-    nant = length(geom.stations)
+    nant = length(geom.antennas)
 
     # The data are reduced onto the refinement of every block's frequency
     # segmentation, and each station's gain is held in its own segments — one
     # gain over however many refinement cells that segment spans.
     blocks = _gain_blocks(phase_blocks, amp_blocks)
-    fseg, cells = _station_freq_segments(blocks, nant)
+    fseg, cells = _antenna_freq_segments(blocks, nant)
     r, w = _reduce_all_scans(scans, cells; eltype)
-    ends = _cell_nodes(r, geom.stations, PerFeed())
+    ends = _cell_nodes(r, geom.antennas, PerFeed())
     S = zeros(Base.eltype(r), (Scan(axes(r, Scan)), dims(r, AntennaPair), dims(r, FeedPair)))
     data = DimStack((; r, w, S, ends))
 
@@ -258,8 +258,8 @@ function solve_joint_bandpass!(
     gauge_rows = isnothing(gauge_state) ? nothing : (; gauge_state.rows, d = Float64.(gauge_state.d))
 
     segs = [_shape_segments(b.plan, geom) for b in blocks]
-    phase_level = _station_levels(phase_level_blocks, segs, loc, geom, θ, real(Base.eltype(r)))
-    amp_level = _station_levels(amp_level_blocks, segs, loc, geom, θ, real(Base.eltype(r)))
+    phase_level = _antenna_levels(phase_level_blocks, segs, loc, geom, θ, real(Base.eltype(r)))
+    amp_level = _antenna_levels(amp_level_blocks, segs, loc, geom, θ, real(Base.eltype(r)))
     fits = map(1:nant) do a
         k, ai = loc[a]
         iszero(k) && return nothing
@@ -461,11 +461,11 @@ function solve_joint_bandpass!(
     free_amp = fitted.amp ? _split_free_amplitudes!(ℓ, jl.slot_pairs[measured], free.amp, tracks.amp) : NamedTuple[]
     if !isempty(free_amp)
         g = first(free_amp)
-        names = unique(geom.stations[findfirst(==((slot[n][1], slot[n][2][1])), loc)] for n in g.slots)
+        names = unique(geom.antennas[findfirst(==((slot[n][1], slot[n][2][1])), loc)] for n in g.slots)
         @warn "the joint bandpass data leave $(sum(x -> x.ndir, free_amp)) frequency-dependent " *
             "log-amplitude directions undetermined in $(length(free_amp)) groups of gain slots, e.g. " *
-            "stations $(join(sort!(names), ", "))$(_slot_description(geom, loc, slot[first(g.slots)]...)): " *
-            "each group is joined only by baselines with no odd loop (two stations, a chain or an even " *
+            "antennas $(join(sort!(names), ", "))$(_slot_description(geom, loc, slot[first(g.slots)]...)): " *
+            "each group is joined only by baselines with no odd loop (two antennas, a chain or an even " *
             "ring), which measure the sum of two sides' log-amplitudes but not how it divides between " *
             "them, and the amplitude prior, if any, does not fix it. The solve splits each group evenly " *
             "(the minimum-norm solution)."
@@ -649,9 +649,9 @@ end
 # piece → level map and level count against the station's shape segments, its
 # level block's leaf, feed tying and position, the level of each shape segment,
 # and its time-segment count.
-function _station_levels(level_blocks, segs, loc, geom::DataGeometry, θ, ::Type{T}) where {T}
+function _antenna_levels(level_blocks, segs, loc, geom::DataGeometry, θ, ::Type{T}) where {T}
     out = Vector{Any}(nothing, length(loc))
-    for lb in level_blocks, (li, a) in pairs(lb.stations)
+    for lb in level_blocks, (li, a) in pairs(lb.antennas)
         k, _ = loc[a]
         iszero(k) && continue
         level, nlevel = _piece_levels(lb.plan, segs[k])

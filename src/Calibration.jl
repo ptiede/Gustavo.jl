@@ -52,7 +52,7 @@ export feed_pairs
 # Gauge conventions for station-based solves
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent
 export GaugeFreedom, GaugeFreedoms, gauge_constraints, gauge_constraint, gauge_anchor
-export resolve_gauge, remap_gauge, gauge_station_order, check_gauge_components
+export resolve_gauge, remap_gauge, gauge_antenna_order, check_gauge_components
 
 # ── Unified gain-model framework ─────────────────────────────────────────────
 # Segmentation vocabulary
@@ -70,16 +70,16 @@ export term_axes, param_shapes, term_eval
 export freq_coordinate, time_coordinate, freq_coord_state, time_coord_state
 
 # Models and tying
-export GainComponent, GainModel, with_station
+export GainComponent, GainModel, with_antenna
 export AbstractPrior, IIDPrior, RandomWalkPrior, OUPrior, resolve_prior, is_fixed_hyper
 export AbstractFeedTying, PerFeed, SharedFeeds, SingleFeed, ExceptFeed
 export phase_components, logamp_components, model_components
-export station_components
+export antenna_components
 export validate_gain_model, component_label
 
 
 # Parameter layout and pure evaluation
-export ParameterLayout, plan_parameters, station_blocks
+export ParameterLayout, plan_parameters, antenna_blocks
 export evaluate_gains
 
 # Calibration solution container, apply, serialization

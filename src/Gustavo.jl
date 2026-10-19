@@ -60,9 +60,9 @@ export BaselineFringeFit, default_fringe_model, Bandpass, default_bandpass_model
 # The gain-model vocabulary: everything a step's `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare
 # `using Gustavo`.
-export GainComponent, GainModel, with_station
+export GainComponent, GainModel, with_antenna
 export AbstractPrior, IIDPrior, RandomWalkPrior, OUPrior
-export station_components, component_label
+export antenna_components, component_label
 export AbstractGainTerm, ConstantTerm, Delay, Dispersion, Rate, Polynomial,
     PolynomialFreq, PolynomialTime
 export AbstractFeedTying, PerFeed, SharedFeeds, SingleFeed, ExceptFeed
@@ -75,7 +75,7 @@ export fit
 export SolveStep, ExecutionConfig, ProgressLogger, mapsets, write!
 export outer_executor, inner_executor
 export each_group, model_components, provides, step_gauge
-export supports_station_heterogeneity
+export supports_antenna_heterogeneity
 export scale_weights!, normalize_by_autocorrelations!
 export apriori_calibrate!, TsysPlacement, ScanMean, LinearInTime, NearestInTime
 export search_scan

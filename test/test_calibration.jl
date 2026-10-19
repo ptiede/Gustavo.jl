@@ -476,6 +476,7 @@ end
     @test lay_ex.nθ == 4                                    # 2 ant × feeds 1 and 3
     @test Tuple(lay_ex.plans[1].shape) == (1, 2, 1, 1, 2)
     @test [CAL._feed_node(CAL.ExceptFeed(2), f) for f in 1:3] == [1, 0, 2]   # feed 2 has no block
+    @test CAL._block_feeds(CAL.ExceptFeed(2), 3) == [1, 3]
     geom1 = CAL.DataGeometry(; nfeed = 1, times = [0.0, 1.0], channel_freqs = [1.0e9, 2.0e9])
     @test CAL.plan_parameters(mk(CAL.ExceptFeed(1)), 2, geom1).nθ == 0
     @test_throws "ExceptFeed(3) names a feed the data does not have" CAL.plan_parameters(mk(CAL.ExceptFeed(3)), 2, geom)
@@ -535,7 +536,7 @@ end
     times = [0.0, 1.0, 2.0, 3.0]
     ants = ["PT", "LM", "AA"]
     geom = CAL.DataGeometry(; nfeed = 2,
-        times, channel_freqs = freqs, stations = ants,
+        times, channel_freqs = freqs, antennas = ants,
         scan_of_time = [1, 1, 2, 2], spw_of_chan = [1, 1, 1, 1], t0 = 0.0, f0 = 2.5e9,
     )
     nant = 3
@@ -569,12 +570,13 @@ end
     @test size(a) == Tuple(layout.axes.phase.atmos.dims)
     @test name.(dims(a)) == layout.axes.phase.atmos.roles
 
-    # PerFeed carries a physical Feed axis; the tied tyings carry a positional
-    # node axis.
+    # PerFeed, SingleFeed and ExceptFeed carry a Feed axis over the feeds with a
+    # block; SharedFeeds carries one positional node.
     @test name(dims(a, 2)) == :Feed
     bpp = only(sol[:phase, :bp].components).params
     @test name(dims(bpp, 2)) == :node
-    @test size(only(sol[:phase, :rl].components).params, 2) == 1
+    rlp = only(sol[:phase, :rl].components).params
+    @test name(dims(rlp, 2)) == :Feed && lookup(rlp, Gustavo.Feed) == [2]
 
     # Segment axes span each segment's channels or samples, labeled by the
     # midpoint, so `Contains` finds the segment covering a coordinate.
@@ -616,7 +618,7 @@ end
 
     # A nested subtree (`sbd.delay` / `sbd.constant`) keeps its path.
     gb = CAL.DataGeometry(; nfeed = 2,
-        times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 5.0e9, 5.1e9], stations = ["X", "Y"],
+        times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 5.0e9, 5.1e9], antennas = ["X", "Y"],
         scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 2], t0 = 0.0, f0 = 3.0e9,
     )
     groups = CAL.FreqGroups([1:2, 3:4])
@@ -651,8 +653,8 @@ end
 
     # A path starts at :phase or :logamp; a geometry must name its stations.
     @test_throws "starts at :phase or :logamp" CAL.ComponentFit((:atmos,), c.component, c.params)
-    nostations = CAL.DataGeometry(; nfeed = 2, times, channel_freqs = freqs, scan_of_time = [1, 1, 2, 2], spw_of_chan = [1, 1, 1, 1], t0 = 0.0, f0 = 2.5e9)
-    @test_throws "must name its stations" CAL.CalibrationSolution(model, layout, nostations, θ)
+    noantennas = CAL.DataGeometry(; nfeed = 2, times, channel_freqs = freqs, scan_of_time = [1, 1, 2, 2], spw_of_chan = [1, 1, 1, 1], t0 = 0.0, f0 = 2.5e9)
+    @test_throws "must name its antennas" CAL.CalibrationSolution(model, layout, noantennas, θ)
 end
 
 @testset "Calibration evaluate_gains: correctness, purity, inference" begin
@@ -809,9 +811,9 @@ end
         @test bp(CAL.IIDPrior(0.5)) != bp(CAL.IIDPrior(0.6))
     end
 
-    @testset "stations differing only in prior share a plan" begin
+    @testset "antennas differing only in prior share a plan" begin
         geom = CAL.DataGeometry(; nfeed = 2,
-            times = [0.0, 1.0], scan_of_time = [1, 2], stations = ["AA", "BB", "CC"],
+            times = [0.0, 1.0], scan_of_time = [1, 2], antennas = ["AA", "BB", "CC"],
             channel_freqs = [1.0, 1.1, 1.2, 2.0, 2.1] .* 1.0e9, spw_of_chan = [1, 1, 1, 2, 2],
             t0 = 0.0, f0 = 1.5e9,
         )
@@ -823,7 +825,7 @@ end
         ou = CAL.OUPrior(; scale = LogNormal(18.0, 1.0), σ = 0.1)
         m = CAL.GainModel(
             phase = (bp = bp(rw),),
-            stations = (BB = (; phase = (bp = bp(ou),)),),
+            antennas = (BB = (; phase = (bp = bp(ou),)),),
         )
         uniform = CAL.plan_parameters(CAL.GainModel(phase = (bp = bp(rw),)), names, geom)
         layout = CAL.plan_parameters(m, names, geom)
@@ -832,12 +834,12 @@ end
         @test layout.nθ == uniform.nθ && plan.range == uniform.plantree.phase.bp.range
         @test plan.priors == [(Frequency = rw,), (Frequency = ou,), (Frequency = rw,)]
         @test eltype(uniform.plantree.phase.bp.priors) == typeof((Frequency = rw,))
-        @test CAL.require_station_uniform(m, names, "test") === m
+        @test CAL.require_antenna_uniform(m, names, "test") === m
 
         # With a second signature, each group still carries its stations' own priors.
-        m2 = CAL.with_station(m, "CC"; phase = (bp = bp(nothing; Ti = CAL.PerScan()),))
+        m2 = CAL.with_antenna(m, "CC"; phase = (bp = bp(nothing; Ti = CAL.PerScan()),))
         g = CAL.plan_parameters(m2, names, geom).plantree.phase.bp
-        @test g isa CAL.GroupedComponentPlan && g.stations == [[1, 2], [3]]
+        @test g isa CAL.GroupedComponentPlan && g.antennas == [[1, 2], [3]]
         @test g.groups.g1.priors == [(Frequency = rw,), (Frequency = ou,)]
         @test g.groups.g2.priors == [nothing]
 
@@ -884,7 +886,7 @@ end
     freqs = collect(2.28e11:1.0e8:(2.28e11 + 5.0e8))
     times = [0.0, 0.5, 1.0]
     geom = CAL.DataGeometry(; nfeed = 2,
-        times, channel_freqs = freqs, stations = ["A", "B", "C"], t0 = 0.0, f0 = sum(freqs) / length(freqs),
+        times, channel_freqs = freqs, antennas = ["A", "B", "C"], t0 = 0.0, f0 = sum(freqs) / length(freqs),
     )
     model = CAL.GainModel(
         phase = (
@@ -916,7 +918,7 @@ end
         # Axes carry the geometry, so a user can index by physical coordinate.
         @test lookup(g, Gustavo.Frequency) == freqs
         @test lookup(g, Ti) == times
-        @test lookup(g, Gustavo.AntennaName) == geom.stations
+        @test lookup(g, Gustavo.AntennaName) == geom.antennas
         @test lookup(g, Gustavo.Feed) == 1:2
         # amp/phase recover from the complex gain, no separate accessor needed.
         @test abs.(g) == abs.(CAL.evaluate_gains(ev, θv))
@@ -934,7 +936,7 @@ end
         @test lookup(gw, Ti) == times[ti]
         # Another geometry holding the same samples places each in the same
         # solve segment.
-        other = CAL.DataGeometry(; nfeed = 2, times, channel_freqs = freqs, stations = geom.stations, t0 = 0.0, f0 = geom.f0)
+        other = CAL.DataGeometry(; nfeed = 2, times, channel_freqs = freqs, antennas = geom.antennas, t0 = 0.0, f0 = geom.f0)
         @test parent(gains(solv, CAL.GeometryWindow(other, ci, ti))) ≈ parent(gw)
     end
 
@@ -976,13 +978,13 @@ end
         d = dims(c.params)
         relabeled = CAL.ComponentFit(c.path, c.component, DimArray(parent(c.params), (d[1:3]..., Ti([9.0]), d[5])))
         @test_throws "Ti axis is [9.0]" gains(CAL.CalibrationSolution(geom, :solution, [relabeled]))
-        other_stations = CAL.ComponentFit(c.path, c.component, DimArray(parent(c.params), (d[1:4]..., Gustavo.AntennaName(["A", "B", "Z"]))))
-        @test_throws "station `Z` is not among" gains(CAL.CalibrationSolution(geom, :solution, [other_stations]))
+        other_antennas = CAL.ComponentFit(c.path, c.component, DimArray(parent(c.params), (d[1:4]..., Gustavo.AntennaName(["A", "B", "Z"]))))
+        @test_throws "antenna `Z` is not among" gains(CAL.CalibrationSolution(geom, :solution, [other_antennas]))
         short = CAL.ComponentFit(c.path, c.component, c.params[Ti(1:1), Gustavo.Frequency(1:2)])
         @test_throws DimensionMismatch gains(CAL.CalibrationSolution(geom, :solution, [short]))
     end
 
-    @testset "a component over some stations leaves the others at unit gain" begin
+    @testset "a component over some antennas leaves the others at unit gain" begin
         c = only(solv[:phase, :delay].components)
         sub = CAL.ComponentFit(c.path, c.component, c.params[Gustavo.AntennaName(At(["A", "C"]))])
         g = parent(gains(CAL.CalibrationSolution(geom, :solution, [sub])))
@@ -1094,12 +1096,12 @@ end
     @test maximum(abs, (out[31:end] .- out[31]) .- (gentle[31:end] .- gentle[31])) < 1.0e-8
 end
 
-@testset "Per-station heterogeneity" begin
+@testset "Per-antenna heterogeneity" begin
     geom = CAL.DataGeometry(; nfeed = 2,
         times = [0.0, 0.1, 1.0, 1.1],
         scan_of_time = [1, 1, 2, 2],
         channel_freqs = collect(1.0:6.0) .* 1.0e9,
-        spw_of_chan = [1, 1, 1, 2, 2, 2], stations = ["AA", "BB", "CC"],
+        spw_of_chan = [1, 1, 1, 2, 2, 2], antennas = ["AA", "BB", "CC"],
         t0 = 0.0, f0 = 3.5e9,
     )
     names = ["AA", "BB", "CC"]
@@ -1112,66 +1114,66 @@ end
     )
     base = (; phase = (bandpass = bp(CAL.ChannelBlocks(1)), atmos))
 
-    @testset "stations constructor and seam" begin
+    @testset "antennas constructor and seam" begin
         m = CAL.GainModel(;
-            base..., stations = (AA = (; phase = (bandpass = bp(CAL.GlobalFrequency()),)),),
+            base..., antennas = (AA = (; phase = (bandpass = bp(CAL.GlobalFrequency()),)),),
         )
         # Replacement is verbatim and whole-group: AA's phase tree is the
         # entry's alone (no `atmos`), its logamp inherited from the base.
-        aa = CAL.station_components(m, "AA")
+        aa = CAL.antenna_components(m, "AA")
         @test keys(aa.phase) == (:bandpass,)
         @test aa.phase.bandpass.Frequency isa CAL.GlobalFrequency
         @test aa.logamp == m.logamp
         # A station without an entry gets the base pair, and Symbol/String
         # address the same station.
-        @test CAL.station_components(m, "BB") == (; phase = m.phase, logamp = m.logamp)
-        @test CAL.station_components(m, :AA) == aa
+        @test CAL.antenna_components(m, "BB") == (; phase = m.phase, logamp = m.logamp)
+        @test CAL.antenna_components(m, :AA) == aa
 
         # Entry keys other than phase/logamp error — the likely mistake is a
         # component name at the top level.
         @test_throws "unexpected key" CAL.GainModel(;
-            base..., stations = (AA = (; bandpass = bp(CAL.GlobalFrequency())),),
+            base..., antennas = (AA = (; bandpass = bp(CAL.GlobalFrequency())),),
         )
         @test_throws "must be a `(; phase, logamp)` NamedTuple" CAL.GainModel(;
-            base..., stations = (AA = bp(CAL.GlobalFrequency()),),
+            base..., antennas = (AA = bp(CAL.GlobalFrequency()),),
         )
 
-        # Equality and hashing are order-insensitive in `stations`.
+        # Equality and hashing are order-insensitive in `antennas`.
         ma = CAL.GainModel(;
-            base..., stations = (AA = (; phase = (;)), BB = (; logamp = (;))),
+            base..., antennas = (AA = (; phase = (;)), BB = (; logamp = (;))),
         )
         mb = CAL.GainModel(;
-            base..., stations = (BB = (; logamp = (;)), AA = (; phase = (;))),
+            base..., antennas = (BB = (; logamp = (;)), AA = (; phase = (;))),
         )
         @test ma == mb
         @test hash(ma) == hash(mb)
         @test ma != CAL.GainModel(; base...)
     end
 
-    @testset "with_station" begin
+    @testset "with_antenna" begin
         m = CAL.GainModel(; base...)
         cc = (bandpass = bp(CAL.GlobalFrequency()),)
-        mc = CAL.with_station(m, "CC"; phase = cc)
-        @test mc == CAL.GainModel(; base..., stations = (CC = (; phase = cc),))
+        mc = CAL.with_antenna(m, "CC"; phase = cc)
+        @test mc == CAL.GainModel(; base..., antennas = (CC = (; phase = cc),))
         @test m == CAL.GainModel(; base...)          # the input is unchanged
         # A later call keeps the groups it does not name; Symbol/String agree.
         la = (amp = atmos,)
-        mcl = CAL.with_station(mc, :CC; logamp = la)
-        @test CAL.station_components(mcl, "CC") == (; phase = cc, logamp = la)
-        @test CAL.with_station(mcl, "CC"; phase = base.phase).stations.CC ==
+        mcl = CAL.with_antenna(mc, :CC; logamp = la)
+        @test CAL.antenna_components(mcl, "CC") == (; phase = cc, logamp = la)
+        @test CAL.with_antenna(mcl, "CC"; phase = base.phase).antennas.CC ==
             (; phase = base.phase, logamp = la)
-        @test_throws "unexpected key" CAL.with_station(m, "CC"; bandpass = bp(CAL.GlobalFrequency()))
+        @test_throws "unexpected key" CAL.with_antenna(m, "CC"; bandpass = bp(CAL.GlobalFrequency()))
     end
 
     @testset "merge" begin
-        m = CAL.with_station(CAL.GainModel(; base...), "CC"; phase = (; bandpass = bp(CAL.GlobalFrequency())))
+        m = CAL.with_antenna(CAL.GainModel(; base...), "CC"; phase = (; bandpass = bp(CAL.GlobalFrequency())))
         amp = (; amp = atmos)
         mm = merge(m; phase = (; atmos = bp(CAL.GlobalFrequency())), logamp = amp)
         # A name the model has is replaced in place; a new name is appended.
         @test keys(mm.phase) == (:bandpass, :atmos)
         @test mm.phase.atmos == bp(CAL.GlobalFrequency())
         @test mm.logamp == amp
-        @test mm.stations == m.stations                       # entries are kept
+        @test mm.antennas == m.antennas                       # entries are kept
         @test merge(m) == m
         @test_throws "must be named" merge(m; phase = (atmos,))
         @test_throws "must be a `GainComponent`" merge(m; phase = (; x = 1.0))
@@ -1182,26 +1184,26 @@ end
         # equal to the base (after resolution) collapses away.
         m = CAL.GainModel(
             phase = (bandpass = bp(CAL.BandGroups()), atmos),
-            stations = (
+            antennas = (
                 BB = (; phase = (bandpass = bp(CAL.BandGroups()), atmos)),
                 CC = (; phase = (bandpass = bp(CAL.GlobalFrequency()),)),
             ),
         )
         mat = CAL.resolve(m, names, geom)
         @test mat.phase.bandpass.Frequency isa CAL.FreqGroups
-        @test keys(mat.stations) == (:CC,)
+        @test keys(mat.antennas) == (:CC,)
         @test CAL.resolve(mat, names, geom) == mat        # idempotent
 
         # Unknown station codes error, naming the known stations.
-        bad = CAL.GainModel(; base..., stations = (XX = (; phase = base.phase),))
-        @test_throws "unknown station :XX" CAL.resolve(bad, names, geom)
+        bad = CAL.GainModel(; base..., antennas = (XX = (; phase = base.phase),))
+        @test_throws "unknown antenna :XX" CAL.resolve(bad, names, geom)
         @test_throws "AA, BB, CC" CAL.resolve(bad, names, geom)
     end
 
     mu = CAL.GainModel(; base...)
     mh = CAL.GainModel(;
         base...,
-        stations = (AA = (; phase = (bandpass = bp(CAL.GlobalFrequency()), atmos)),),
+        antennas = (AA = (; phase = (bandpass = bp(CAL.GlobalFrequency()), atmos)),),
     )
 
     @testset "uniform model reproduces the rectangular layout exactly" begin
@@ -1213,7 +1215,7 @@ end
         @test typeof(l1.plantree) == typeof(l2.plantree)
         @test l1.axes == l2.axes
         # The count form cannot resolve station codes, so a model carrying
-        # `stations` demands the antenna table.
+        # `antennas` demands the antenna table.
         @test_throws "antenna COUNT" CAL.plan_parameters(mh, 3, geom)
     end
 
@@ -1223,7 +1225,7 @@ end
         node = lh.plantree.phase.bandpass
         @test node isa CAL.GroupedComponentPlan
         @test keys(node.groups) == (:g1, :g2)
-        @test node.stations == [[1], [2, 3]]
+        @test node.antennas == [[1], [2, 3]]
         @test node.group_of == [1, 2, 2]
         @test node.local_of == [1, 1, 2]
         # Ragged: AA's global-frequency block vs the others' per-channel one.
@@ -1242,12 +1244,12 @@ end
         # honest layout.
         conflict = CAL.GainModel(;
             base...,
-            stations = (AA = (; phase = (bandpass = (; a = bp(CAL.GlobalFrequency())),)),),
+            antennas = (AA = (; phase = (bandpass = (; a = bp(CAL.GlobalFrequency())),)),),
         )
         @test_throws "disagree structurally" CAL.plan_parameters(conflict, names, geom)
     end
 
-    @testset "evaluator routes stations through their groups" begin
+    @testset "evaluator routes antennas through their groups" begin
         θ = zeros(lh.nθ)
         g1, g2 = lh.plantree.phase.bandpass.groups
         CAL._component_leaf(g1, θ) .= 0.5                    # AA: one phase, all channels
@@ -1267,44 +1269,44 @@ end
         @test gf ≈ g
     end
 
-    @testset "station_blocks" begin
+    @testset "antenna_blocks" begin
         θ = collect(1.0:lh.nθ)
-        blocks = CAL.station_blocks(lh, θ, :phase, :bandpass)
+        blocks = CAL.antenna_blocks(lh, θ, :phase, :bandpass)
         @test length(blocks) == 2
-        @test blocks[1].stations == [1]
-        @test blocks[2].stations == [2, 3]
+        @test blocks[1].antennas == [1]
+        @test blocks[2].antennas == [2, 3]
         @test size(blocks[2].θ) == (1, 2, 6, 1, 2)
         @test vec(blocks[1].θ) == θ[blocks[1].plan.range]
         # Writing through a block's θ view writes into the solve's θ.
         blocks[1].θ[1] = -3.0
         @test θ[first(blocks[1].plan.range)] == -3.0
         # A uniform component yields one block spanning every station.
-        ub = CAL.station_blocks(lh, θ, :phase, :atmos)
+        ub = CAL.antenna_blocks(lh, θ, :phase, :atmos)
         @test length(ub) == 1
-        @test ub[1].stations == [1, 2, 3]
+        @test ub[1].antennas == [1, 2, 3]
         # Path errors: an unknown name, and a stop at a subtree.
-        @test_throws "no component at path" CAL.station_blocks(lh, θ, :phase, :nope)
-        @test_throws "names a component subtree" CAL.station_blocks(lh, θ, :phase)
+        @test_throws "no component at path" CAL.antenna_blocks(lh, θ, :phase, :nope)
+        @test_throws "names a component subtree" CAL.antenna_blocks(lh, θ, :phase)
     end
 
-    @testset "require_station_uniform" begin
+    @testset "require_antenna_uniform" begin
         mat = CAL.resolve(mh, names, geom)
         err = try
-            CAL.require_station_uniform(mat, names, "Bandpass")
+            CAL.require_antenna_uniform(mat, names, "Bandpass")
             nothing
         catch e
             e
         end
         @test err isa ArgumentError
-        @test occursin("station-uniform", err.msg)
+        @test occursin("antenna-uniform", err.msg)
         @test occursin("phase.bandpass", err.msg)
         @test occursin("[AA]", err.msg)
         @test occursin("[BB, CC]", err.msg)
-        @test occursin("supports_station_heterogeneity", err.msg)
+        @test occursin("supports_antenna_heterogeneity", err.msg)
         # `atmos` is identical everywhere, so it is not reported.
         @test !occursin("atmos", err.msg)
         # A uniform model passes through, entries collapsed or not.
-        @test CAL.require_station_uniform(
+        @test CAL.require_antenna_uniform(
             CAL.resolve(mu, names, geom), names, "Bandpass",
         ) isa CAL.GainModel
     end
@@ -1332,7 +1334,7 @@ end
         # geometry or on another holding the same samples.
         @test parent(gains(soln)) ≈ CAL.evaluate_gains(lh, θh)
         other = CAL.DataGeometry(; nfeed = 2,
-            geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.stations, geom.t0, geom.f0,
+            geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.antennas, geom.t0, geom.f0,
         )
         ci, ti = [2, 5], [1, 4]
         @test parent(gains(bp, CAL.GeometryWindow(other, ci, ti))) ≈ parent(gains(bp))[ci, ti, :, :]

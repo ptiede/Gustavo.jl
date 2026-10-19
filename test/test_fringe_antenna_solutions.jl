@@ -1,8 +1,8 @@
-# `fringe_station_solutions` (θ → per-(scan,station,feed) delay/rate/phase decode)
+# `fringe_antenna_solutions` (θ → per-(scan,station,feed) delay/rate/phase decode)
 # and the `rel_time` model option. Reuses `_build_fringe_ps` and the
 # CAL/FP aliases from test_pipeline.jl (included earlier in runtests.jl).
 
-@testset "rel_time model option + fringe_station_solutions" begin
+@testset "rel_time model option + fringe_antenna_solutions" begin
 
     @testset "rel_time switches the inter-feed delay's time basis" begin
         mg = _full_fringe_model(rel_time = CAL.GlobalTime())
@@ -52,11 +52,11 @@
         θ[plan_off1(rel)[2, 2, 1, 1]] = 0.5e-9      # station 2 inter-feed delay: +0.5 ns on feed 2
         sol = CAL.CalibrationSolution(model, layout, geom, θ, (; nscan = 1); name = :fringe)
 
-        st = FP.fringe_station_solutions(sol)
+        st = FP.fringe_antenna_solutions(sol)
         @test st isa DimStack
         @test keys(st) == (:delay, :rate)
         @test size(st) == (1, 4, 2)               # dense: nscan(1) × nant(4) × 2 feeds
-        @test collect(lookup(st, AntennaName)) == geom.stations
+        @test collect(lookup(st, AntennaName)) == geom.antennas
         f(a, fd) = st.delay[Gustavo.Scan(1), AntennaName(a), Feed(fd)]
         @test f(2, 1) ≈ 2.0e-9                     # feed 1: shared only
         @test f(2, 2) ≈ 2.5e-9                     # feed 2: shared + inter-feed offset
@@ -71,7 +71,7 @@
         θ2 = zeros(layout.nθ)
         θ2[plan_off1(rplan)[3, 1, 1, 1]] = 1.0e-3       # 1 mHz
         sol2 = CAL.CalibrationSolution(model, layout, geom, θ2, (; nscan = 1); name = :fringe)
-        st2 = FP.fringe_station_solutions(sol2)
+        st2 = FP.fringe_antenna_solutions(sol2)
         @test st2.rate[Gustavo.Scan(1), AntennaName(3), Feed(1)] ≈ 1.0e-3
     end
 
@@ -79,8 +79,8 @@
         ps, truth = _build_fringe_ps(nant = 4)
         gauge = PinAntenna(1)
         sol = fit(BaselineFringeFit(; gauge), ps)
-        st = FP.fringe_station_solutions(sol)
-        @test size(st) == (sol.info.nscan, length(sol.geom.stations), 2)
+        st = FP.fringe_antenna_solutions(sol)
+        @test size(st) == (sol.info.nscan, length(sol.geom.antennas), 2)
         @test collect(lookup(st, Gustavo.Scan)) == sol.geom.scan_names
         val(a, fd) = st.delay[Gustavo.Scan(1), AntennaName(a), Feed(fd)]
 

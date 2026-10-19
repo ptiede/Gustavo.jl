@@ -140,7 +140,7 @@ step_gauge(s::Union{BaselineFringeFit, Bandpass, AdhocPhase}) = s.gauge
 # base tree and each station entry.
 function _model_component_names(model::GainModel)
     names = Tuple[]
-    for (_, tree) in _station_variants(model)
+    for (_, tree) in _antenna_variants(model)
         append!(names, Calibration._leaf_paths(tree.phase), Calibration._leaf_paths(tree.logamp))
     end
     return unique!(names)
@@ -151,7 +151,7 @@ _check_step_gauge(gauge::AbstractGauge, model::GainModel) =
 _check_step_gauge(gauge, ::GainModel) = throw(
     ArgumentError(
         "a step's `gauge` must be an AbstractGauge, got $(repr(gauge)) of type $(typeof(gauge)): " *
-            "`PinAntenna(\"A1\")` or `PinAntenna(2)` (a reference station, or a ranked list), " *
+            "`PinAntenna(\"A1\")` or `PinAntenna(2)` (a reference antenna, or a ranked list), " *
             "`ZeroSumPhase()`, or `ByComponent((; component = gauge, …); default = gauge)`.",
     ),
 )
@@ -180,13 +180,13 @@ model_components(s::BaselineFringeFit, spec) = _vet_step_model(
 # (`can_fit`; its θ block would stay at zero and the solution would look
 # fitted), then the solver's own whole-tree requirements (`validate_model`).
 # Both checks run once per distinct station tree — the base and each
-# `stations` entry's effective pair — with the can_fit error naming the station
+# `antennas` entry's effective pair — with the can_fit error naming the station
 # whose entry carries the component. `accepted` finishes that error with the
 # component form the solver family does fit. Returns `m`; the runner
 # resolves it against the antenna table.
 function _vet_step_model(solver, m::GainModel, accepted, spec = nothing)
-    for (station, tree) in _station_variants(m)
-        at = station === nothing ? "" : " (station $(repr(station)) entry)"
+    for (antenna, tree) in _antenna_variants(m)
+        at = antenna === nothing ? "" : " (antenna $(repr(antenna)) entry)"
         for tc in Calibration._flatten_components(tree)
             Fring.can_fit(solver, tc, _spec_geom(spec)) || throw(
                 ArgumentError(
@@ -201,12 +201,12 @@ function _vet_step_model(solver, m::GainModel, accepted, spec = nothing)
     return m
 end
 
-# The distinct station trees a model assigns, as `station => (; phase, logamp)`
+# The distinct station trees a model assigns, as `antenna => (; phase, logamp)`
 # pairs (`nothing` for the base).
-function _station_variants(m::Calibration.GainModel)
+function _antenna_variants(m::Calibration.GainModel)
     vars = Pair{Any, Any}[nothing => (; phase = m.phase, logamp = m.logamp)]
-    for k in keys(m.stations)
-        push!(vars, k => Calibration.station_components(m, k))
+    for k in keys(m.antennas)
+        push!(vars, k => Calibration.antenna_components(m, k))
     end
     return vars
 end
@@ -223,7 +223,7 @@ model_components(s::Bandpass, spec) = _vet_step_model(
     spec,
 )
 
-supports_station_heterogeneity(::Bandpass) = true
+supports_antenna_heterogeneity(::Bandpass) = true
 
 model_components(s::AdhocPhase, spec) = _vet_step_model(
     s.smoother, s.model,
@@ -247,7 +247,7 @@ Fring.validate_model(::BaselineFringeFit, model) = Fring.validate_fringe_model(m
 function _scan_local_solve(s::BaselineFringeFit)
     s.rounds <= 1 || return false
     m = s.model
-    trees = (m.phase, (e.phase for e in values(m.stations) if haskey(e, :phase))...)
+    trees = (m.phase, (e.phase for e in values(m.antennas) if haskey(e, :phase))...)
     return all(
         t -> all(Calibration.component_is_per_scan, Calibration._flatten_components(t)),
         trees,
@@ -258,9 +258,9 @@ end
 # written and the (station, feed, geometry scan id) triples left unconstrained. `dets`
 # is one scan's detections where the systems are block-diagonal, every scan's
 # where they couple — the two paths differ only in that argument.
-function _station_solve!(s::BaselineFringeFit, ctx::SolveContext, stageB, dets)
-    ncomp, covered, unlinked = Fring.solve_station_systems!(
-        ctx.θ, dets, stageB, ctx.geom.stations; gauge = ctx.gauge, opts = s.closure,
+function _antenna_solve!(s::BaselineFringeFit, ctx::SolveContext, stageB, dets)
+    ncomp, covered, unlinked = Fring.solve_antenna_systems!(
+        ctx.θ, dets, stageB, ctx.geom.antennas; gauge = ctx.gauge, opts = s.closure,
     )
     scan_name(si) = ctx.geom.scan_names[ctx.geom.scan_of_time[Fring._scan_ti(dets[si])]]
     unlinked_named = Tuple{Symbol, String}[(kind, scan_name(si)) for (kind, si) in unlinked]
@@ -278,7 +278,7 @@ function _warn_unlinked(unlinked)
     end
     lines = ["scan $scan: $(join(sort!(unique(kinds)), ", "))" for (scan, kinds) in sort!(collect(byscan); by = first)]
     @warn "BaselineFringeFit: no accepted detection relates different feeds of a fringe group, so the " *
-        "offset between its feeds is not measured; the gauge sets it to zero at its preferred station. " *
+        "offset between its feeds is not measured; the gauge sets it to zero at its preferred antenna. " *
         "Detections relating different feeds (`fringe_detections`) or `closure.pfa_max` decide this.\n" *
         join(lines, "\n")
     return nothing
@@ -315,7 +315,7 @@ function solve(s::BaselineFringeFit, ctx::SolveContext)
         results = each_group(ctx) do group
             _solve_group(s, ctx, stageB, group; round, local_solve = false)
         end
-        ncomp, flags, unlinked = _station_solve!(s, ctx, stageB, [r.det for r in results])::Tuple{Int, Vector{Tuple{String, Int, Int}}, Vector{Tuple{Symbol, String}}}
+        ncomp, flags, unlinked = _antenna_solve!(s, ctx, stageB, [r.det for r in results])::Tuple{Int, Vector{Tuple{String, Int, Int}}, Vector{Tuple{Symbol, String}}}
     end
     _warn_unlinked(unlinked)
     return (; ncomp, Fring.flag_table(flags)..., _fringe_report(results, ctx)..., s.search)
@@ -369,9 +369,9 @@ function _solve_group(
         # detections, so its θ columns are complete before this returns. The
         # slots are disjoint per scan, so concurrent groups write without
         # contention.
-        ncomp, flags, unlinked = _station_solve!(s, ctx, stageB, (det,))
+        ncomp, flags, unlinked = _antenna_solve!(s, ctx, stageB, (det,))
         if s.steer_cells > 0
-            sd, sr = Fring.scan_station_terms(ctx.model, ctx.layout, ctx.θ, ti, ctx.geom.stations)
+            sd, sr = Fring.scan_antenna_terms(ctx.model, ctx.layout, ctx.θ, ti, ctx.geom.antennas)
             # θ is dense: a station this scan never constrained reads back as an
             # identity 0, indistinguishable from a solved zero delay. Steering to
             # it would invent a prediction and manufacture detections, so the
@@ -421,15 +421,15 @@ function _group_setup(::Bandpass, ctx::SolveContext)
     # The accumulators' labels, shared by every scan group: each stored cross
     # pair and feed pair of the set.
     members = [ms for group in values(ctx.groups) for ms in values(group)]
-    station_pairs, feeds = Fring._cross_cell_labels(
-        map(Fring._member_station_pairs, members), map(feed_pairs, members), ctx.geom,
+    antenna_pairs, feeds = Fring._cross_cell_labels(
+        map(Fring._member_antenna_pairs, members), map(feed_pairs, members), ctx.geom,
     )
     # `ctx.layout` holds only this step's own components. The two observables are
     # located by name through the layout's component tree: the flat `plans` list
     # carries one entry per station-signature group, so its positions stop naming
     # them as soon as a model differs across stations.
     return (;
-        station_pairs, feeds, layout, geom = ctx.geom,
+        antenna_pairs, feeds, layout, geom = ctx.geom,
         paths = (;
             phase = Fring._bandpass_paths(layout.plantree, :phase),
             logamp = Fring._bandpass_paths(layout.plantree, :logamp),
@@ -439,7 +439,7 @@ end
 
 function _solve_group(s::Bandpass, ctx::SolveContext, setup, group)
     rl, wl = Fring.accumulate_bandpass(
-        group, ctx.geom, setup.station_pairs, setup.feeds; executor = inner_executor(ctx.exec),
+        group, ctx.geom, setup.antenna_pairs, setup.feeds; executor = inner_executor(ctx.exec),
     )
     # `ti` locates this scan on the solve's global time axis, which is how a
     # time-segmented bandpass tells which segment the scan belongs to. A scan

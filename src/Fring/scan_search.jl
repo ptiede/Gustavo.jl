@@ -43,12 +43,12 @@ function _GroupCells(group::XRadio.ProcessingSet, geom::DataGeometry)
             DimensionMismatch("the members of a scan group must share one time axis"),
         )
     end
-    member_pairs = map(_member_station_pairs, members)
+    member_pairs = map(_member_antenna_pairs, members)
     member_feeds = map(feed_pairs, members)
-    stations, feeds = _cross_cell_labels(member_pairs, member_feeds, geom)
-    row = Dict(p => j for (j, p) in pairs(stations))
+    antennas, feeds = _cross_cell_labels(member_pairs, member_feeds, geom)
+    row = Dict(p => j for (j, p) in pairs(antennas))
     col = Dict(f => q for (q, f) in pairs(feeds))
-    loc = fill((0, 0), length(members), length(stations), length(feeds))
+    loc = fill((0, 0), length(members), length(antennas), length(feeds))
     for (m, (ps, fs)) in enumerate(zip(member_pairs, member_feeds)), bi in axes(fs, 2)
         j = get(row, ps[bi], 0)
         j == 0 && continue
@@ -59,7 +59,7 @@ function _GroupCells(group::XRadio.ProcessingSet, geom::DataGeometry)
     return _GroupCells(
         map(_member_layers, members), [length(XRadio.frequencies(ms)) for ms in members],
         reduce(vcat, (collect(XRadio.frequencies(ms)) for ms in members)), times,
-        stations, feeds, loc,
+        antennas, feeds, loc,
     )
 end
 
@@ -69,7 +69,7 @@ end
 function _cross_cell_labels(member_pairs, member_feeds, geom::DataGeometry)
     cross = [p for ps in member_pairs for p in ps if p[1] != p[2]]
     feeds = sort!(unique!([f for fs in member_feeds for f in fs]))
-    return _station_pairs(cross, geom), feeds
+    return _canonical_antenna_pairs(cross, geom), feeds
 end
 
 # The false-alarm family of a search of `gc` (see `search_scan`): the trial
@@ -147,7 +147,7 @@ function search_scan(
     )
     C = eltype(first(first(gc.layers)))
     T = real(C)
-    dims = (_station_pair_dim(gc.antenna_pairs), FeedPair(gc.feeds))
+    dims = (_antenna_pair_dim(gc.antenna_pairs), FeedPair(gc.feeds))
     delay = zeros(T, dims...)
     rate = similar(delay)
     phase = similar(delay)

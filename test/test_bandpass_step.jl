@@ -24,8 +24,8 @@ _bp_amp(sol) = _bp_params(sol, :logamp, :bandpass)
 
 # The components of one grouped (station-specific) component as blocks: each
 # group's stations, by index into the geometry's, and its parameters.
-_bp_station_blocks(sol, path...) = [
-    (; stations = [findfirst(==(s), sol.geom.stations) for s in lookup(c.params, AntennaName)], θ = parent(c.params))
+_bp_antenna_blocks(sol, path...) = [
+    (; antennas = [findfirst(==(s), sol.geom.antennas) for s in lookup(c.params, AntennaName)], θ = parent(c.params))
         for c in sol[path...].components
 ]
 
@@ -82,7 +82,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
     @testset "the leaf holds one frequency segment per channel" begin
         @test size(_bp_phase(bp_n)) == (1, 2, nglob, 1, nant)
-        @test collect(lookup(_bp_phase(bp_n), AntennaName)) == bp_n.geom.stations
+        @test collect(lookup(_bp_phase(bp_n), AntennaName)) == bp_n.geom.antennas
     end
 
     @testset "path selection" begin
@@ -90,22 +90,22 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test [c.path for c in bpp.components] == [(:phase, :bandpass)]
         @test bpp.name === :bandpass
         @test _bp_phase(bpp) == _bp_phase(bp_n)
-        @test bpp.geom.stations == bp_n.geom.stations
+        @test bpp.geom.antennas == bp_n.geom.antennas
         # A solution with no bandpass component refuses the selection.
         sol_f = fit(BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), ps)
         @test_throws ArgumentError sol_f[:phase, :bandpass]
         @test_throws "holds no component under phase.bandpass" sol_f[:phase, :bandpass]
     end
 
-    @testset "portable calibrate!: same-set + cross-set by station name" begin
+    @testset "portable calibrate!: same-set + cross-set by antenna name" begin
         bps = bp_n
         correct(sol, ps) = collect(values(calibrate!(sol, deepcopy(ps); flag_bad = false, apply_flags = false)))
-        # `ms` with the gains `g[c, t, station, feed]` divided out, stations by
+        # `ms` with the gains `g[c, t, antenna, feed]` divided out, stations by
         # position in the solution's antenna names.
         function divided(ms, g; tconst = false)
             V = DimensionalData.modify(Array, ms[:visibility])
             W = DimensionalData.modify(Array, ms[:weight])
-            slot = Dict(n => i for (i, n) in pairs(bps.geom.stations))
+            slot = Dict(n => i for (i, n) in pairs(bps.geom.antennas))
             feeds = Gustavo.feed_pairs(ms)
             for (bi, (na, nb)) in pairs(collect(XRadio.baselines(ms))), p in axes(feeds, 1)
                 a, b = slot[String(na)], slot[String(nb)]
@@ -167,7 +167,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test_throws "is not in the solution" correct(fr_n, uv2)
         # Stations are matched by name; a solution sharing none is refused.
         g = bps.geom
-        others = ["Q$i" for i in eachindex(g.stations)]
+        others = ["Q$i" for i in eachindex(g.antennas)]
         strangers = CAL.CalibrationSolution(
             CAL.DataGeometry(
                 g.times, g.scan_of_time, g.channel_freqs, g.spw_of_chan, g.channel_widths, g.t0, g.f0,
@@ -180,7 +180,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
             ],
             bps.info; step = bps.step,
         )
-        @test_throws "shares no station with this data" correct(strangers, uvsub)
+        @test_throws "shares no antenna with this data" correct(strangers, uvsub)
     end
 
 end
@@ -190,7 +190,7 @@ end
     rng = MersenneTwister(11)
     nglob = nspw * nchan
     ps, _ = _build_fringe_ps(;
-        nant, nspw, nchan, station_gains = false,
+        nant, nspw, nchan, antenna_gains = false,
         bandpass = 0.5 .* randn(rng, nant, 2, nglob), amp_bandpass = 0.2 .* randn(rng, nant, 2, nglob),
     )
     # One (feed, station) phase track over the solve's channels.
@@ -221,7 +221,7 @@ end
     @test_throws "straddles a spectral-window boundary" run(_bpmodel(; freq = CAL.GlobalFrequency()))
 
     # Stations differing only in prior share the layout; each fits under its own.
-    mixed = with_station(_bpmodel(), "A3"; phase = (; bandpass = _bpc(CAL.ChannelBlocks(1); prior = stiff)))
+    mixed = with_antenna(_bpmodel(), "A3"; phase = (; bandpass = _bpc(CAL.ChannelBlocks(1); prior = stiff)))
     sol_mixed = run(mixed)
     @test size(_bp_phase(sol_mixed)) == size(_bp_phase(sol_free))
     pri = sol_mixed.info.phase_priors
@@ -303,9 +303,9 @@ end
         @test pair(;
             level, shape = _bpc(CAL.ChannelBlocks(1); prior = CAL.RandomWalkPrior(; σ = 0.1, init = Normal(0.0, 0.3))),
         ) isa CAL.GainModel
-        # A `stations` entry is vetted like the base, with the can_fit error
+        # An `antennas` entry is vetted like the base, with the can_fit error
         # naming the station whose entry carries the unfittable component.
-        bad_entry = with_station(
+        bad_entry = with_antenna(
             default_bandpass_model(), "A1";
             phase = (;
                 bandpass = CAL.GainComponent(
@@ -314,14 +314,14 @@ end
                 ),
             ),
         )
-        @test_throws "station :A1 entry" model_components(
+        @test_throws "antenna :A1 entry" model_components(
             Bandpass(; model = bad_entry, gauge = PinAntenna(1)), nothing,
         )
 
         # The joint solve loops over the layout's station blocks, so it takes a
         # model that differs across stations.
-        @test supports_station_heterogeneity(Bandpass(; gauge = PinAntenna(1)))
-        het = with_station(
+        @test supports_antenna_heterogeneity(Bandpass(; gauge = PinAntenna(1)))
+        het = with_antenna(
             default_bandpass_model(), "A1";
             phase = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
             logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
@@ -347,7 +347,7 @@ end
 
         lu = CAL.plan_parameters(default_bandpass_model(), anames, geom)
         @test FP._bandpass_paths(lu.plantree, :phase) == (; shape = (:phase, :bandpass), level = nothing)
-        @test only(FP._bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).stations == 1:3
+        @test only(FP._bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).antennas == 1:3
         @test isempty(FP._bandpass_level_blocks(_setup(lu), zeros(lu.nθ), :phase))
 
         # The path is a NAME descent, so it reaches a component the user nested
@@ -371,7 +371,7 @@ end
         # A model differing across stations puts one plan per signature group on
         # the flat `plans` list, so its positions no longer name the two
         # observables — the blocks still resolve, one per signature group.
-        mh = with_station(
+        mh = with_antenna(
             default_bandpass_model(), "A1";
             phase = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
             logamp = (; bandpass = _bpc(CAL.ChannelBlocks(2))),
@@ -379,7 +379,7 @@ end
         lh = CAL.plan_parameters(mh, anames, geom)
         @test lh.nphase == 2 && length(lh.plans) == 4
         for group in (:phase, :logamp)
-            @test [b.stations for b in FP._bandpass_blocks(_setup(lh), zeros(lh.nθ), group)] ==
+            @test [b.antennas for b in FP._bandpass_blocks(_setup(lh), zeros(lh.nθ), group)] ==
                 [[1], [2, 3]]
         end
 
@@ -715,7 +715,7 @@ end
     broken = deepcopy(ps)
     for ms in values(broken)
         only(XRadio.scans(ms)) in ("4", "5", "6") || continue
-        slot = Dict(n => i for (i, n) in pairs(geom.stations))
+        slot = Dict(n => i for (i, n) in pairs(geom.antennas))
         pairs_ = [(slot[String(a)], slot[String(b)]) for (a, b) in XRadio.baselines(ms)]
         vis = copy(parent(ms[:visibility]))
         V = DimArray(vis, dims(ms[:visibility]))
@@ -776,7 +776,7 @@ end
         @test lookup(st, Ti) == lookup(leaf, Ti)
         @test DimensionalData.intervalbounds(st, Ti) == DimensionalData.intervalbounds(leaf, Ti)
         @test length(lookup(st, Ti)) == 2
-        @test lookup(st, AntennaName) == geom.stations
+        @test lookup(st, AntennaName) == geom.antennas
         @test only(DimensionalData.intervalbounds(st, Frequency)) == extrema(geom.channel_freqs)
         (_, first_end), (second_start, _) = DimensionalData.intervalbounds(st, Ti)
         @test st[Ti(Contains(second_start))] == st[Ti(2)]
@@ -786,10 +786,10 @@ end
     @testset "the joint record is labeled like θ, one array per block" begin
         # The first station breaks at the boundary and the rest hold one gain
         # over the track, so the model compiles two station blocks.
-        st1 = Symbol(first(geom.stations))
+        st1 = Symbol(first(geom.antennas))
         het = GainModel(;
             phase = (; bandpass = bp(GlobalTime())), logamp = (; bandpass = bp(GlobalTime())),
-            stations = NamedTuple{(st1,)}(((; phase = (; bandpass = bp(seg)), logamp = (; bandpass = bp(seg))),)),
+            antennas = NamedTuple{(st1,)}(((; phase = (; bandpass = bp(seg)), logamp = (; bandpass = bp(seg))),)),
         )
         sol = fit(Bandpass(; model = het, smoother = FP.JointSmoother(), gauge = PinAntenna(1)), broken)
         info = sol.info
@@ -842,13 +842,13 @@ end
 # ── A per-station bandpass time segmentation, end to end ─────────────────────
 #
 # `JointSmoother` solves its gains as a loop over the layout's station blocks,
-# so `Bandpass` forwards `supports_station_heterogeneity` to it and a model that
+# so `Bandpass` forwards `supports_antenna_heterogeneity` to it and a model that
 # gives one station its own time segmentation reaches the solver. The saving is
 # the point: the nine stations that hold one bandpass over the track carry one
 # time segment of θ, not two, and the gauge measures the tenth station's break
 # against them rather than gauging it away.
 
-@testset "Bandpass(smoother = JointSmoother()): a per-station time segmentation" begin
+@testset "Bandpass(smoother = JointSmoother()): a per-antenna time segmentation" begin
     nant, nspw, nchan, ntime, nscans = 10, 1, 8, 6, 2
     nglob = nspw * nchan
 
@@ -865,7 +865,7 @@ end
         bp_true[1, f, :, 2] .+= brk[f]
     end
 
-    # `station_gains = false` leaves the bandpass as the only station gain, so
+    # `antenna_gains = false` leaves the bandpass as the only station gain, so
     # the solved θ is comparable to the injected track channel by channel. With
     # a fringe stage in front, the delay-like part of each station's bandpass
     # would already have been absorbed into its delay and the comparison would
@@ -876,7 +876,7 @@ end
     # correct — with cross-hands the inter-feed phase is measured — but it is not
     # what this test is about.
     uvset, _ = _build_fringe_ps(;
-        nant, nspw, nchan, ntime, nscans, bandpass = bp_true, station_gains = false,
+        nant, nspw, nchan, ntime, nscans, bandpass = bp_true, antenna_gains = false,
         polarizations = ["XX", "YY"],
     )
     # The segmentation boundary sits inside the inter-scan gap: after the last
@@ -890,7 +890,7 @@ end
     het = GainModel(;
         phase = (; bandpass = bpc(GlobalTime())),
         logamp = (; bandpass = bpc(GlobalTime())),
-        stations = (
+        antennas = (
             A1 = (;
                 phase = (; bandpass = bpc(InstrumentScans([t_break]))),
                 logamp = (; bandpass = bpc(InstrumentScans([t_break]))),
@@ -908,16 +908,16 @@ end
         ),
         uvset,
     )
-    pb = _bp_station_blocks(sol, :phase, :bandpass)
+    pb = _bp_antenna_blocks(sol, :phase, :bandpass)
 
-    @testset "the uniform stations carry one time segment, not two" begin
-        @test [b.stations for b in pb] == [[1], collect(2:nant)]
+    @testset "the uniform antennas carry one time segment, not two" begin
+        @test [b.antennas for b in pb] == [[1], collect(2:nant)]
         # A block's θ is (param, feed node, frequency segment, time segment, station).
         @test size(pb[1].θ, 4) == 2
         @test size(pb[2].θ, 4) == 1
     end
 
-    @testset "the break is measured against the stations that span it" begin
+    @testset "the break is measured against the antennas that span it" begin
         cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
         for f in 1:2
             # Station 1 is the gauge reference and the broken station both, so
@@ -926,7 +926,7 @@ end
             @test maximum(abs, pb[1].θ[1, f, :, 2, 1] .- cdemean(brk[f])) < 1.0e-6
             # The other nine hold one bandpass across the gap, and it is the one
             # they really have — station 1's break leaks into none of them.
-            for (ai, a) in pairs(pb[2].stations)
+            for (ai, a) in pairs(pb[2].antennas)
                 want = cdemean(bp_true[a, f, :, 1] .- bp_true[1, f, :, 1])
                 @test maximum(abs, pb[2].θ[1, f, :, 1, ai] .- want) < 1.0e-6
             end
@@ -939,8 +939,8 @@ end
             save_solution(path, sol)
             back = load_solution(path)
             @test back.components == sol.components
-            qb = _bp_station_blocks(back, :phase, :bandpass)
-            @test [b.stations for b in qb] == [b.stations for b in pb]
+            qb = _bp_antenna_blocks(back, :phase, :bandpass)
+            @test [b.antennas for b in qb] == [b.antennas for b in pb]
             @test [size(b.θ) for b in qb] == [size(b.θ) for b in pb]
             for (x, y) in zip(qb, pb)
                 @test x.θ == y.θ

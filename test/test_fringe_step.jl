@@ -6,7 +6,7 @@
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
-@testset "station gauge: every scan pinned, undetermined columns throw" begin
+@testset "antenna gauge: every scan pinned, undetermined columns throw" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 3, noise = 0.3, eltype = ComplexF64)
     at_ref(sol, key) = only(c for c in sol.components if last(c.path) === key).params[AntennaName(At("A1"))]
     # The fit, and whether it warned that a fringe group's feeds are not linked.
@@ -36,7 +36,7 @@
             receptor_order = Dict("A2" => order),
         )
         sol, warned = fit_unlinked(BaselineFringeFit(; gauge = PinAntenna(1)), pso)
-        d = parent(FP.fringe_station_solutions(sol).delay)[1, :, :]
+        d = parent(FP.fringe_antenna_solutions(sol).delay)[1, :, :]
         @test maximum(abs, (d .- d[1:1, :]) .- (truth.delay .- truth.delay[1:1, :])) < 5.0e-11
         @test warned
     end
@@ -46,7 +46,7 @@
         FP.default_fringe_model();
         phase = (; rel_delay_global = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = CAL.SingleFeed(2))),
     )
-    @test_throws "delay station system is not determined" fit(BaselineFringeFit(; model = twice, gauge = PinAntenna(1)), ps)
+    @test_throws "delay antenna system is not determined" fit(BaselineFringeFit(; model = twice, gauge = PinAntenna(1)), ps)
 end
 
 @testset "a rate needs two times per scan" begin
@@ -63,7 +63,7 @@ function CAL.gauge_constraint(g::DelayOffset, f::CAL.GaugeFreedom)
     return row, all(==(:delay), f.observable) ? g.value : zero(g.value)
 end
 
-@testset "custom gauges drive the station solve" begin
+@testset "custom gauges drive the antenna solve" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 3, noise = 0.3, eltype = ComplexF64)
     params(sol, key) = only(c for c in sol.components if last(c.path) === key).params
     at(sol, key, name) = params(sol, key)[AntennaName(At(name))]
@@ -131,12 +131,12 @@ end
         # The reference antenna is in the table but observes no baseline. The
         # stations that DID observe are constrained by their own closure, so none
         # of them is flagged and their data is calibrated rather than blanked.
-        ps, _ = _build_fringe_ps(nant = 4, omit_station = 4)
+        ps, _ = _build_fringe_ps(nant = 4, omit_antenna = 4)
         model = default_fringe_model()
 
         sol = fit(BaselineFringeFit(; model, gauge = PinAntenna("A4")), ps)
         @test isempty(sol.info.flagged_ant)
-        @test !any(FP.fringe_station_flags(sol))
+        @test !any(FP.fringe_antenna_flags(sol))
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
 
         # The flags do not depend on which station holds the gauge.
@@ -355,13 +355,13 @@ end
 
     end
 
-    @testset "per-scan station solutions need a per-scan feed-common delay" begin
+    @testset "per-scan antenna solutions need a per-scan feed-common delay" begin
         globaldelay = map(default_fringe_model().phase) do t
             FP._is_perscan_delay(t) ?
                 CAL.GainComponent(t.term; Ti = CAL.GlobalTime(), Frequency = t.Frequency, Feed = t.Feed) : t
         end
         sol = fit(BaselineFringeFit(; model = GainModel(; phase = globaldelay), gauge = PinAntenna(1)), ps)
-        @test_throws "no per-scan (feed-common) delay component" FP.fringe_station_solutions(sol)
+        @test_throws "no per-scan (feed-common) delay component" FP.fringe_antenna_solutions(sol)
     end
 
     @testset "a time segmentation finer than a scan is rejected, not half-solved" begin
@@ -409,16 +409,16 @@ end
 
 end
 
-@testset "stations with one or three receptors" begin
+@testset "antennas with one or three receptors" begin
     gauge = PinAntenna(1)
     for receptors in (("R",), ("R", "L", "X"))
         n = length(receptors)
         products = [a * b for a in receptors for b in receptors]
         ps, truth = _build_fringe_ps(; polarizations = products, receptors, noise = 0.3, eltype = ComplexF64)
         fr = fit(BaselineFringeFit(; gauge), ps)
-        st = FP.fringe_station_solutions(fr)
+        st = FP.fringe_antenna_solutions(fr)
         @test lookup(st, Gustavo.Feed) == 1:n
-        @test !any(FP.fringe_station_flags(fr))
+        @test !any(FP.fringe_antenna_flags(fr))
         d = parent(st.delay)[1, :, :]
         @test maximum(abs, (d .- d[1:1, :]) .- (truth.delay .- truth.delay[1:1, :])) < 5.0e-11
 

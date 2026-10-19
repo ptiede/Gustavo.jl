@@ -188,7 +188,7 @@ end
     # a `PerFeed` revert breaks this on any solved (station, seg).
     ps, _ = _build_fringe_ps()
     geom = CAL.DataGeometry(ps)
-    nant = length(geom.stations)
+    nant = length(geom.antennas)
     layout = CAL.plan_parameters(model, nant, geom)
 
     for (ci, label) in ((rate_i, "rate"), (adhoc_i, "adhoc"))
@@ -757,7 +757,7 @@ end
     )
 end
 
-@testset "EHT-HOPS station flags: unconstrained station flagged" begin
+@testset "EHT-HOPS antenna flags: unconstrained antenna flagged" begin
     # Station 4 participates (baselines with valid weights) but carries NO
     # fringe — pure weak noise — so after the closure-screened global solve no
     # strong detection constrains it: the EHT-HOPS flag criterion. Its gains
@@ -784,7 +784,7 @@ end
     # Each scan's station systems solve as it is searched.
     @test Gustavo._scan_local_solve(ff)
     sols = _fit_chain((ff, AdhocPhase(; gauge)), ps)
-    flags = FP.fringe_station_flags(first(sols))
+    flags = FP.fringe_antenna_flags(first(sols))
     @test any(flags)
     @test all(flags[AntennaName = At("A4")])          # only station 4 unconstrained
     @test !any(flags[AntennaName = At(["A1", "A2", "A3"])])

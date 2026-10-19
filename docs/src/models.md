@@ -239,13 +239,13 @@ amplitude calibration.
 
 Stations may differ in segmentation and in terms. The rule the design
 follows: *the model shouldn't change shape because one station behaves a
-little differently.* [`with_station`](@ref) gives one station its own
+little differently.* [`with_antenna`](@ref) gives one station its own
 groups, used verbatim:
 
 ```julia
 bp(prior) = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1), prior)
 m = GainModel(phase = (; bandpass = bp(nothing)))
-with_station(m, "AA"; phase = (; bandpass = bp(RandomWalkPrior(; order = 2, σ = 1.0e-11))))
+with_antenna(m, "AA"; phase = (; bandpass = bp(RandomWalkPrior(; order = 2, σ = 1.0e-11))))
 ```
 
 Here every station solves a free per-channel phase bandpass except AA, whose
@@ -262,10 +262,10 @@ each carries its own prior.
 Station codes resolve against the observation's antenna table when the model
 is resolved for a solve; an unknown code errors there, naming the known
 stations. A rule ("every station matching a prefix gets a smoother
-bandpass") is a loop of `with_station` calls over the station codes.
+bandpass") is a loop of `with_antenna` calls over the station codes.
 
 Heterogeneity is opt-in per solver
-([`supports_station_heterogeneity`](@ref Gustavo.supports_station_heterogeneity)):
+([`supports_antenna_heterogeneity`](@ref Gustavo.supports_antenna_heterogeneity)):
 a solver that has not declared support rejects a heterogeneous model at
 compile time with an error naming the differing component, rather than
 silently leaving θ blocks unsolved. Among the shipped steps, `Bandpass` with a

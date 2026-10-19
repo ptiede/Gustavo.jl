@@ -96,9 +96,9 @@ include("test_gauge_invariance.jl")
 # Fringe diagnostics + Makie plot stubs (Phase 8).
 include("test_fringe_diagnostics.jl")
 
-# fringe_station_solutions θ-decode + the `rel_time` model option.
+# fringe_antenna_solutions θ-decode + the `rel_time` model option.
 # Reuses _build_fringe_ps + CAL/FP aliases from test_pipeline.jl.
-include("test_fringe_station_solutions.jl")
+include("test_fringe_antenna_solutions.jl")
 
 # Per-station weight correction (scale_weights!) through a full solve.
 # Reuses _build_fringe_ps + the FP/CAL aliases from test_pipeline.jl.

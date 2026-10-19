@@ -44,7 +44,7 @@ end
 function label_sums(rbar, wbar, bl_pairs, pols, nant, times)
     names = ["S$i" for i in 1:nant]
     ax = (
-        FRa._station_pair_dim([(names[a], names[b]) for (a, b) in bl_pairs]),
+        FRa._antenna_pair_dim([(names[a], names[b]) for (a, b) in bl_pairs]),
         FRa.FeedPair(collect(pols)), Ti(times),
     )
     return DimArray(rbar, ax), DimArray(wbar, ax), names
@@ -465,7 +465,7 @@ end
     @test rms_to_truth(rwj) < 1.1 * rms_to_truth(rwp)
 end
 
-@testset "Adhoc :gp_joint resolves each station's prior" begin
+@testset "Adhoc :gp_joint resolves each antenna's prior" begin
     rng = MersenneTwister(0x70B1)
     nant, nap = 5, 40
     ref = 2
@@ -505,14 +505,14 @@ end
     for (bi, (a, b)) in pairs(bl)
         unseen in (a, b) && (w_unseen[bi, :, :] .= 0)
     end
-    @test_throws "no other station has a prior of the same form" solve([a == unseen ? walk : fixed for a in 1:nant]; w = w_unseen)
+    @test_throws "no other antenna has a prior of the same form" solve([a == unseen ? walk : fixed for a in 1:nant]; w = w_unseen)
 
     # The joint state needs a proper prior: a flat walk or no prior is an error.
     @test_throws "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init`" solve(RandomWalkPrior(; σ = 0.1))
     @test_throws "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init`" solve(nothing)
 end
 
-@testset "Adhoc :gp_joint requires one node per station" begin
+@testset "Adhoc :gp_joint requires one node per antenna" begin
     rng = MersenneTwister(0x5A17)
     nant, nap = 3, 10
     bl = all_bl_a(nant)
@@ -676,7 +676,7 @@ end
     # 3, both pinned ≈0 by strong edges to ref=1) whose WRAPPED phases disagree by
     # ~2π, so φ4 ≈ 0 and φ4 ≈ ±π are BOTH self-consistent rewrap fixed points.
     ends = [(1, 2), (1, 3), (2, 4), (3, 4)]
-    cells = (FRa._station_pair_dim([("S$a", "S$b") for (a, b) in ends]), FRa.FeedPair([(1, 1)]))
+    cells = (FRa._antenna_pair_dim([("S$a", "S$b") for (a, b) in ends]), FRa.FeedPair([(1, 1)]))
     nodes = DimArray([((a, 1), (b, 1)) for (a, b) in ends, _ in 1:1], cells)
     val = DimArray(reshape([0.0, 0.0, 3.0, -3.0], :, 1), cells)
     w = DimArray(reshape([100.0, 100.0, 1.0, 1.0], :, 1), cells)
@@ -988,10 +988,10 @@ end
     @test !any(wider.covered[FRa.AntennaName(At("X"))])
     @test parent(wider.phase)[1:nant, :, :] ≈ parent(sol.phase) atol = 1.0e-12
 
-    @test_throws "station `S5` of a station pair is not among the stations" FRa.solve_adhoc_phasing(
+    @test_throws "antenna `S5` of an antenna pair is not among the antennas" FRa.solve_adhoc_phasing(
         R, W, names[1:4]; gauge, smoother = sm,
     )
-    @test_throws "station names must be unique; repeated: S2" FRa.solve_adhoc_phasing(
+    @test_throws "antenna names must be unique; repeated: S2" FRa.solve_adhoc_phasing(
         R, W, vcat(names, "S2"); gauge, smoother = sm,
     )
     shifted(A) = DimArray(
@@ -1004,7 +1004,7 @@ end
     )
 end
 
-@testset "Adhoc: the source alternation ignores per-station constants" begin
+@testset "Adhoc: the source alternation ignores per-antenna constants" begin
     rng = MersenneTwister(0x0176)
     nant = 5
     bl = all_bl_a(nant)
@@ -1024,7 +1024,7 @@ end
 
 # Relabel station `s`'s feeds by `σ` (new feed `σ[f]` holds old feed `f`) or
 # change its feed basis by the unitary `U`, in the sums `rbar[bl, product, ap]`.
-function restation(rbar, bl_pairs, pols, s; σ = nothing, U = nothing)
+function relabel_antenna(rbar, bl_pairs, pols, s; σ = nothing, U = nothing)
     out = copy(rbar)
     slot = Dict(p => i for (i, p) in pairs(pols))
     for (bi, (a, b)) in pairs(bl_pairs), ap in axes(rbar, 3)
@@ -1045,7 +1045,7 @@ function restation(rbar, bl_pairs, pols, s; σ = nothing, U = nothing)
     return out
 end
 
-@testset "Adhoc: solved phases follow a station's feed labels, not its feed order" begin
+@testset "Adhoc: solved phases follow an antenna's feed labels, not its feed order" begin
     rng = MersenneTwister(0x0129)
     nant, nap = 5, 24
     bl = all_bl_a(nant)
@@ -1074,7 +1074,7 @@ end
         kw = (; gauge = PinAntenna(1), tying, smoother = FRa.PerTrackAdhocSmoother())
         sol = solve_positional(rbar, wbar, bl, pols, nant, times; kw...)
         perm = solve_positional(
-            restation(rbar, bl, pols, 3; σ), restation(wbar, bl, pols, 3; σ), bl, pols, nant, times; kw...,
+            relabel_antenna(rbar, bl, pols, 3; σ), relabel_antenna(wbar, bl, pols, 3; σ), bl, pols, nant, times; kw...,
         )
         relabeled = copy(parent(sol.phase))
         relabeled[3, σ, :] .= parent(sol.phase)[3, :, :]
@@ -1083,7 +1083,7 @@ end
     end
 end
 
-@testset "Adhoc: a feed-common track ignores a station's feed basis" begin
+@testset "Adhoc: a feed-common track ignores an antenna's feed basis" begin
     rng = MersenneTwister(0x1290)
     nant, nap = 5, 24
     bl = all_bl_a(nant)
@@ -1099,12 +1099,12 @@ end
     U = [cos(θ) -sin(θ); sin(θ) cos(θ)] * [cis(0.4) 0; 0 cis(-0.9)]
     kw = (; gauge = PinAntenna(1), tying = CALa.SharedFeeds(), smoother = FRa.PerTrackAdhocSmoother(), prior = nothing)
     sol = solve_positional(rbar, wbar, bl, pols, nant, times; kw...)
-    rot = solve_positional(restation(rbar, bl, pols, 3; U), wbar, bl, pols, nant, times; kw...)
+    rot = solve_positional(relabel_antenna(rbar, bl, pols, 3; U), wbar, bl, pols, nant, times; kw...)
     @test isequal(isfinite.(rot.phase), isfinite.(sol.phase))
     @test maximum(abs, filter(isfinite, rot.phase .- sol.phase)) < 1.0e-6
 end
 
-@testset "Adhoc: stations with one or three receptors" begin
+@testset "Adhoc: antennas with one or three receptors" begin
     rng = MersenneTwister(0x0267)
     nant, nap = 5, 20
     ref = 1
@@ -1139,7 +1139,7 @@ end
     rbar, wbar = inject_screen(bl, pols, 0.3 .* randn(rng, nant, 3, nap))
     sol = solve_positional(rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.SharedFeeds(), smoother = joint)
     @test all(isfinite, sol.phase)
-    @test_throws "requires one phase node per station" solve_positional(
+    @test_throws "requires one phase node per antenna" solve_positional(
         rbar, wbar, bl, pols, nant, times; gauge = PinAntenna(1), tying = CALa.PerFeed(), smoother = joint,
     )
 end

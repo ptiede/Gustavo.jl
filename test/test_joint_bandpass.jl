@@ -219,7 +219,7 @@ function _seg_geometry(nchan; nant = 4)
         channel_freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6),
         spw_of_chan = ones(Int, nchan),
         scan_names = ["No00$i" for i in 1:4], spw_names = ["A"],
-        stations = ["A$i" for i in 1:nant],
+        antennas = ["A$i" for i in 1:nant],
     )
 end
 
@@ -227,10 +227,10 @@ end
 # `S[scan, baseline, pol]`, with `tseg[ant, scan]` naming each station's segment,
 # labeled by `geom`'s station names and channel frequencies.
 function _joint_scan_accumulators(g, S, tseg, bl_pairs, feeds, geom)
-    names = geom.stations
+    names = geom.antennas
     return map(axes(S, 1)) do si
         ax = (
-            FP._station_pair_dim([(names[a], names[b]) for (a, b) in bl_pairs]),
+            FP._antenna_pair_dim([(names[a], names[b]) for (a, b) in bl_pairs]),
             FP.FeedPair(feeds), Frequency(geom.channel_freqs),
         )
         rl, wl = zeros(ComplexF64, ax), zeros(ax)
@@ -250,23 +250,23 @@ end
 # The pinned gain slots of a joint solve's phase gauge, as `(block, (ant, feed,
 # channel, time segment))` positions; empty for a gauge imposed as constraints.
 function _joint_pins(geom, blocks, results, tseg, gauge)
-    nant = length(geom.stations)
-    fseg, cells = FP._station_freq_segments(blocks, nant)
+    nant = length(geom.antennas)
+    fseg, cells = FP._antenna_freq_segments(blocks, nant)
     r, w = FP._reduce_all_scans(results, cells)
-    data = (; w, ends = FP._cell_nodes(r, geom.stations, PerFeed()))
+    data = (; w, ends = FP._cell_nodes(r, geom.antennas, PerFeed()))
     layout = (; loc = FP._block_locations(blocks, nant), tseg, fseg)
     gains = [FP._block_gains(b, geom, ComplexF64) for b in blocks]
     FP._joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     return Set((k, Tuple(I)) for (k, st) in pairs(gains) for I in findall(parent(st.pinned)))
 end
 
-@testset "JointSmoother: a reference-free pin anchors the best-measured station" begin
+@testset "JointSmoother: a reference-free pin anchors the best-measured antenna" begin
     nant, nchan = 4, 6
     geom = _seg_geometry(nchan)
     model = CAL.GainModel(;
         phase = (; bandpass = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(nchan), Feed = PerFeed())),
     )
-    l = CAL.plan_parameters(model, geom.stations, geom)
+    l = CAL.plan_parameters(model, geom.antennas, geom)
     st = (; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase)))
     blocks = FP._bandpass_blocks(st, zeros(l.nθ), :phase)
     # A1 has the most correlations, but A2's are weighted far above the rest.
@@ -282,7 +282,7 @@ end
         Set([(1, (2, 1, 1, 1)), (1, (2, 2, 1, 1))])
 end
 
-@testset "JointSmoother: each station's own time segments in one ALS" begin
+@testset "JointSmoother: each antenna's own time segments in one ALS" begin
     nant, nchan = 4, 6
     anames = ["A$i" for i in 1:nant]
     geom = _seg_geometry(nchan)
@@ -323,7 +323,7 @@ end
             gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom,
         )
         blocks = FP._bandpass_blocks(setup(l), zeros(l.nθ), :phase)
-        tseg = FP._station_time_segments(blocks, results, nant)
+        tseg = FP._antenna_time_segments(blocks, results, nant)
         # One block spans every station, so every row is that block's own table.
         @test all(tseg[a, :] == [1, 1, 2, 2] for a in 1:nant)
         @test FP._joint_scan_groups(tseg) == [[1, 2], [3, 4]]
@@ -352,7 +352,7 @@ end
         @test θ_merged == θ_loop
     end
 
-    @testset "one station breaks and the rest span the track" begin
+    @testset "one antenna breaks and the rest span the track" begin
         l = layout(InstrumentScans([1.5]))
         s = setup(l)
         θ = zeros(l.nθ)
@@ -409,7 +409,7 @@ end
         end
     end
 
-    @testset "a heterogeneous model writes through each station's own block" begin
+    @testset "a heterogeneous model writes through each antenna's own block" begin
         # Station 1 alone carries the break; the rest hold one gain over the
         # track, so the two signature groups become two blocks with different
         # `:AntennaName` axes and different time segmentations, and the solve has to
@@ -417,7 +417,7 @@ end
         het_model = CAL.GainModel(;
             phase = (; bandpass = bp(CAL.GlobalTime())),
             logamp = (; bandpass = bp(CAL.GlobalTime())),
-            stations = (
+            antennas = (
                 A1 = (;
                     phase = (; bandpass = bp(InstrumentScans([1.5]))),
                     logamp = (; bandpass = bp(InstrumentScans([1.5]))),
@@ -429,7 +429,7 @@ end
         θ = zeros(lh.nθ)
         phase_blocks = FP._bandpass_blocks(sh, θ, :phase)
         amp_blocks = FP._bandpass_blocks(sh, θ, :logamp)
-        @test [b.stations for b in phase_blocks] == [[1], [2, 3, 4]]
+        @test [b.antennas for b in phase_blocks] == [[1], [2, 3, 4]]
         # The parameter saving is real: the stations that hold one gain carry one
         # time segment, not the union's two.
         @test phase_blocks[1].plan.shape[4] == 2
@@ -438,7 +438,7 @@ end
         tsg = fill(1, nant, 4)
         tsg[1, :] = [1, 1, 2, 2]
         results = _joint_scan_accumulators(gtrue, Strue, tsg, bl_pairs, feeds, geom)
-        @test FP._station_time_segments(phase_blocks, results, nant) == tsg
+        @test FP._antenna_time_segments(phase_blocks, results, nant) == tsg
         @test FP._joint_scan_groups(tsg) == [[1, 2, 3, 4]]
 
         # Each block's status array spans its own stations and time segments,
@@ -446,7 +446,7 @@ end
         phase_status = [FP._block_status_array(b, geom) for b in phase_blocks]
         amp_status = [FP._block_status_array(b, geom) for b in amp_blocks]
         for (st, b) in zip(phase_status, phase_blocks)
-            @test lookup(st, FP.AntennaName) == geom.stations[b.stations]
+            @test lookup(st, FP.AntennaName) == geom.antennas[b.antennas]
             @test size(st, Ti) == b.plan.shape[4]
             ref = CAL._time_segment_lookup(b.plan, geom)
             @test collect(lookup(st, Ti)) == collect(ref)
@@ -477,7 +477,7 @@ end
             end
             # …and each of the others lands at ITS block-local position, which is
             # not its global station index.
-            for (ai, a) in pairs(phase_blocks[2].stations)
+            for (ai, a) in pairs(phase_blocks[2].antennas)
                 @test phase_blocks[2].θ[1, f, :, 1, ai] ≈ want_phase(a, f, 1) atol = 1.0e-8
                 @test amp_blocks[2].θ[1, f, :, 1, ai] ≈ want_amp(a, f, 1) atol = 1.0e-8
             end
@@ -501,7 +501,7 @@ end
 # relative phase across such a break is then measured, not gauged away — even
 # when the broken station is itself the reference.
 
-@testset "JointSmoother: the phase gauge spans per-station time segments" begin
+@testset "JointSmoother: the phase gauge spans per-antenna time segments" begin
     nant, nchan = 4, 6
     anames = ["A$i" for i in 1:nant]
     geom = _seg_geometry(nchan)
@@ -558,7 +558,7 @@ end
         @test length(upins) == 2 * 2 * nchan
     end
 
-    @testset "the reference station's own break is measured, not gauged away" begin
+    @testset "the reference antenna's own break is measured, not gauged away" begin
         θ = zeros(l.nθ)
         phase_blocks = FP._bandpass_blocks(s, θ, :phase)
         amp_blocks = FP._bandpass_blocks(s, θ, :logamp)
@@ -594,14 +594,14 @@ end
 # Each station's gain is held in its own frequency segments, and the data are
 # reduced onto the cells every station's segmentation is a union of.
 
-@testset "JointSmoother: each station's own frequency segments" begin
+@testset "JointSmoother: each antenna's own frequency segments" begin
     nant, nchan = 4, 6
     anames = ["A$i" for i in 1:nant]
     geom = _seg_geometry(nchan)
     bpf(fs; prior = nothing) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = fs, Feed = PerFeed(), prior)
     hetmodel(a1, rest; prior = nothing) = CAL.GainModel(;
         phase = (; bandpass = bpf(rest; prior)), logamp = (; bandpass = bpf(rest)),
-        stations = (
+        antennas = (
             A1 = (; phase = (; bandpass = bpf(a1; prior)), logamp = (; bandpass = bpf(a1))),
         ),
     )
@@ -623,8 +623,8 @@ end
         # strictly finer than either.
         l = CAL.plan_parameters(hetmodel(ChannelBlocks(2), ChannelBlocks(3)), anames, geom)
         blocks = FP._bandpass_blocks(setup(l), zeros(l.nθ), :phase)
-        @test [b.stations for b in blocks] == [[1], [2, 3, 4]]
-        fseg, cells = FP._station_freq_segments(blocks, nant)
+        @test [b.antennas for b in blocks] == [[1], [2, 3, 4]]
+        fseg, cells = FP._antenna_freq_segments(blocks, nant)
         @test cells == [[1, 2], [3], [4], [5, 6]]
         @test fseg[1, :] == [1, 2, 2, 3]
         @test all(fseg[a, :] == [1, 1, 2, 2] for a in 2:nant)
@@ -669,7 +669,7 @@ end
         # The first channel of each of a station's own segments stands for it.
         reps(a) = a == 1 ? [1, 3, 5] : [1, 4]
         for f in 1:2, (bi, block) in pairs(pb)
-            for (ai, a) in pairs(block.stations)
+            for (ai, a) in pairs(block.antennas)
                 truth = [gtrue[a, f, 1, c] for c in reps(a)]
                 @test block.θ[1, f, :, 1, ai] ≈ cdemean(angle.(truth)) atol = 1.0e-10
                 @test ab[bi].θ[1, f, :, 1, ai] ≈ demean(log.(abs.(truth))) atol = 1.0e-10
@@ -691,7 +691,7 @@ end
         @test all(isfinite, θ2)
     end
 
-    @testset "one segmentation for every station is the identity refinement" begin
+    @testset "one segmentation for every antenna is the identity refinement" begin
         l = CAL.plan_parameters(
             CAL.GainModel(;
                 phase = (; bandpass = bpf(ChannelBlocks(2))),
@@ -700,7 +700,7 @@ end
         )
         blocks = FP._bandpass_blocks(setup(l), zeros(l.nθ), :phase)
         plan = only(blocks).plan
-        fseg, cells = FP._station_freq_segments(blocks, nant)
+        fseg, cells = FP._antenna_freq_segments(blocks, nant)
         # The cells ARE that segmentation's own channel groups and every station
         # maps each cell to itself, so the solve is the pre-refinement one.
         @test cells == CAL.segment_groups(plan.fseg_id, length(plan.nchan_seg))
@@ -716,7 +716,7 @@ end
             Set((1, (1, f, k, 1)) for f in 1:2 for k in eachindex(cells))
     end
 
-    @testset "a station holding one gain over cells the others split" begin
+    @testset "an antenna holding one gain over cells the others split" begin
         # Station 1 carries ONE bandpass over the whole band while the rest
         # carry two, so its single segment pools both refinement cells. Pinning
         # it gauges the solve exactly: its gain is constant in frequency, so the
@@ -726,7 +726,7 @@ end
         θ = zeros(l.nθ)
         phase_blocks = FP._bandpass_blocks(s, θ, :phase)
         amp_blocks = FP._bandpass_blocks(s, θ, :logamp)
-        fseg, cells = FP._station_freq_segments(phase_blocks, nant)
+        fseg, cells = FP._antenna_freq_segments(phase_blocks, nant)
         @test cells == [[1, 2, 3], [4, 5, 6]]
         @test fseg[1, :] == [1, 1]
         @test all(fseg[a, :] == [1, 2] for a in 2:nant)
@@ -767,7 +767,7 @@ end
             @test all(iszero, amp_blocks[1].θ[1, f, :, 1, 1])
             # The rest recover their two segments from data pooled over three
             # channels each, measured against the pinned station.
-            for (ai, a) in pairs(phase_blocks[2].stations)
+            for (ai, a) in pairs(phase_blocks[2].antennas)
                 @test phase_blocks[2].θ[1, f, :, 1, ai] ≈
                     cdemean([angle(gtrue[a, f, 1, c]) for c in rep]) atol = 1.0e-8
                 @test amp_blocks[2].θ[1, f, :, 1, ai] ≈
@@ -826,7 +826,7 @@ end
         channel_freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6),
         spw_of_chan = repeat([1, 2]; inner = nchan ÷ 2),
         scan_names = ["No00$i" for i in 1:4], spw_names = ["A", "B"],
-        stations = anames,
+        antennas = anames,
     )
     ou = CAL.OUPrior(; scale = 3.0e6, σ = 1.0)
     comp(fs; prior = nothing) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = fs, Feed = PerFeed(), prior)
@@ -936,14 +936,14 @@ end
     end
     # Each written track is referenced to its own circular band mean, so the
     # zero station mean of every cell reads as one constant across the band.
-    station_mean_spread(φ) = maximum(f -> (m = vec(sum(φ[:, f, :]; dims = 1)) ./ nant; maximum(m) - minimum(m)), 1:2)
+    antenna_mean_spread(φ) = maximum(f -> (m = vec(sum(φ[:, f, :]; dims = 1)) ./ nant; maximum(m) - minimum(m)), 1:2)
 
     # A second-order walk of `σ` rad per channel (1 MHz), as rad/Hz^(3/2).
     rw2(σ) = CAL.RandomWalkPrior(; order = 2, σ = σ * sqrt(3 / (2 * 1.0e6^3)))
 
     @testset "without a prior the gauge leaves the products unchanged" begin
         zs, pin = solve(ZeroSumPhase()), solve(PinAntenna(1))
-        @test station_mean_spread(zs) < 1.0e-8
+        @test antenna_mean_spread(zs) < 1.0e-8
         @test product_error(zs)[1] < 1.0e-8
         @test product_error(pin)[1] < 1.0e-8
     end
@@ -951,7 +951,7 @@ end
     @testset "under a prior the zero sum spreads the reference's structure" begin
         prior = rw2(1.0)
         zs, pin = solve(ZeroSumPhase(); prior), solve(PinAntenna(1); prior)
-        @test station_mean_spread(zs) < 1.0e-8
+        @test antenna_mean_spread(zs) < 1.0e-8
         # Pinned, every track carries the reference's bandpass and its prior
         # smooths it away: rms error 0.20 rad, worst 0.87, against 0.10 and 0.41.
         worst_zs, rms_zs = product_error(zs)
@@ -971,7 +971,7 @@ end
         # amplitude prior keeps the MAP finite.
         zs = solve(ZeroSumPhase(); prior = rw2(σ), amp_prior = rw2(0.05), max_iterations = 80)
         solve(PinAntenna(1); prior = rw2(σ), amp_prior = rw2(0.05), max_iterations = 80)
-        @test station_mean_spread(zs) < 1.0e-8
+        @test antenna_mean_spread(zs) < 1.0e-8
 
         # Without it the MAP does not exist, and the solve says so.
         l = layout(rw2(σ), nothing)
@@ -991,7 +991,7 @@ end
         end
         zs = solve(ZeroSumPhase(); prior = rw2(0.05), amp_prior = rw2(0.05), data = gap)
         @test all(isfinite, zs[3, :, 5])
-        @test station_mean_spread(zs) < 1.0e-8
+        @test antenna_mean_spread(zs) < 1.0e-8
     end
 
     @testset "only a pin marks pinned slots" begin
@@ -1106,7 +1106,7 @@ end
     bpf(fs; prior = nothing) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = fs, Feed = PerFeed(), prior)
     hetmodel(a1, rest; prior = nothing) = CAL.GainModel(;
         phase = (; bandpass = bpf(rest; prior)), logamp = (; bandpass = bpf(rest)),
-        stations = (A1 = (; phase = (; bandpass = bpf(a1; prior)), logamp = (; bandpass = bpf(a1))),),
+        antennas = (A1 = (; phase = (; bandpass = bpf(a1; prior)), logamp = (; bandpass = bpf(a1))),),
     )
     setup(l) = (;
         layout = l,
@@ -1127,13 +1127,13 @@ end
         return gtrue, geom, _joint_scan_accumulators(gtrue, S, fill(1, nant, 4), bl_pairs(nant), feeds, geom)
     end
     function solve(n1, nrest, gauge, geom, results; prior = nothing, max_iterations = 2000)
-        nant = length(geom.stations)
-        l = CAL.plan_parameters(hetmodel(ChannelBlocks(n1), ChannelBlocks(nrest); prior), geom.stations, geom)
+        nant = length(geom.antennas)
+        l = CAL.plan_parameters(hetmodel(ChannelBlocks(n1), ChannelBlocks(nrest); prior), geom.antennas, geom)
         θ = zeros(l.nθ)
         pb, ab = FP._bandpass_blocks(setup(l), θ, :phase), FP._bandpass_blocks(setup(l), θ, :logamp)
         FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge, max_iterations, tolerance = 1.0e-12)
         φ = zeros(nant, 2, length(geom.channel_freqs))
-        for blk in pb, (ai, a) in pairs(blk.stations), f in 1:2, c in axes(φ, 3)
+        for blk in pb, (ai, a) in pairs(blk.antennas), f in 1:2, c in axes(φ, 3)
             φ[a, f, c] = blk.θ[1, f, blk.plan.fseg_id[c], 1, ai]
         end
         return φ
@@ -1150,7 +1150,7 @@ end
         return worst
     end
 
-    @testset "station 1 on $n1-channel blocks, the rest on $nrest" for (n1, nrest) in ((1, 2), (2, 1))
+    @testset "antenna 1 on $n1-channel blocks, the rest on $nrest" for (n1, nrest) in ((1, 2), (2, 1))
         gtrue, geom, results = synthetic(n1, nrest; nant = 4, nchan = 4, spread = 0.6, seed = 302)
         for gauge in (PinAntenna(1), PinAntenna(2), ZeroSumPhase())
             @test product_error(solve(n1, nrest, gauge, geom, results), gtrue) < 1.0e-8
@@ -1211,7 +1211,7 @@ end
     comp(prior) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
     function solve(nant, bl_pairs; amp_prior = nothing)
         geom = _seg_geometry(nchan; nant)
-        l = CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = comp(nothing)), logamp = (; bandpass = comp(amp_prior))), geom.stations, geom)
+        l = CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = comp(nothing)), logamp = (; bandpass = comp(amp_prior))), geom.antennas, geom)
         setup = (; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase), logamp = FP._bandpass_paths(l.plantree, :logamp)))
         rng = MersenneTwister(304)
         gtrue = exp.(complex.(0.3 .* randn(rng, nant, 2, 1, nchan), 0.5 .* randn(rng, nant, 2, 1, nchan)))

@@ -74,7 +74,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         )
         @test !Gustavo._scan_local_solve(
             BaselineFringeFit(;
-                model = with_station(
+                model = with_antenna(
                     default_fringe_model(), "AA";
                     phase = default_fringe_model(rel_time = CAL.GlobalTime()).phase,
                 ),
@@ -109,10 +109,10 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
-    @testset "every step defaults to ZeroSumPhase; an unknown station is named" begin
+    @testset "every step defaults to ZeroSumPhase; an unknown antenna is named" begin
         ps, _ = _build_fringe_ps()
         @test all(st -> st.gauge === ZeroSumPhase(), (BaselineFringeFit(), Bandpass(), AdhocPhase(), AdhocPhase(FP.PerTrackAdhocSmoother())))
-        @test_throws "station code \"ZZ\" not in antenna table" fit(BaselineFringeFit(; gauge = PinAntenna("ZZ")), ps)
+        @test_throws "antenna code \"ZZ\" not in antenna table" fit(BaselineFringeFit(; gauge = PinAntenna("ZZ")), ps)
     end
 
     @testset "a chain of steps: one solution per step" begin
@@ -247,7 +247,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
             # `isequal`: the bandpass record holds NaN where a piece has no slip probability.
             @test isequal(back.info, sol.info)
             @test back.step == sol.step
-            @test back.geom.stations == sol.geom.stations && back.geom.times == sol.geom.times
+            @test back.geom.antennas == sol.geom.antennas && back.geom.times == sol.geom.times
             @test parent(gains(back)) == parent(gains(sol))
         end
 

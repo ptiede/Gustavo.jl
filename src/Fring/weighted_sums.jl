@@ -53,15 +53,15 @@ function _ap_sums(group::XRadio.ProcessingSet, geom::DataGeometry; executor)
     isempty(group) && throw(ArgumentError("the scan group holds no Measurement Sets"))
     parts = tmap(ms -> _member_ap_sums(ms, geom), _members_by_frequency(group); scheduler = executor)
 
-    stations = _station_pairs(reduce(vcat, (p.stations for p in parts)), geom)
+    antennas = _canonical_antenna_pairs(reduce(vcat, (p.antennas for p in parts)), geom)
     feeds = sort!(unique!(reduce(vcat, (vec(p.feeds) for p in parts))))
     ti = sort!(unique!(reduce(vcat, (p.ti for p in parts))))
 
-    ax = (_station_pair_dim(stations), FeedPair(feeds), Ti(geom.times[ti]))
+    ax = (_antenna_pair_dim(antennas), FeedPair(feeds), Ti(geom.times[ti]))
     rbar = zeros(mapreduce(p -> eltype(p.wv), promote_type, parts), ax)
     wbar = zeros(mapreduce(p -> eltype(p.ws), promote_type, parts), ax)
     for p in parts
-        _add_by_label!(rbar, wbar, p.wv, p.ws, p.stations, p.feeds, Ti(At(geom.times[p.ti])))
+        _add_by_label!(rbar, wbar, p.wv, p.ws, p.antennas, p.feeds, Ti(At(geom.times[p.ti])))
     end
     return (; rbar, wbar, ti)
 end
@@ -71,48 +71,48 @@ _members_by_frequency(group) = sort!(collect(values(group)); by = ms -> minimum(
 function _member_ap_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
     wv, ws = weighted_sums(_member_layers(ms)...; dims = Frequency)
     ti = Calibration._time_indices(geom, XRadio.times(ms))
-    return (; wv, ws, stations = _member_station_pairs(ms), feeds = feed_pairs(ms), ti)
+    return (; wv, ws, antennas = _member_antenna_pairs(ms), feeds = feed_pairs(ms), ti)
 end
 
 """
-    _station_pairs(pairs, geom::DataGeometry) -> Vector
+    _canonical_antenna_pairs(pairs, geom::DataGeometry) -> Vector
 
 The distinct station pairs among `pairs` (antenna-name tuples), ordered by
 `geom`'s station numbering. Refuses a pair stored in both orders, since the two
 would conjugate each other.
 """
-function _station_pairs(pairs, geom::DataGeometry)
-    slot = Dict(n => i for (i, n) in Base.pairs(geom.stations))
-    station(n) = get(slot, n) do
-        throw(ArgumentError("baseline antenna `$n` is not among the geometry's stations, " * join(geom.stations, ", ")))
+function _canonical_antenna_pairs(pairs, geom::DataGeometry)
+    slot = Dict(n => i for (i, n) in Base.pairs(geom.antennas))
+    antenna(n) = get(slot, n) do
+        throw(ArgumentError("baseline antenna `$n` is not among the geometry's antennas, " * join(geom.antennas, ", ")))
     end
-    order = Dict((a, b) => (station(a), station(b)) for (a, b) in pairs)
-    stations = sort!(collect(keys(order)); by = p -> order[p])
-    stored = Set(stations)
-    for (a, b) in stations
+    order = Dict((a, b) => (antenna(a), antenna(b)) for (a, b) in pairs)
+    antennas = sort!(collect(keys(order)); by = p -> order[p])
+    stored = Set(antennas)
+    for (a, b) in antennas
         a != b && (b, a) in stored && throw(
-            ArgumentError("stations $a and $b are stored in both orders"),
+            ArgumentError("antennas $a and $b are stored in both orders"),
         )
     end
-    return stations
+    return antennas
 end
 
-_station_pair_dim(stations) = AntennaPair(
-    DimensionalData.Lookups.Categorical(stations; order = DimensionalData.Lookups.Unordered()),
+_antenna_pair_dim(antennas) = AntennaPair(
+    DimensionalData.Lookups.Categorical(antennas; order = DimensionalData.Lookups.Unordered()),
 )
-_station_dim(stations) = AntennaName(
-    DimensionalData.Lookups.Categorical(stations; order = DimensionalData.Lookups.Unordered()),
+_antenna_dim(antennas) = AntennaName(
+    DimensionalData.Lookups.Categorical(antennas; order = DimensionalData.Lookups.Unordered()),
 )
 
-_member_station_pairs(ms::XRadio.MeasurementSet) = [(String(a), String(b)) for (a, b) in XRadio.baselines(ms)]
+_member_antenna_pairs(ms::XRadio.MeasurementSet) = [(String(a), String(b)) for (a, b) in XRadio.baselines(ms)]
 
 # A stored product's feed pair varies by baseline, so each (baseline, product)
 # of a member finds its row by label. `along` selects the third axis.
-function _add_by_label!(rbar, wbar, wv, ws, stations, feeds, along; autos::Bool = true)
+function _add_by_label!(rbar, wbar, wv, ws, antennas, feeds, along; autos::Bool = true)
     for bi in axes(feeds, 2), p in axes(feeds, 1)
-        a, b = stations[bi]
+        a, b = antennas[bi]
         autos || a != b || continue
-        sel = (AntennaPair(At(stations[bi])), FeedPair(At(feeds[p, bi])), along)
+        sel = (AntennaPair(At(antennas[bi])), FeedPair(At(feeds[p, bi])), along)
         cell = (BaselineID(bi), Polarization(p))
         view(rbar, sel...) .+= view(wv, cell...)
         view(wbar, sel...) .+= view(ws, cell...)

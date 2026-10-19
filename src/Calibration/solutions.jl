@@ -56,7 +56,7 @@ Base.show(io::IO, c::ComponentFit) = print(
     CalibrationSolution(model, layout, geom, θ, info = (;); name = :solution, step = "")
 
 What one solve step fit: the list `components` of [`ComponentFit`](@ref)s
-over the geometry `geom`, whose `stations` name every station a component may
+over the geometry `geom`, whose `antennas` name every station a component may
 carry. Gains compose multiplicatively across components.
 
 - `name` names the step's solution (`:fringe`, `:bandpass`, `:adhoc`).
@@ -82,10 +82,10 @@ struct CalibrationSolution{G <: DataGeometry}
     info::NamedTuple
     step::String
     function CalibrationSolution{G}(geom, name, components, info, step) where {G}
-        isempty(geom.stations) && throw(
+        isempty(geom.antennas) && throw(
             ArgumentError(
-                "a solution's geometry must name its stations; build it with `DataGeometry(ps)` " *
-                    "or pass `stations`"
+                "a solution's geometry must name its antennas; build it with `DataGeometry(ps)` " *
+                    "or pass `antennas`"
             )
         )
         labels = map(_label, components)
@@ -157,7 +157,7 @@ Base.eltype(::Type{<:CalibrationSolution}) = ComponentFit
 function Base.show(io::IO, ::MIME"text/plain", sol::CalibrationSolution)
     println(io, "CalibrationSolution")
     println(io, "  Step      : ", sol.name)
-    println(io, "  Grid      : ", length(sol.geom.stations), " stations × ", nchannels(sol.geom), " channels × ", ntimes(sol.geom), " times")
+    println(io, "  Grid      : ", length(sol.geom.antennas), " antennas × ", nchannels(sol.geom), " channels × ", ntimes(sol.geom), " times")
     print(io, "  Components:")
     for c in sol.components
         print(io, "\n    ", _label(c), "  ", nameof(typeof(c.component.term)), "  ", join(size(c.params), "×"))
@@ -177,7 +177,7 @@ function _solved_components(model::GainModel, layout::ParameterLayout, θ::Abstr
     length(θ) == layout.nθ || throw(
         DimensionMismatch("θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)")
     )
-    names = _station_labels(geom, layout.nant)
+    names = _antenna_labels(geom, layout.nant)
     out = ComponentFit[]
     for group in (:phase, :logamp)
         _collect_components!(
@@ -202,17 +202,17 @@ end
 
 function _collect_components!(out, g::GroupedComponentPlan, axnode, path, θ, model, geom, names)
     for (i, k) in enumerate(keys(g.groups))
-        comp = _component_at(model, path, names[first(g.stations[i])])
+        comp = _component_at(model, path, names[first(g.antennas[i])])
         push!(out, ComponentFit((path..., k), comp, _params_array(g.groups[i], axnode[i], θ, geom, names)))
     end
     return out
 end
 
 # The `GainComponent` at `path` (`(:phase, name, …)`) in the component tree
-# `station` solves under. Where stations differ only in prior, this is the
+# `antenna` solves under. Where stations differ only in prior, this is the
 # named station's.
-function _component_at(model::GainModel, path, station)
-    node = station_components(model, station)
+function _component_at(model::GainModel, path, antenna)
+    node = antenna_components(model, antenna)
     for k in path
         node = getproperty(node, k)
     end
@@ -229,33 +229,33 @@ function _params_array(plan::ComponentPlan, axnode, θ, geom, names)
 end
 
 _params_dims(plan::ComponentPlan, axnode, geom, names) = ntuple(
-    d -> _role_dim(axnode.roles[d], plan.shape[d], geom, names, plan; stations = get(axnode, :stations, nothing)),
+    d -> _role_dim(axnode.roles[d], plan.shape[d], geom, names, plan; antennas = get(axnode, :antennas, nothing)),
     length(plan.shape),
 )
 
 # The station names a layout over `n` stations of `geom` addresses.
-function _station_labels(geom::DataGeometry, n::Int)
-    isempty(geom.stations) && throw(
+function _antenna_labels(geom::DataGeometry, n::Int)
+    isempty(geom.antennas) && throw(
         ArgumentError(
-            "a solution's geometry must name its stations; build it with `DataGeometry(ps)` " *
-                "or pass `stations`"
+            "a solution's geometry must name its antennas; build it with `DataGeometry(ps)` " *
+                "or pass `antennas`"
         )
     )
-    length(geom.stations) == n || throw(
-        DimensionMismatch("the layout covers $n stations but the geometry names $(length(geom.stations))")
+    length(geom.antennas) == n || throw(
+        DimensionMismatch("the layout covers $n antennas but the geometry names $(length(geom.antennas))")
     )
-    return geom.stations
+    return geom.antennas
 end
 
 # ── Applying ─────────────────────────────────────────────────────────────────
 
-# Components over one station set, planned together: `stations` indexes
-# `geom.stations`.
+# Components over one station set, planned together: `antennas` indexes
+# `geom.antennas`.
 struct _EvalGroup{M <: GainModel, L <: ParameterLayout, V <: AbstractVector}
     model::M
     layout::L
     θ::V
-    stations::Vector{Int}
+    antennas::Vector{Int}
 end
 
 # What a solution applies: its geometry and one planned group per station set,
@@ -282,29 +282,29 @@ function _applied(sol::CalibrationSolution)
             push!(members[i], c)
         end
     end
-    groups = _EvalGroup[_eval_group(stations, cs, geom) for (stations, cs) in zip(keys_, members)]
+    groups = _EvalGroup[_eval_group(antennas, cs, geom) for (antennas, cs) in zip(keys_, members)]
     return _AppliedSolution(geom, groups)
 end
 
-function _eval_group(stations::Vector{String}, cs::Vector{ComponentFit}, geom::DataGeometry)
-    idx = map(stations) do s
-        i = findfirst(==(s), geom.stations)
+function _eval_group(antennas::Vector{String}, cs::Vector{ComponentFit}, geom::DataGeometry)
+    idx = map(antennas) do s
+        i = findfirst(==(s), geom.antennas)
         isnothing(i) && throw(
-            ArgumentError("component station `$s` is not among the geometry's stations $(join(geom.stations, ", "))")
+            ArgumentError("component antenna `$s` is not among the geometry's antennas $(join(geom.antennas, ", "))")
         )
         i
     end
     keys_ = [Symbol(:c, i) for i in eachindex(cs)]
     group(g) = (sel = findall(c -> first(c.path) === g, cs); NamedTuple{Tuple(keys_[sel])}(Tuple(cs[i].component for i in sel)))
     model = GainModel(; phase = group(:phase), logamp = group(:logamp))
-    layout = plan_parameters(model, length(stations), geom; require_nonempty = false)
+    layout = plan_parameters(model, length(antennas), geom; require_nonempty = false)
     T = mapreduce(c -> eltype(c.params), promote_type, cs)
     θ = zeros(T, layout.nθ)
     for (c, key) in zip(cs, keys_)
         g = first(c.path)
         plan = getproperty(getproperty(layout.plantree, g), key)
         axnode = getproperty(getproperty(layout.axes, g), key)
-        _check_params_dims(DimensionalData.dims(c.params), _params_dims(plan, axnode, geom, stations), _label(c))
+        _check_params_dims(DimensionalData.dims(c.params), _params_dims(plan, axnode, geom, antennas), _label(c))
         copyto!(view(θ, plan.range), parent(c.params))
     end
     return _EvalGroup(model, layout, θ, idx)
@@ -329,7 +329,7 @@ function _check_params_dims(got::Tuple, expected::Tuple, label)
     return nothing
 end
 
-_nant(sol::_AppliedSolution) = length(sol.geom.stations)
+_nant(sol::_AppliedSolution) = length(sol.geom.antennas)
 
 # The product of every group's gains over an `nchan × ntime` window, each
 # group's placed on its own stations; a station a group does not carry takes
@@ -338,7 +338,7 @@ function _product_gains(sol::_AppliedSolution, nchan::Int, ntime::Int, args...; 
     T = mapreduce(g -> float(eltype(g.θ)), promote_type, sol.groups)
     g = ones(Complex{T}, nchan, ntime, _nant(sol), sol.geom.nfeed)
     for grp in sol.groups
-        view(g, :, :, grp.stations, :) .*= evaluate_gains(grp.layout, grp.θ, args...; kw...)
+        view(g, :, :, grp.antennas, :) .*= evaluate_gains(grp.layout, grp.θ, args...; kw...)
     end
     return g
 end
@@ -365,7 +365,7 @@ function gains(sol::_AppliedSolution; kw...)
     nfeed = sol.geom.nfeed
     nchan = nchannels(sol.geom)
     ntime = ntimes(sol.geom)
-    d = (Frequency(sol.geom.channel_freqs), Ti(sol.geom.times), AntennaName(sol.geom.stations), Feed(1:nfeed))
+    d = (Frequency(sol.geom.channel_freqs), Ti(sol.geom.times), AntennaName(sol.geom.antennas), Feed(1:nfeed))
     isempty(kw) && return DimArray(_product_gains(sol, nchan, ntime), d)
     for k in keys(kw)
         k in (:Frequency, :Ti, :AntennaName, :Feed) || throw(
@@ -423,16 +423,16 @@ _time_segment_lookup(plan::ComponentPlan, geom::DataGeometry, n::Integer = plan.
 
 # The dimension for one axis of a component's parameters, from its role:
 # segment axes over the geometry, `AntennaName` over station names (a signature
-# group's over just its `stations`), `param`/`node` positional.
-function _role_dim(role::Symbol, n::Int, geom::DataGeometry, names, plan::ComponentPlan; stations = nothing)
+# group's over just its `antennas`), `param`/`node` positional.
+function _role_dim(role::Symbol, n::Int, geom::DataGeometry, names, plan::ComponentPlan; antennas = nothing)
     if role === :Frequency
         return Frequency(_frequency_segment_lookup(plan, geom, n))
     elseif role === :Ti
         return Ti(_time_segment_lookup(plan, geom, n))
     elseif role === :AntennaName
-        return AntennaName(isnothing(stations) ? collect(names) : collect(names)[stations])
+        return AntennaName(isnothing(antennas) ? collect(names) : collect(names)[antennas])
     elseif role === :Feed
-        return Feed(1:n)
+        return Feed(_block_feeds(plan.tying, geom.nfeed))
     else
         return Dim{role}(1:n)
     end
@@ -504,11 +504,11 @@ function DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing)
                 active = Set{String}(Iterators.flatten(XRadio.baselines(ms))),
             ) for ms in ps
     ]
-    stations = String[]
+    antennas = String[]
     for ms in ps, name in XRadio.antennas(ms)
-        String(name) in stations || push!(stations, String(name))
+        String(name) in antennas || push!(antennas, String(name))
     end
-    return _span_geometry(pieces, stations, _feed_count(ps); f0, t0)
+    return _span_geometry(pieces, antennas, _feed_count(ps); f0, t0)
 end
 
 function _feed_count(ps::XRadio.ProcessingSet)
@@ -547,11 +547,11 @@ end
 # The union geometry of `pieces`, each holding channels `freqs` of one spectral
 # window `spw` and time samples `times` labeled per sample by `scans`, observed
 # by the stations in `active`.
-function _span_geometry(pieces, stations, nfeed; f0, t0)
+function _span_geometry(pieces, antennas, nfeed; f0, t0)
     freq_spw = Dict{Float64, String}()
     freq_width = Dict{Float64, Float64}()
     time_scan = Dict{Float64, String}()
-    time_stations = Dict{Float64, Set{String}}()
+    time_antennas = Dict{Float64, Set{String}}()
     time_canon = Float64[]
     freq_canon = Float64[]
     for piece in pieces
@@ -580,21 +580,21 @@ function _span_geometry(pieces, stations, nfeed; f0, t0)
             prev = get(time_scan, tk, nothing)
             if prev === nothing
                 time_scan[tk] = scan
-                time_stations[tk] = copy(piece.active)
+                time_antennas[tk] = copy(piece.active)
             elseif prev == scan
-                union!(time_stations[tk], piece.active)
+                union!(time_antennas[tk], piece.active)
             else
-                shared = intersect(time_stations[tk], piece.active)
+                shared = intersect(time_antennas[tk], piece.active)
                 isempty(shared) || throw(
                     ArgumentError(
-                        "station(s) $(join(sort!(collect(shared)), ", ")) are in " *
+                        "antenna(s) $(join(sort!(collect(shared)), ", ")) are in " *
                             "both scan '$prev' and scan '$scan' at time $tk s. A " *
-                            "station cannot be in two scans at one instant, and a single " *
+                            "antenna cannot be in two scans at one instant, and a single " *
                             "concatenated time axis cannot dense-rank the timestamp to one scan. " *
                             "Check for overlapping scan windows or inconsistent scan names."
                     )
                 )
-                union!(time_stations[tk], piece.active)
+                union!(time_antennas[tk], piece.active)
             end
         end
     end
@@ -636,7 +636,7 @@ function _span_geometry(pieces, stations, nfeed; f0, t0)
         times, channel_freqs = freqs, scan_of_time, spw_of_chan,
         channel_widths = [freq_width[f] for f in freqs], t0 = t0v, f0 = f0v,
         scan_names = _unique_in_order(scan_labels), spw_names = _unique_in_order(spw_labels),
-        stations, nfeed,
+        antennas, nfeed,
     )
 end
 
@@ -679,8 +679,8 @@ one Measurement Set, with no data attached.
 - `geom` — the solve's geometry, the index space the window addresses.
 - `chan_idx`, `ti_idx` — global indices into `geom.channel_freqs` / `geom.times`
   of each channel and time of the Measurement Set, in its own order.
-- `stations` — for each baseline, in `baseline_id` order, the pair of indices
-  into `geom.stations` of its two antennas.
+- `antennas` — for each baseline, in `baseline_id` order, the pair of indices
+  into `geom.antennas` of its two antennas.
 
 θ is addressed by POSITION — a component's leaf indexed `(param, node, fseg_id,
 tseg_id, ant)` over global-length segment-id tables — while a Measurement Set's
@@ -697,28 +697,28 @@ struct GeometryWindow
     geom::DataGeometry
     chan_idx::Vector{Int}
     ti_idx::Vector{Int}
-    stations::Vector{Tuple{Int, Int}}
+    antennas::Vector{Tuple{Int, Int}}
 end
 
 GeometryWindow(geom::DataGeometry, chan_idx, ti_idx) =
     GeometryWindow(geom, chan_idx, ti_idx, Tuple{Int, Int}[])
 
 function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
-    isempty(geom.stations) && throw(
-        ArgumentError("the geometry names no stations; build it with `DataGeometry(ps)`")
+    isempty(geom.antennas) && throw(
+        ArgumentError("the geometry names no antennas; build it with `DataGeometry(ps)`")
     )
-    slot = Dict(n => i for (i, n) in pairs(geom.stations))
-    station(n) = get(slot, String(n)) do
+    slot = Dict(n => i for (i, n) in pairs(geom.antennas))
+    antenna(n) = get(slot, String(n)) do
         throw(
             ArgumentError(
-                "baseline antenna `$n` is not among the geometry's stations, " *
-                    join(geom.stations, ", ")
+                "baseline antenna `$n` is not among the geometry's antennas, " *
+                    join(geom.antennas, ", ")
             )
         )
     end
-    stations = [(station(a), station(b)) for (a, b) in XRadio.baselines(ms)]
+    antennas = [(antenna(a), antenna(b)) for (a, b) in XRadio.baselines(ms)]
     return GeometryWindow(
-        geom, _channel_indices(geom, XRadio.frequencies(ms)), _time_indices(geom, XRadio.times(ms)), stations,
+        geom, _channel_indices(geom, XRadio.frequencies(ms)), _time_indices(geom, XRadio.times(ms)), antennas,
     )
 end
 
@@ -760,7 +760,7 @@ function gains(sol::_AppliedSolution, win::GeometryWindow; time_span = nothing)
     return DimArray(
         g, (
             Frequency(win.geom.channel_freqs[win.chan_idx]), Ti(win.geom.times[win.ti_idx]),
-            AntennaName(sol.geom.stations), Feed(1:sol.geom.nfeed),
+            AntennaName(sol.geom.antennas), Feed(1:sol.geom.nfeed),
         ),
     )
 end

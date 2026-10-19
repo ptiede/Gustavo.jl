@@ -510,7 +510,7 @@ default, ``\rho(u) = 2(\sqrt{1+u} - 1)``; [`LeastSquares`](@ref) disables the
 reweighting), and the system is re-solved. Because the weights come from the
 noise model rather than from the spread of the residuals, `loss_scale`
 corresponds to the same effective threshold in units of ``\sigma`` whatever the
-size of the system. [`station_closure_residuals`](@ref) reports the residuals
+size of the system. [`antenna_closure_residuals`](@ref) reports the residuals
 that remain.
 
 Stations the solve does not constrain retain ``\theta = 0``, the identity gain.
@@ -712,8 +712,8 @@ are internal to the solve and independent of it.
 A fringe solution's diagnostics are labeled arrays keyed by scan name,
 station and feed: [`fringe_snr_table`](@ref) (per-scan peak SNR and
 false-alarm probability), [`fringe_detections`](@ref) (every measured
-baseline and product), [`fringe_station_solutions`](@ref) (per-scan station
-delay, rate and phase) and [`fringe_station_flags`](@ref) (station feeds a scan
+baseline and product), [`fringe_antenna_solutions`](@ref) (per-scan station
+delay, rate and phase) and [`fringe_antenna_flags`](@ref) (station feeds a scan
 left unconstrained). Per-scan solutions from [`mapsets`](@ref Gustavo.mapsets) combine with
 [`cat_scans`](@ref):
 

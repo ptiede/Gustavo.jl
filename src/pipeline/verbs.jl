@@ -149,23 +149,23 @@ function _apply_solution!(
     )
     win = GeometryWindow(geom, ms)
     _divide_gains!(ms, win, app; flag_bad, executor)
-    _flag_absent_stations!(ms, win, app.geom.stations; apply_flags)
+    _flag_absent_antennas!(ms, win, app.geom.antennas; apply_flags)
     return _flag_unconstrained!(ms, win, app.geom, flagged)
 end
 
 # The cross baselines of stations `solved` does not name have no gains to divide
 # out; flag them (`apply_flags`) or leave them as they are, and warn either way.
-function _flag_absent_stations!(ms::XRadio.MeasurementSet, win::GeometryWindow, solved; apply_flags::Bool)
-    absent = [!(n in solved) for n in win.geom.stations]
+function _flag_absent_antennas!(ms::XRadio.MeasurementSet, win::GeometryWindow, solved; apply_flags::Bool)
+    absent = [!(n in solved) for n in win.geom.antennas]
     names = Set{String}()
     flag = ms[:flag]
-    for (bi, (a, b)) in pairs(win.stations)
+    for (bi, (a, b)) in pairs(win.antennas)
         (a != b && (absent[a] || absent[b])) || continue
-        absent[a] && push!(names, String(win.geom.stations[a]))
-        absent[b] && push!(names, String(win.geom.stations[b]))
+        absent[a] && push!(names, String(win.geom.antennas[a]))
+        absent[b] && push!(names, String(win.geom.antennas[b]))
         apply_flags && (view(flag, BaselineID(bi)) .= true)
     end
-    isempty(names) || @warn "stations $(sort!(collect(names))) are not in the solution; their baselines are " *
+    isempty(names) || @warn "antennas $(sort!(collect(names))) are not in the solution; their baselines are " *
         (apply_flags ? "flagged" : "left uncorrected") maxlog = 1
     return ms
 end
@@ -187,13 +187,13 @@ end
 # matched by name.
 function _flag_unconstrained!(ms::XRadio.MeasurementSet, win::GeometryWindow, solgeom::DataGeometry, flagged)
     isnothing(flagged) && return ms
-    station = win.geom.stations
+    antenna = win.geom.antennas
     scan = [_solution_scan(solgeom, String(c)) for c in ms[:scan_name]]
     feeds = feed_pairs(ms)
     flag = ms[:flag]
-    for (bi, (a, b)) in pairs(win.stations)
+    for (bi, (a, b)) in pairs(win.antennas)
         a == b && continue
-        sa, sb = station[a], station[b]
+        sa, sb = antenna[a], antenna[b]
         for ti in eachindex(scan), p in axes(feeds, 1)
             fa, fb = feeds[p, bi]
             ((sa, fa, scan[ti]) in flagged || (sb, fb, scan[ti]) in flagged) || continue
@@ -208,7 +208,7 @@ function _solution_scan(solgeom::DataGeometry, name::String)
     isnothing(s) && throw(
         ArgumentError(
             "scan $(repr(name)) is not in the solution, which covers " *
-                "$(join(map(repr, solgeom.scan_names), ", ")); its unconstrained-station flags " *
+                "$(join(map(repr, solgeom.scan_names), ", ")); its unconstrained-antenna flags " *
                 "cannot be applied. Calibrate only the scans the solution was solved on, or pass " *
                 "`apply_flags = false`."
         )
@@ -226,7 +226,7 @@ _resolve_step_gauge(::Nothing, ant_names) = nothing
 function _run_step(st::SolveStep, exec::ExecutionConfig, ps::XRadio.ProcessingSet)
     geom = DataGeometry(ps)
     spec = (; geom)
-    gauge = _resolve_step_gauge(step_gauge(st), geom.stations)
+    gauge = _resolve_step_gauge(step_gauge(st), geom.antennas)
     groups = groupby(ps, XRadio.ByScan())
     sizes = [_group_bytes(g) for g in values(groups)]
     ctx = _step_context(st, spec, gauge, groups, sizes, exec)
@@ -248,16 +248,16 @@ end
 # components at all; it still runs, with nothing to solve. The model is resolved
 # against the run's stations here, so the context and the solution's step text
 # hold the per-station trees the solve uses. A step that does not declare
-# `supports_station_heterogeneity` is handed uniform models only; anything else
+# `supports_antenna_heterogeneity` is handed uniform models only; anything else
 # is rejected before any data is read.
 function _step_context(st::SolveStep, spec, gauge, groups, sizes, exec)
-    stations = spec.geom.stations
-    model = Calibration.resolve(model_components(st, spec), stations, spec.geom)
-    supports_station_heterogeneity(st) ||
-        Calibration.require_station_uniform(model, stations, heterogeneity_rejector(st))
-    layout = plan_parameters(model, stations, spec.geom; require_nonempty = false)
+    antennas = spec.geom.antennas
+    model = Calibration.resolve(model_components(st, spec), antennas, spec.geom)
+    supports_antenna_heterogeneity(st) ||
+        Calibration.require_antenna_uniform(model, antennas, heterogeneity_rejector(st))
+    layout = plan_parameters(model, antennas, spec.geom; require_nonempty = false)
     return SolveContext(
-        model, layout, spec.geom, zeros(layout.nθ), gauge, length(stations),
+        model, layout, spec.geom, zeros(layout.nθ), gauge, length(antennas),
         groups, sizes, exec, provides(st), _PassTiming[],
     )
 end

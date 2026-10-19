@@ -6,7 +6,7 @@
 #     .phase  :: NamedTuple, name → GainComponent   →  Σ phase contributions
 #     .logamp :: NamedTuple, name → GainComponent   →  Σ log-amplitude contributions
 #       gain(t, f) = exp(Σ logamp) · cis(Σ phase)
-#     .stations :: NamedTuple, station → replacement `(; phase, logamp)` entry
+#     .antennas :: NamedTuple, station → replacement `(; phase, logamp)` entry
 #
 # Each component carries a user-specified name (the NamedTuple key), unique
 # within its group. A value that is itself a NamedTuple is a named subtree — one
@@ -17,8 +17,8 @@
 # `logamp_components`, whose order is the list order.
 #
 # The model structure is shared by all antennas in a solve — each antenna gets
-# its own parameter values, not its own structure — except where a `stations`
-# entry replaces a whole group for one station (see `station_components`).
+# its own parameter values, not its own structure — except where an `antennas`
+# entry replaces a whole group for one station (see `antenna_components`).
 
 # ── Feed tying ───────────────────────────────────────────────────────────────
 
@@ -120,13 +120,13 @@ nfeed_blocks(::PerFeed, nfeed::Integer) = nfeed
 nfeed_blocks(::SharedFeeds, nfeed::Integer) = 1
 function nfeed_blocks(t::SingleFeed, nfeed::Integer)
     t.feed <= nfeed || throw(
-        ArgumentError("SingleFeed($(t.feed)) names a feed the data does not have; its stations have $nfeed")
+        ArgumentError("SingleFeed($(t.feed)) names a feed the data does not have; its antennas have $nfeed")
     )
     return 1
 end
 function nfeed_blocks(t::ExceptFeed, nfeed::Integer)
     t.feed <= nfeed || throw(
-        ArgumentError("ExceptFeed($(t.feed)) names a feed the data does not have; its stations have $nfeed")
+        ArgumentError("ExceptFeed($(t.feed)) names a feed the data does not have; its antennas have $nfeed")
     )
     return nfeed - 1
 end
@@ -138,8 +138,11 @@ _feed_node(::SharedFeeds, feed::Integer) = 1
 _feed_node(t::SingleFeed, feed::Integer) = feed == t.feed ? 1 : 0
 _feed_node(t::ExceptFeed, feed::Integer) = feed == t.feed ? 0 : feed < t.feed ? feed : feed - 1
 
+# The feeds that carry a block, in feed-node order.
+_block_feeds(t::AbstractFeedTying, nfeed::Integer) = filter(f -> _feed_node(t, f) != 0, 1:nfeed)
+
 """
-    GainModel(; phase = (;), logamp = (;), stations = (;))
+    GainModel(; phase = (;), logamp = (;), antennas = (;))
 
 The gain model a solve step fits: a `NamedTuple` of named phase
 [`GainComponent`](@ref)s and a `NamedTuple` of named log-amplitude
@@ -154,8 +157,8 @@ GainModel(phase = (; bp), logamp = (; bp))
 ```
 
 [`merge`](@ref Base.merge(::GainModel)) adds or replaces components of an
-existing model; [`with_station`](@ref) gives one station its own groups.
-`stations` holds those per-station entries, each a `NamedTuple` whose `phase`
+existing model; [`with_antenna`](@ref) gives one station its own groups.
+`antennas` holds those per-station entries, each a `NamedTuple` whose `phase`
 and/or `logamp` tree replaces the corresponding base group whole for that
 station; a group the entry omits is inherited from the base. Replacement is
 whole-group because components within a group interact (they sum and share
@@ -163,15 +166,15 @@ degeneracies) while the two groups do not.
 
 Station codes resolve against the observation's antenna table when the model is
 [`resolve`](@ref)d for a solve; an unknown code errors there, naming the
-known stations. Equality is order-insensitive in `stations`.
+known stations. Equality is order-insensitive in `antennas`.
 """
 struct GainModel{P <: NamedTuple, A <: NamedTuple, S <: NamedTuple}
     phase::P
     logamp::A
-    stations::S
+    antennas::S
 end
-GainModel(; phase = (;), logamp = (;), stations = (;)) =
-    GainModel(_named_components(phase), _named_components(logamp), _station_entries(stations))
+GainModel(; phase = (;), logamp = (;), antennas = (;)) =
+    GainModel(_named_components(phase), _named_components(logamp), _antenna_entries(antennas))
 
 _named_components(nt::NamedTuple) = map(_as_component, nt)
 _named_components(::Tuple{}) = (;)
@@ -196,22 +199,22 @@ _as_component(x) = throw(
     ),
 )
 
-_station_entries(nt::NamedTuple) = map(_station_entry, nt)
-_station_entries(::Tuple{}) = (;)
-function _station_entry(e::NamedTuple)
+_antenna_entries(nt::NamedTuple) = map(_antenna_entry, nt)
+_antenna_entries(::Tuple{}) = (;)
+function _antenna_entry(e::NamedTuple)
     unknown = setdiff(keys(e), (:phase, :logamp))
     isempty(unknown) || throw(
         ArgumentError(
-            "station entry has unexpected key(s) $(Tuple(unknown)): it is " *
+            "antenna entry has unexpected key(s) $(Tuple(unknown)): it is " *
                 "`(; phase, logamp)`, either key may be omitted, and component names " *
                 "nest INSIDE the groups, e.g. `(; phase = (; bandpass = GainComponent(...)))`.",
         ),
     )
     return map(_named_components, e)
 end
-_station_entry(x) = throw(
+_antenna_entry(x) = throw(
     ArgumentError(
-        "a station entry must be a `(; phase, logamp)` NamedTuple (either key may be " *
+        "an antenna entry must be a `(; phase, logamp)` NamedTuple (either key may be " *
             "omitted), got $(typeof(x)).",
     ),
 )
@@ -230,36 +233,36 @@ merge(default_fringe_model();
 """
 Base.merge(m::GainModel; phase = (;), logamp = (;)) = GainModel(
     merge(m.phase, _named_components(phase)), merge(m.logamp, _named_components(logamp)),
-    m.stations,
+    m.antennas,
 )
 
 """
-    with_station(m::GainModel, station; phase, logamp) -> GainModel
+    with_antenna(m::GainModel, antenna; phase, logamp) -> GainModel
 
-A copy of `m` in which `station` (a station code, `String` or `Symbol`) solves
+A copy of `m` in which `antenna` (a station code, `String` or `Symbol`) solves
 the given `phase` and/or `logamp` tree in place of the base group. A keyword
 left out keeps the station's current group: its existing entry's, or else the
 base's.
 
 ```julia
-with_station(m, "AA"; phase = (; bandpass = GainComponent(PolynomialFreq(3); Ti = GlobalTime())))
+with_antenna(m, "AA"; phase = (; bandpass = GainComponent(PolynomialFreq(3); Ti = GlobalTime())))
 ```
 """
-function with_station(m::GainModel, station; kw...)
-    entry = merge(get(m.stations, Symbol(station), (;)), _station_entry(NamedTuple(kw)))
-    stations = merge(m.stations, NamedTuple{(Symbol(station),)}((entry,)))
-    return GainModel(m.phase, m.logamp, stations)
+function with_antenna(m::GainModel, antenna; kw...)
+    entry = merge(get(m.antennas, Symbol(antenna), (;)), _antenna_entry(NamedTuple(kw)))
+    antennas = merge(m.antennas, NamedTuple{(Symbol(antenna),)}((entry,)))
+    return GainModel(m.phase, m.logamp, antennas)
 end
 
 """
-    station_components(model::GainModel, station) -> (; phase, logamp)
+    antenna_components(model::GainModel, antenna) -> (; phase, logamp)
 
-The named component trees `station` (a station code, `String` or `Symbol`)
+The named component trees `antenna` (a station code, `String` or `Symbol`)
 solves under `model`: the base `phase`/`logamp` trees, except where a
-`stations` entry replaces a whole group for this station.
+`antennas` entry replaces a whole group for this station.
 """
-function station_components(m::GainModel, station)
-    e = get(m.stations, Symbol(station), nothing)
+function antenna_components(m::GainModel, antenna)
+    e = get(m.antennas, Symbol(antenna), nothing)
     e === nothing && return (; phase = m.phase, logamp = m.logamp)
     return (;
         phase = haskey(e, :phase) ? e.phase : m.phase,
@@ -300,7 +303,7 @@ component_is_per_scan(e::GainComponent) = is_per_scan(e.Ti)
 # validation here is light — mainly catching empty models.
 function validate_gain_model(m::GainModel)
     isempty(phase_components(m)) && isempty(logamp_components(m)) &&
-        all(e -> all(isempty ∘ _flatten_components, values(e)), values(m.stations)) &&
+        all(e -> all(isempty ∘ _flatten_components, values(e)), values(m.antennas)) &&
         throw(
         ArgumentError("GainModel has neither phase nor log-amplitude components")
     )
@@ -310,7 +313,7 @@ end
 # ── Equality ─────────────────────────────────────────────────────────────────
 # Field-wise value equality. The default struct `==` compares `Vector`-holding
 # fields (e.g. a `FreqGroups` segmentation) by identity, so two independently
-# built but identical models would compare unequal without these. `stations` is
+# built but identical models would compare unequal without these. `antennas` is
 # order-insensitive: it is a station → entry map, and no consumer reads its
 # entry order.
 Base.:(==)(a::GainComponent, b::GainComponent) =
@@ -321,9 +324,9 @@ Base.hash(e::GainComponent, h::UInt) = hash(
 )
 
 Base.:(==)(a::GainModel, b::GainModel) =
-    a.phase == b.phase && a.logamp == b.logamp && _stations_equal(a.stations, b.stations)
+    a.phase == b.phase && a.logamp == b.logamp && _antennas_equal(a.antennas, b.antennas)
 
-function _stations_equal(a::NamedTuple, b::NamedTuple)
+function _antennas_equal(a::NamedTuple, b::NamedTuple)
     length(a) == length(b) || return false
     for k in keys(a)
         haskey(b, k) || return false
@@ -332,7 +335,7 @@ function _stations_equal(a::NamedTuple, b::NamedTuple)
     return true
 end
 
-function _stations_hash(s::NamedTuple, h::UInt)
+function _antennas_hash(s::NamedTuple, h::UInt)
     for k in sort(collect(keys(s)))
         h = hash(s[k], hash(k, h))
     end
@@ -340,7 +343,7 @@ function _stations_hash(s::NamedTuple, h::UInt)
 end
 
 Base.hash(m::GainModel, h::UInt) =
-    _stations_hash(m.stations, hash(m.logamp, hash(m.phase, hash(:GainModel, h))))
+    _antennas_hash(m.antennas, hash(m.logamp, hash(m.phase, hash(:GainModel, h))))
 
 # ── Summaries ────────────────────────────────────────────────────────────────
 
@@ -372,15 +375,15 @@ function component_label(e::GainComponent)
     )
 end
 
-_stations_suffix(m::GainModel) =
-    isempty(m.stations) ? "" :
-    string("  stations(", join(string.(keys(m.stations)), ", "), ")")
+_antennas_suffix(m::GainModel) =
+    isempty(m.antennas) ? "" :
+    string("  antennas(", join(string.(keys(m.antennas)), ", "), ")")
 
 function Base.show(io::IO, m::GainModel)
     p, a = phase_components(m), logamp_components(m)
     ph = isempty(p) ? "—" : join(component_label.(p), " + ")
     am = isempty(a) ? "—" : join(component_label.(a), " + ")
-    return print(io, "GainModel(phase: ", ph, ", logamp: ", am, _stations_suffix(m), ")")
+    return print(io, "GainModel(phase: ", ph, ", logamp: ", am, _antennas_suffix(m), ")")
 end
 
 # ── Materialization against an observation ───────────────────────────────────
@@ -388,7 +391,7 @@ end
 # `resolve(model, antennas, geom)` resolves a gain model into the concrete
 # `GainModel` a solve uses and a solution records: station codes checked
 # against the antenna table, every component's data-dependent frequency
-# segmentation resolved (`resolve(seg, geom)`), and `stations` entries that
+# segmentation resolved (`resolve(seg, geom)`), and `antennas` entries that
 # turn out identical to the base dropped. The result is idempotent under
 # re-resolution, and is what provenance stores.
 
@@ -397,16 +400,16 @@ resolve(e::GainComponent, geom::DataGeometry) =
 resolve(nt::NamedTuple, geom::DataGeometry) = map(v -> resolve(v, geom), nt)
 
 # An iterable of station codes, as `String`s.
-_station_names(names) = String.(collect(names))
-_station_names(n::Integer) = throw(
-    ArgumentError("an antenna COUNT cannot resolve station codes; pass the station codes themselves."),
+_antenna_names(names) = String.(collect(names))
+_antenna_names(n::Integer) = throw(
+    ArgumentError("an antenna COUNT cannot resolve antenna codes; pass the antenna codes themselves."),
 )
 
-function _validate_station_keys(stations::NamedTuple, names)
-    for k in keys(stations)
+function _validate_antenna_keys(antennas::NamedTuple, names)
+    for k in keys(antennas)
         String(k) in names || throw(
             ArgumentError(
-                "unknown station $(repr(k)) in `stations`; the antenna table has: " *
+                "unknown antenna $(repr(k)) in `antennas`; the antenna table has: " *
                     join(names, ", ") * ".",
             ),
         )
@@ -420,19 +423,19 @@ end
 Resolve `model` against an observation: `antennas` (an iterable of
 station codes) fixes the station set, and `geom` resolves every component's
 data-dependent frequency segmentation to its concrete form. The result holds
-the per-station trees the solve actually uses — `stations` entries only for
-stations whose trees differ from the base — and is what a solution records as
-provenance. A `stations` key not among `antennas` errors, naming the known
+the per-station trees the solve actually uses — `model.antennas` entries only
+for stations whose trees differ from the base — and is what a solution records
+as provenance. A key of `model.antennas` not among `antennas` errors, naming the known
 stations.
 """
 function resolve(m::GainModel, antennas, geom::DataGeometry)
-    names = _station_names(antennas)
-    _validate_station_keys(m.stations, names)
+    names = _antenna_names(antennas)
+    _validate_antenna_keys(m.antennas, names)
     phase = resolve(m.phase, geom)
     logamp = resolve(m.logamp, geom)
     ents = Pair{Symbol, Any}[]
-    for k in keys(m.stations)
-        e = map(nt -> resolve(nt, geom), m.stations[k])
+    for k in keys(m.antennas)
+        e = map(nt -> resolve(nt, geom), m.antennas[k])
         full = (;
             phase = haskey(e, :phase) ? e.phase : phase,
             logamp = haskey(e, :logamp) ? e.logamp : logamp,

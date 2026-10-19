@@ -267,7 +267,7 @@ function validate_model(sm::AbstractAdhocSmoother, model)
         ArgumentError(
             "the adhoc stage solves exactly one per-integration phase component; the " *
                 "model's phase group holds $(length(ph)). A second (e.g. per-scan) " *
-                "component is not identifiable: a constant on a station's track trades " *
+                "component is not identifiable: a constant on an antenna's track trades " *
                 "against every baseline's free source term. `default_adhoc_model()` is " *
                 "the standard model.",
         ),
@@ -303,7 +303,7 @@ function apply_adhoc!(sm::JointKalmanSmoother, phase, track_w; obs, priors, reso
     all(_proper_prior, priors) || throw(
         ArgumentError(
             "JointKalmanSmoother needs an OUPrior or a RandomWalkPrior with an `init` at " *
-                "every station, got " *
+                "every antenna, got " *
                 join(unique(map(p -> isnothing(p) ? "nothing" : _call_string(p), priors)), ", "),
         ),
     )
@@ -388,12 +388,12 @@ function _solve_observable!(
     # actual node, which a summed gauge row does not provide.
     nodew = _node_weights(nnodes, edges, wt)
     # Inverse of `_node`.
-    station_of(n) = (n - 1) % nant + 1
+    antenna_of(n) = (n - 1) % nant + 1
     feed_of(n) = (n - 1) ÷ nant + 1
     freedoms = map(1:ncomp) do c
         cn = findall(==(c), compid)
         GaugeFreedom(;
-            nodes = cn, station = station_of.(cn), feed = feed_of.(cn), scan = fill(Int(scan), length(cn)),
+            nodes = cn, antenna = antenna_of.(cn), feed = feed_of.(cn), scan = fill(Int(scan), length(cn)),
             component = fill((), length(cn)), observable = fill(:phase, length(cn)),
             direction = ones(T, length(cn)), weight = nodew[cn],
         )
@@ -560,17 +560,17 @@ function _circular_ap_seed(val, w, mask, nodes, nant::Integer, nnode::Integer, a
 end
 
 # Each (station pair, feed pair) cell's two ends: `((a, na), (b, nb))`, the
-# station's index in `stations` and the phase node of its feed under `tying`
+# station's index in `antennas` and the phase node of its feed under `tying`
 # (0 where the component has none).
-function _cell_nodes(rbar, stations, tying)
-    slot = Dict(n => i for (i, n) in pairs(stations))
-    station(n) = get(slot, n) do
-        throw(ArgumentError("station `$n` of a station pair is not among the stations " * join(stations, ", ")))
+function _cell_nodes(rbar, antennas, tying)
+    slot = Dict(n => i for (i, n) in pairs(antennas))
+    antenna(n) = get(slot, n) do
+        throw(ArgumentError("antenna `$n` of an antenna pair is not among the antennas " * join(antennas, ", ")))
     end
     sps = DimensionalData.dims(rbar, AntennaPair)
     fps = DimensionalData.dims(rbar, FeedPair)
     ends = [
-        ((station(sa), _feed_node(tying, fa)), (station(sb), _feed_node(tying, fb)))
+        ((antenna(sa), _feed_node(tying, fa)), (antenna(sb), _feed_node(tying, fb)))
             for (sa, sb) in lookup(sps), (fa, fb) in lookup(fps)
     ]
     return DimArray(ends, (sps, fps))
@@ -767,22 +767,22 @@ _state_model(p::RandomWalkPrior, ::Type{T}) where {T} = _random_walk_model(p.ord
 # The prior of a station without a well-determined track of its own: its fixed
 # hyperparameters, and for each hyperprior the median of the resolved values of
 # the `peers` whose prior has the same form.
-_peer_resolved(p::OUPrior, peers, station) =
-    OUPrior(; scale = _peer_median(p, :scale, peers, station), σ = _peer_median(p, :σ, peers, station))
-_peer_resolved(p::RandomWalkPrior, peers, station) =
-    RandomWalkPrior(; order = p.order, σ = _peer_median(p, :σ, peers, station), p.init)
+_peer_resolved(p::OUPrior, peers, antenna) =
+    OUPrior(; scale = _peer_median(p, :scale, peers, antenna), σ = _peer_median(p, :σ, peers, antenna))
+_peer_resolved(p::RandomWalkPrior, peers, antenna) =
+    RandomWalkPrior(; order = p.order, σ = _peer_median(p, :σ, peers, antenna), p.init)
 
 _same_form(::OUPrior, q) = q isa OUPrior
 _same_form(p::RandomWalkPrior, q) = q isa RandomWalkPrior && q.order == p.order
 
-function _peer_median(p, name::Symbol, peers, station)
+function _peer_median(p, name::Symbol, peers, antenna)
     v = getproperty(p, name)
     is_fixed_hyper(v) && return v
     vals = [getproperty(q, name) for q in peers if _same_form(p, q)]
     isempty(vals) && throw(
         ArgumentError(
-            "JointKalmanSmoother: station $station has no track of its own to resolve the " *
-                "`$name` hyperprior of $(_call_string(p)), and no other station has a prior " *
+            "JointKalmanSmoother: antenna $antenna has no track of its own to resolve the " *
+                "`$name` hyperprior of $(_call_string(p)), and no other antenna has a prior " *
                 "of the same form to take it from; give it a fixed value",
         ),
     )
@@ -932,12 +932,12 @@ function _linearized_obs(rbar, wbar, nodes, phase, sbar)
 end
 
 """
-    solve_adhoc_phasing(rbar, wbar, stations; gauge, smoother, tying, prior) -> DimStack
+    solve_adhoc_phasing(rbar, wbar, antennas; gauge, smoother, tying, prior) -> DimStack
 
 Solve globally-closing adhoc phases from coherently frequency-averaged
 residual baseline visibilities under the model
 
-    y[station pair, feed pair, ap] = φ_na(ap) − φ_nb(ap) + x[station pair, feed pair],
+    y[antenna pair, feed pair, ap] = φ_na(ap) − φ_nb(ap) + x[antenna pair, feed pair],
 
 with the station phases `φ` on parameter nodes and one free source term `x`
 per (station pair, feed pair), constant over the scan. The free source term
@@ -948,14 +948,14 @@ are unbiased by source structure.
 over `AntennaPair`, `FeedPair` and `Ti` in any storage order, with the same
 lookups: station pairs labeled by station names, feed pairs by feed-index
 pairs, and `Ti` by the AP epochs in seconds. The coherent SNR² is
-`|rbar|²/wbar`. `stations` names the stations; each one's position in it is
+`|rbar|²/wbar`. `antennas` names the stations; each one's position in it is
 its station index. The number of feeds per station is the largest feed index
 in the `FeedPair` labels.
 
-Returns a `DimStack`: `:phase` (`AntennaName(stations) × Feed × Ti`) is the
+Returns a `DimStack`: `:phase` (`AntennaName(antennas) × Feed × Ti`) is the
 per-(station, feed) adhoc phase in radians, `NaN` where unsolved;
 `:covered` marks the solved cells; `:source` (`AntennaPair × FeedPair`) is
-the fitted source phase, `NaN` where unidentifiable; `:prior` (`AntennaName(stations)
+the fitted source phase, `NaN` where unidentifiable; `:prior` (`AntennaName(antennas)
 × Feed`) is the prior each track was fit under, its hyperparameters resolved,
 `nothing` where the track had no prior or no data.
 
@@ -992,7 +992,7 @@ unchanged); `source_iters = 1` fixes `x = 0`.
 function solve_adhoc_phasing(
         rbar::DimensionalData.AbstractDimArray{<:Complex, 3},
         wbar::DimensionalData.AbstractDimArray{<:Real, 3},
-        stations::AbstractVector;
+        antennas::AbstractVector;
         gauge::AbstractGauge,
         smoother::AbstractAdhocSmoother = PerTrackAdhocSmoother(),
         tying::AbstractFeedTying = PerFeed(),
@@ -1008,32 +1008,32 @@ function solve_adhoc_phasing(
     DimensionalData.comparedims(
         DimensionalData.dims(wbar, DimensionalData.dims(rbar)), DimensionalData.dims(rbar); val = true,
     )
-    # Positions along `Ti` and in `stations` index the solve's 1-based arrays.
-    Base.require_one_based_indexing(rbar, wbar, stations)
-    allunique(stations) || throw(
+    # Positions along `Ti` and in `antennas` index the solve's 1-based arrays.
+    Base.require_one_based_indexing(rbar, wbar, antennas)
+    allunique(antennas) || throw(
         ArgumentError(
-            "station names must be unique; repeated: " *
-                join((n for n in unique(stations) if count(==(n), stations) > 1), ", "),
+            "antenna names must be unique; repeated: " *
+                join((n for n in unique(antennas) if count(==(n), antennas) > 1), ", "),
         ),
     )
     nfeed = maximum(maximum, lookup(rbar, FeedPair))
     nnode = nfeed_blocks(tying, nfeed)
     _requires_single_node(smoother) && nnode != 1 && error(
-        "$(typeof(smoother)) requires one phase node per station (its Kalman state " *
-            "is one dimension per station), but the adhoc component ties feeds as " *
+        "$(typeof(smoother)) requires one phase node per antenna (its Kalman state " *
+            "is one dimension per antenna), but the adhoc component ties feeds as " *
             "$(typeof(tying)). Use PerTrackAdhocSmoother for an independent per-feed track.",
     )
-    priors = _station_priors(prior, stations)
+    priors = _antenna_priors(prior, antennas)
     T = something(smoother.options.eltype, float(real(eltype(rbar))))
     r = Complex{T}.(permutedims(rbar, cell_dims))
     w = T.(permutedims(wbar, cell_dims))
-    return _solve_adhoc_phasing(r, w, _cell_nodes(r, stations, tying), stations, nfeed, nnode, gauge, smoother, tying, priors)
+    return _solve_adhoc_phasing(r, w, _cell_nodes(r, antennas, tying), antennas, nfeed, nnode, gauge, smoother, tying, priors)
 end
 
-_station_priors(prior, stations) = _station_priors(fill(prior, length(stations)), stations)
-function _station_priors(priors::AbstractVector, stations)
-    length(priors) == length(stations) || throw(
-        DimensionMismatch("$(length(priors)) priors for $(length(stations)) stations"),
+_antenna_priors(prior, antennas) = _antenna_priors(fill(prior, length(antennas)), antennas)
+function _antenna_priors(priors::AbstractVector, antennas)
+    length(priors) == length(antennas) || throw(
+        DimensionMismatch("$(length(priors)) priors for $(length(antennas)) antennas"),
     )
     for p in priors
         p isa Union{Nothing, RandomWalkPrior, OUPrior} || throw(
@@ -1045,14 +1045,14 @@ end
 
 # Behind a function barrier: the working type comes from a runtime option.
 # `rbar`/`wbar` are stored `(AntennaPair, FeedPair, Ti)`, as is every derived array.
-function _solve_adhoc_phasing(rbar, wbar, nodes, stations, nfeed, nnode, gauge, smoother, tying, priors)
+function _solve_adhoc_phasing(rbar, wbar, nodes, antennas, nfeed, nnode, gauge, smoother, tying, priors)
     T = real(eltype(rbar))
-    nant = length(stations)
+    nant = length(antennas)
     nap = size(rbar, Ti)
     times = parent(lookup(rbar, Ti))
 
     # Solved on the (station, feed node) graph; expanded back onto the feed axis at the end.
-    node_axes = (AntennaName(stations), FeedNode(1:nnode), DimensionalData.dims(rbar, Ti))
+    node_axes = (AntennaName(antennas), FeedNode(1:nnode), DimensionalData.dims(rbar, Ti))
     phase = fill(T(NaN), node_axes)
     covered = DimArray(falses(nant, nnode, nap), node_axes)
     # Track per-(station, feed node) coherent weight for smoothing and the demean.
@@ -1181,7 +1181,7 @@ function _solve_adhoc_phasing(rbar, wbar, nodes, stations, nfeed, nnode, gauge, 
     # indexes: feeds sharing a node get identical tracks (so a `SharedFeeds` adhoc
     # contributes exactly zero inter-feed phase), and a feed the component does not
     # parameterize (node 0) stays NaN/uncovered.
-    feed_axes = (AntennaName(stations), Feed(1:nfeed), DimensionalData.dims(rbar, Ti))
+    feed_axes = (AntennaName(antennas), Feed(1:nfeed), DimensionalData.dims(rbar, Ti))
     phase_out = fill(T(NaN), feed_axes)
     covered_out = DimArray(falses(nant, nfeed, nap), feed_axes)
     prior_out = DimArray(Union{Nothing, AbstractPrior}[nothing for _ in 1:nant, _ in 1:nfeed], feed_axes[1:2])
@@ -1240,7 +1240,7 @@ function adhoc_scan!(
     )
     (; rbar, wbar, ti) = _ap_sums(group, geom; executor)
     as = solve_adhoc_phasing(
-        rbar, wbar, geom.stations;
+        rbar, wbar, geom.antennas;
         gauge = _gauge_for(gauge, adhoc_plan.path), smoother = adhoc, tying = adhoc_plan.tying,
         prior = map(p -> _prior_along(p, :Ti), adhoc_plan.priors),
     )
@@ -1248,7 +1248,7 @@ function adhoc_scan!(
     for gti in ti
         tseg = adhoc_plan.tseg_id[gti]
         at_t = view(as.phase, Ti(At(geom.times[gti])))
-        for (ant, name) in pairs(geom.stations), feed in lookup(at_t, Feed)
+        for (ant, name) in pairs(geom.antennas), feed in lookup(at_t, Feed)
             val = at_t[AntennaName(At(name)), Feed(At(feed))]
             isfinite(val) || continue
             node = _feed_node(adhoc_plan.tying, feed)
@@ -1287,7 +1287,7 @@ function _apply_ap_gauge!(phase, covered, track_w, gauge::AbstractGauge)
     always = [I for I in cells if all(ap -> covered[I, ap], aps)]
     (isempty(aps) || isempty(always)) && return phase
     f = GaugeFreedom(;
-        nodes = LinearIndices(cells)[always], station = [I[1] for I in always], feed = [I[2] for I in always],
+        nodes = LinearIndices(cells)[always], antenna = [I[1] for I in always], feed = [I[2] for I in always],
         scan = zeros(Int, length(always)), component = fill((), length(always)),
         observable = fill(:phase, length(always)), direction = ones(T, length(always)),
         weight = T[sum(ap -> track_w[I, ap], aps) for I in always],
@@ -1314,7 +1314,7 @@ end
 # propagates.
 # APs before any trusted value exists are left untouched; per-(station, node)
 # means and slopes are left to `_detrend_track!`.
-function _restitch_refant_gauge!(phase, covered, track_w, obs, ref_station::Integer)
+function _restitch_refant_gauge!(phase, covered, track_w, obs, ref_antenna::Integer)
     T = eltype(phase)
     nant, nnode = size(phase, 1), size(phase, 2)
     trusted = fill(T(NaN), nant, nnode)
@@ -1325,8 +1325,8 @@ function _restitch_refant_gauge!(phase, covered, track_w, obs, ref_station::Inte
         comp(a, n) = compid[_node(a, n, nant)]
         framed = falses(ncomp)
         for n in 1:nnode
-            c = comp(ref_station, n)
-            c > 0 && covered[ref_station, n, ap] && (framed[c] = true)
+            c = comp(ref_antenna, n)
+            c > 0 && covered[ref_antenna, n, ap] && (framed[c] = true)
         end
         for c in 1:ncomp
             framed[c] && continue

@@ -24,16 +24,16 @@ end
     @test geom.spw_of_chan == repeat([1, 2]; inner = 4)
     @test geom.spw_names == ["band_1", "band_2"]
     @test geom.channel_freqs == sort!(unique!(reduce(vcat, [XRadio.frequencies(ms) for ms in ps])))
-    @test geom.stations == ["A1", "A2", "A3"]
+    @test geom.antennas == ["A1", "A2", "A3"]
     @test geom.f0 ≈ truth.f0
     width(ms) = DimensionalData.metadata(lookup(ms[:visibility], Frequency))[:channel_width]
     @test geom.channel_widths == fill(abs(XRadio.value(width(first(ps)))), length(geom.channel_freqs))
     @test geom.channel_widths[1] > 0
     @test geom.t0 == truth.t0_sec
 
-    @testset "a station on no baseline is still a station" begin
-        dropped, _ = _build_fringe_ps(; nant = 4, nspw = 1, omit_station = 2)
-        @test CALg.DataGeometry(dropped).stations == ["A1", "A2", "A3", "A4"]
+    @testset "an antenna on no baseline is still an antenna" begin
+        dropped, _ = _build_fringe_ps(; nant = 4, nspw = 1, omit_antenna = 2)
+        @test CALg.DataGeometry(dropped).antennas == ["A1", "A2", "A3", "A4"]
     end
 
     @testset "a Measurement Set holding several scans" begin
@@ -51,9 +51,9 @@ end
             OrderedDict(:a => _subarray_ms(["A1", "A2"], "1"), :b => _subarray_ms(["B1", "B2"], "2"))
         )
         g = CALg.DataGeometry(pair)
-        @test g.stations == ["A1", "A2", "B1", "B2"]
+        @test g.antennas == ["A1", "A2", "B1", "B2"]
         @test length(g.times) == 4
-        @test CALg.GeometryWindow(g, pair[:b]).stations == [(3, 4)]
+        @test CALg.GeometryWindow(g, pair[:b]).antennas == [(3, 4)]
         # One label per timestamp, and neither scan is split.
         @test length(g.scan_of_time) == 4
         @test all(>(0), g.scan_of_time)
@@ -134,14 +134,14 @@ end
     @test win.geom === geom
     @test win.chan_idx == 5:8
     @test win.ti_idx == 6:10
-    @test win.stations == truth.bl_pairs
+    @test win.antennas == truth.bl_pairs
 
     @testset "a view addresses its own samples" begin
         part = view(ms, XRadio.Ti(At(XRadio.times(ms)[2:3])))
         @test CALg.GeometryWindow(geom, part).ti_idx == [7, 8]
     end
 
-    @testset "a station whose receptors are ordered L, R" begin
+    @testset "an antenna whose receptors are ordered L, R" begin
         names = ["A1", "A2", "A3"]
         ax = XRadio.Testing.antenna(names)
         types = copy(parent(ax[:polarization_type]))
@@ -153,7 +153,7 @@ end
         )
         w = CALg.GeometryWindow(CALg.DataGeometry(XRadio.ProcessingSet(OrderedDict(:lr => lr))), lr)
         lr_pairs = Gustavo.feed_pairs(lr)
-        a1a2 = findfirst(==((1, 2)), w.stations)
+        a1a2 = findfirst(==((1, 2)), w.antennas)
         rr = findfirst(==("RR"), XRadio.polarizations(lr))
         # RR on A1–A2 relates A1's feed 1 to A2's feed 2.
         @test lr_pairs[rr, a1a2] == (1, 2)
@@ -165,18 +165,18 @@ end
             frequencies = 230.0e9 .+ 2.0e6 .* (0:3), scan = "1", polarizations = ["RR", "LL"],
         )
         pw = CALg.GeometryWindow(CALg.DataGeometry(XRadio.ProcessingSet(OrderedDict(:p => parallel))), parallel)
-        @test pw.stations == w.stations
+        @test pw.antennas == w.antennas
     end
 
     @testset "errors" begin
         other = XRadio.ProcessingSet(OrderedDict(:o => _subarray_ms(["A1", "Z9"], "1")))
-        @test_throws "`Z9` is not among the geometry's stations" CALg.GeometryWindow(
+        @test_throws "`Z9` is not among the geometry's antennas" CALg.GeometryWindow(
             CALg.DataGeometry(XRadio.ProcessingSet(OrderedDict(:a => _subarray_ms(["A1", "A2"], "1")))),
             other[:o],
         )
         late = _subarray_ms(["A1", "A2"], "1"; times = 2.0e9 .+ 30.0 .* (0:3))
         @test_throws "is not in the geometry" CALg.GeometryWindow(geom, late)
-        @test_throws "names no stations" CALg.GeometryWindow(
+        @test_throws "names no antennas" CALg.GeometryWindow(
             CALg.DataGeometry(; geom.nfeed, times = geom.times, channel_freqs = geom.channel_freqs), ms,
         )
     end

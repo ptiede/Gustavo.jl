@@ -19,29 +19,29 @@ abstract type SolveStep end
     model_components(step::SolveStep, spec) -> GainModel
 
 The [`GainModel`](@ref) `step` solves. `spec = (; geom)` carries the data
-geometry (with the run's `stations`) the step may consult (e.g. to resolve an
+geometry (with the run's `antennas`) the step may consult (e.g. to resolve an
 `:auto` option). Default: no components.
 """
 model_components(step::SolveStep, spec) = GainModel()
 
 """
-    supports_station_heterogeneity(step::SolveStep) -> Bool
+    supports_antenna_heterogeneity(step::SolveStep) -> Bool
 
 Whether `step`'s solver handles a gain model whose component signatures differ
 across stations. Default `false`: the runner then rejects a heterogeneous
 compiled model aimed at the step
-([`Calibration.require_station_uniform`](@ref)), naming the differing
+([`Calibration.require_antenna_uniform`](@ref)), naming the differing
 components and their per-station signatures, so an undeclared solver never
 receives θ blocks it would silently leave unsolved.
 
 A step that declares `true` must write its solve as a loop over the station
-blocks the layout supplies — [`Calibration.station_blocks`](@ref) — rather
+blocks the layout supplies — [`Calibration.antenna_blocks`](@ref) — rather
 than assuming one rectangular `(…, nant)` leaf per component. A step whose
 solving is delegated to a pluggable solver object forwards this question to it,
 so the generic also answers for solver objects — [`Bandpass`](@ref) asks its
 smoother.
 """
-supports_station_heterogeneity(step::SolveStep) = false
+supports_antenna_heterogeneity(step::SolveStep) = false
 
 # How the heterogeneity rejection names its subject. A step that delegates its
 # solve is not itself the thing that cannot take the model, so it names the
@@ -96,7 +96,7 @@ solve(step::SolveStep, ctx) = throw(
 What a step's [`solve`](@ref) works with: the step's own compiled model
 (`model`, `layout`, and `θ`, the flat parameter vector over `layout`, which
 `solve` fills; a component's block is `reshape(view(θ, plan.range),
-plan.shape)`), the data geometry `geom` (its `stations` are the run's station
+plan.shape)`), the data geometry `geom` (its `antennas` are the run's station
 table), the step's `gauge` with station codes resolved (`nothing` for a step
 whose [`step_gauge`](@ref) is `nothing`), `nant`, and the scan groups of the
 data (`groupby(ps, ByScan())`).

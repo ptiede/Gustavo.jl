@@ -9,7 +9,7 @@ const CALg = Gustavo.Calibration
 # A 4-station, 2-feed node vector, laid out as the station solves lay it out:
 # feed 1 occupies 1:nant, feed 2 occupies nant+1:2nant.
 const GN = 4
-_station_of(n) = (n - 1) % GN + 1
+_antenna_of(n) = (n - 1) % GN + 1
 _feed_of(n) = n > GN ? 2 : 1
 
 # Stations 1–3 present on both feeds; station 4 absent entirely.
@@ -17,7 +17,7 @@ const GCOMP = [1, 2, 3, 5, 6, 7]
 const GW = Float64[10, 5, 3, 0, 8, 4, 2, 0]
 
 _freedom(comp = GCOMP, T = Float64) = CALg.GaugeFreedom(;
-    nodes = comp, station = _station_of.(comp), feed = _feed_of.(comp), scan = zeros(Int, length(comp)),
+    nodes = comp, antenna = _antenna_of.(comp), feed = _feed_of.(comp), scan = zeros(Int, length(comp)),
     component = fill((:phase, :x), length(comp)), observable = fill(:phase, length(comp)),
     direction = ones(T, length(comp)), weight = GW[comp],
 )
@@ -55,7 +55,7 @@ end
     end
 end
 
-@testset "resolve_gauge maps station codes to indices" begin
+@testset "resolve_gauge maps antenna codes to indices" begin
     names = ["A1", "A2", "A3", "A4"]
     @test resolve_gauge(PinAntenna("A2"), names).refs == [2]
     @test resolve_gauge(PinAntenna(3), names).refs == [3]
@@ -67,10 +67,10 @@ end
     @test_throws ErrorException resolve_gauge(PinAntenna("ZZ"), names)
 end
 
-@testset "gauge_station_order and remap_gauge" begin
-    @test CALg.gauge_station_order(PinAntenna([3, 1])) == [3, 1]
+@testset "gauge_antenna_order and remap_gauge" begin
+    @test CALg.gauge_antenna_order(PinAntenna([3, 1])) == [3, 1]
     # A summed gauge names no station, so a caller must choose on its own criterion.
-    @test isempty(CALg.gauge_station_order(ZeroSumPhase()))
+    @test isempty(CALg.gauge_antenna_order(ZeroSumPhase()))
 
     # Tying stations into representatives rewrites the gauge through the map.
     map = [1, 1, 3, 3]
@@ -78,21 +78,21 @@ end
     @test CALg.remap_gauge(ZeroSumPhase(), map) === ZeroSumPhase()
 end
 
-struct PreferStation <: CALg.AbstractGauge
-    station::Int
+struct PreferAntenna <: CALg.AbstractGauge
+    antenna::Int
 end
-CALg.gauge_station_order(g::PreferStation) = (g.station,)
+CALg.gauge_antenna_order(g::PreferAntenna) = (g.antenna,)
 
 struct NoPreference <: CALg.AbstractGauge end
 
 @testset "gauge_anchor's default" begin
     # The preferred station's feed-1 node, else its feed-2 node.
-    @test CALg.gauge_anchor(PreferStation(3), _freedom()) == 3
-    @test CALg.gauge_anchor(PreferStation(3), _freedom([5, 6, 7])) == 7
+    @test CALg.gauge_anchor(PreferAntenna(3), _freedom()) == 3
+    @test CALg.gauge_anchor(PreferAntenna(3), _freedom([5, 6, 7])) == 7
     # A gauge naming no station, or one absent from the freedom, anchors on the
     # best-observed node; ties go to the lowest node.
     @test CALg.gauge_anchor(NoPreference(), _freedom()) == 1
-    @test CALg.gauge_anchor(PreferStation(4), _freedom()) == 1
+    @test CALg.gauge_anchor(PreferAntenna(4), _freedom()) == 1
     @test CALg.gauge_anchor(NoPreference(), _freedom([2, 5])) == 5
     @test CALg.gauge_anchor(NoPreference(), _freedom([8, 4])) == 4
 end
@@ -114,7 +114,7 @@ end
     @test CALg._component_choice(ByComponent((; adhoc = PinAntenna(3)); default = PinAntenna(1)), (:phase, :adhoc, :scan)).refs == 3
 
     mixed = CALg.GaugeFreedom(;
-        nodes = [1, 2], station = [1, 2], feed = [1, 1], scan = [0, 0],
+        nodes = [1, 2], antenna = [1, 2], feed = [1, 1], scan = [0, 0],
         component = [(:phase, :rate), (:phase, :mbd)], observable = [:phase, :phase],
         direction = ones(2), weight = ones(2),
     )

@@ -60,7 +60,7 @@ end
     group = first(values(DimensionalData.groupby(ps, XRadio.ByScan())))
     exec = SerialScheduler()
     s = FP._ap_sums(group, geom; executor = exec)
-    slot = Dict(n => i for (i, n) in pairs(geom.stations))
+    slot = Dict(n => i for (i, n) in pairs(geom.antennas))
     @test issorted(lookup(s.rbar, FP.AntennaPair); by = ((a, b),) -> (slot[a], slot[b]))
     @test lookup(s.rbar, FP.FeedPair) == [(1, 1), (1, 2), (2, 1), (2, 2)]
     @test lookup(s.rbar, Ti) == geom.times[s.ti]
@@ -155,19 +155,19 @@ end
     geom = CAL.DataGeometry(ps)
     groups = collect(values(DimensionalData.groupby(ps, XRadio.ByScan())))
     members = [ms for g in groups for ms in values(g)]
-    cross = [p for ms in members for p in FP._member_station_pairs(ms) if p[1] != p[2]]
-    stations = FP._station_pairs(cross, geom)
+    cross = [p for ms in members for p in FP._member_antenna_pairs(ms) if p[1] != p[2]]
+    antennas = FP._canonical_antenna_pairs(cross, geom)
     feeds = sort!(unique!([f for ms in members for f in feed_pairs(ms)]))
     exec = SerialScheduler()
 
-    rl, wl = FP.accumulate_bandpass(first(groups), geom, stations, feeds; executor = exec)
-    @test lookup(rl, FP.AntennaPair) == stations
+    rl, wl = FP.accumulate_bandpass(first(groups), geom, antennas, feeds; executor = exec)
+    @test lookup(rl, FP.AntennaPair) == antennas
     @test lookup(rl, FP.FeedPair) == feeds
     @test lookup(rl, Frequency) == geom.channel_freqs
     @test eltype(rl) == ComplexF32 && eltype(wl) == Float32
     tot = sum(first(groups)) do ms
         wv, _ = FP.weighted_sums(FP._member_layers(ms)...; dims = Ti)
-        autos = [a == b for (a, b) in FP._member_station_pairs(ms)]
+        autos = [a == b for (a, b) in FP._member_antenna_pairs(ms)]
         sum(wv[BaselineID = .!autos])
     end
     @test sum(rl) ≈ tot
@@ -178,11 +178,11 @@ end
         OrderedDict(k => read(ms)[Polarization = At(["RR", "LL"])] for (k, ms) in pairs(first(groups))),
         DimensionalData.metadata(first(groups)),
     )
-    rp, wp = FP.accumulate_bandpass(parallel, geom, stations, feeds; executor = exec)
+    rp, wp = FP.accumulate_bandpass(parallel, geom, antennas, feeds; executor = exec)
     @test dims(rp) == dims(rl)
     @test all(iszero, wp[FeedPair = At([(1, 2), (2, 1)])])
     @test rp[FeedPair = At([(1, 1), (2, 2)])] == rl[FeedPair = At([(1, 1), (2, 2)])]
 
-    @test_throws "stored in both orders" FP._station_pairs([("A1", "A2"), ("A2", "A1")], geom)
-    @test_throws "not among the geometry's stations" FP._station_pairs([("A1", "Z9")], geom)
+    @test_throws "stored in both orders" FP._canonical_antenna_pairs([("A1", "A2"), ("A2", "A1")], geom)
+    @test_throws "not among the geometry's antennas" FP._canonical_antenna_pairs([("A1", "Z9")], geom)
 end

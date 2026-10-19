@@ -164,7 +164,7 @@ end
 # component the same way, and each name retains its own complete
 # `(param, node, Frequency, Ti, AntennaName)` role set for labeling a wrapped θ.
 function _leaf_shape(bl, nfeed, nfseg, ntseg, nant, tying)
-    node_role = tying isa PerFeed ? :Feed : :node
+    node_role = tying isa SharedFeeds ? :node : :Feed
     return (; param = bl, node = nfeed, Frequency = nfseg, Ti = ntseg, AntennaName = nant), (:param, node_role, :Frequency, :Ti, :AntennaName)
 end
 
@@ -185,12 +185,12 @@ end
 # order, so the grouping is deterministic), and those stations' resolved priors.
 struct _ComponentGroups
     comps::Vector{GainComponent}   # one per signature group
-    stations::Vector{Vector{Int}}  # global station indices per group
+    antennas::Vector{Vector{Int}}  # global station indices per group
     priors::Vector{Vector}         # resolved prior per station, per group
 end
 
 # A name with one signature at every station whose priors differ by station.
-struct _StationComponents{C <: GainComponent, P <: AbstractVector}
+struct _AntennaComponents{C <: GainComponent, P <: AbstractVector}
     comp::C
     priors::P                      # resolved prior per station
 end
@@ -204,7 +204,7 @@ _same_signature(a::GainComponent, b::GainComponent) =
 # signature; all-`NamedTuple` values recurse; a mix is a structural conflict
 # and errors — there is no honest layout for a name that is a leaf at one
 # station and a subtree at another.
-function _merge_station_trees(vals::Vector{Any}, members::Vector{Int}, nant::Int, path)
+function _merge_antenna_trees(vals::Vector{Any}, members::Vector{Int}, nant::Int, path)
     ks = Symbol[]
     for v in vals, k in keys(v)
         k in ks || push!(ks, k)
@@ -231,17 +231,17 @@ function _merge_station_trees(vals::Vector{Any}, members::Vector{Int}, nant::Int
             end
             priors = [[resolve_prior(e) for e in m] for m in group_comps]
             if length(comps) == 1 && length(stn) == nant
-                all(==(first(sub)), sub) ? first(sub) : _StationComponents(only(comps), only(priors))
+                all(==(first(sub)), sub) ? first(sub) : _AntennaComponents(only(comps), only(priors))
             else
                 _ComponentGroups(comps, groups, priors)
             end
         elseif all(x -> x isa NamedTuple, sub)
-            _merge_station_trees(sub, stn, nant, (path..., k))
+            _merge_antenna_trees(sub, stn, nant, (path..., k))
         else
             throw(
                 ArgumentError(
-                    "station trees disagree structurally at " *
-                        "`$(join((path..., k), '.'))`: a component at some stations, " *
+                    "antenna trees disagree structurally at " *
+                        "`$(join((path..., k), '.'))`: a component at some antennas, " *
                         "a named subtree at others.",
                 ),
             )
@@ -257,7 +257,7 @@ end
 The plantree node of one station-heterogeneous component name: one
 [`ComponentPlan`](@ref) per signature group under `groups` (keys `g1, g2, …`,
 in first-station order), each plan's `:AntennaName` axis spanning just its group.
-`stations[i]` holds group `i`'s global station indices; `group_of`/`local_of`
+`antennas[i]` holds group `i`'s global station indices; `group_of`/`local_of`
 map a global station index to its `(group, within-group)` position (`0` when
 the station carries this component in no group, contributing nothing). The
 forward map routes each station through its own group's plan, so segment
@@ -265,7 +265,7 @@ lookup is per (station, time).
 """
 struct GroupedComponentPlan{P <: NamedTuple}
     groups::P
-    stations::Vector{Vector{Int}}
+    antennas::Vector{Vector{Int}}
     group_of::Vector{Int}
     local_of::Vector{Int}
 end
@@ -286,7 +286,7 @@ function _plans_tree(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector
 end
 _plans_node(e::GainComponent, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple) =
     _plans_leaf(e, fill(resolve_prior(e), nant), nant, geom, flat, next, path)
-_plans_node(s::_StationComponents, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple) =
+_plans_node(s::_AntennaComponents, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple) =
     _plans_leaf(s.comp, s.priors, nant, geom, flat, next, path)
 function _plans_leaf(e::GainComponent, priors::AbstractVector, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple)
     cl = _component_layout(e, nant, geom)
@@ -305,17 +305,17 @@ _plans_node(nt::NamedTuple, nant::Int, geom::DataGeometry, flat::Vector, next::B
 function _plans_node(g::_ComponentGroups, nant::Int, geom::DataGeometry, flat::Vector, next::Base.RefValue{Int}, path::Tuple)
     plans = NamedTuple{_group_keys(length(g.comps))}(
         Tuple(
-            _plans_leaf(g.comps[i], g.priors[i], length(g.stations[i]), geom, flat, next, path)
+            _plans_leaf(g.comps[i], g.priors[i], length(g.antennas[i]), geom, flat, next, path)
                 for i in eachindex(g.comps, g.priors)
         )
     )
     group_of = zeros(Int, nant)
     local_of = zeros(Int, nant)
-    for (gi, sts) in pairs(g.stations), (li, a) in pairs(sts)
+    for (gi, sts) in pairs(g.antennas), (li, a) in pairs(sts)
         group_of[a] = gi
         local_of[a] = li
     end
-    return GroupedComponentPlan(plans, g.stations, group_of, local_of)
+    return GroupedComponentPlan(plans, g.antennas, group_of, local_of)
 end
 
 _axes_tree(nt::NamedTuple, nant::Int, geom::DataGeometry) =
@@ -325,14 +325,14 @@ function _axes_node(e::GainComponent, nant::Int, geom::DataGeometry)
     return (; dims = cl.shape, roles = cl.roles)
 end
 _axes_node(nt::NamedTuple, nant::Int, geom::DataGeometry) = _axes_tree(nt, nant, geom)
-_axes_node(s::_StationComponents, nant::Int, geom::DataGeometry) = _axes_node(s.comp, nant, geom)
+_axes_node(s::_AntennaComponents, nant::Int, geom::DataGeometry) = _axes_node(s.comp, nant, geom)
 # A group leaf's axes node additionally records the global station indices its
 # `:AntennaName` axis spans, so a wrapped θ can be labeled with the group's stations
 # rather than the run's full antenna list.
 _axes_node(g::_ComponentGroups, nant::Int, geom::DataGeometry) =
     NamedTuple{_group_keys(length(g.comps))}(
     Tuple(
-        (; _axes_node(g.comps[i], length(g.stations[i]), geom)..., stations = g.stations[i])
+        (; _axes_node(g.comps[i], length(g.antennas[i]), geom)..., antennas = g.antennas[i])
             for i in eachindex(g.comps)
     )
 )
@@ -345,7 +345,7 @@ Resolve `model` over `geom` into a `ParameterLayout`. The returned `nθ` is the
 length of the parameter vector that `evaluate_gains` consumes.
 
 The `nant::Integer` form lays out a station-uniform `GainModel` (empty
-`stations` — the codes could not be resolved otherwise) replicated across
+`antennas` — the codes could not be resolved otherwise) replicated across
 `nant` antennas. The `antennas` form (an iterable of station codes) [`resolve`](@ref)s the model against the
 station set first and handles heterogeneity: per component name, stations
 group by identical `(term, Ti, Frequency, Feed)` signature (priors do not
@@ -353,7 +353,7 @@ split a group; each station keeps its own in `plan.priors`), a name with one
 signature covering every station lays out exactly as the uniform form does,
 and a heterogeneous name becomes a [`GroupedComponentPlan`](@ref) with one
 ragged leaf per group (`θ.phase.<name>.g1`, `.g2`, …). Iterate the groups with
-[`station_blocks`](@ref).
+[`antenna_blocks`](@ref).
 
 `require_nonempty` runs `validate_gain_model` first, rejecting
 a `model` with neither phase nor log-amplitude components — the right default
@@ -364,26 +364,26 @@ the returned layout then simply has `nθ == 0`.
 """
 function plan_parameters(model::GainModel, nant::Integer, geom::DataGeometry; require_nonempty::Bool = true)
     require_nonempty && validate_gain_model(model)
-    isempty(model.stations) || throw(
+    isempty(model.antennas) || throw(
         ArgumentError(
             "plan_parameters with an antenna COUNT cannot resolve the model's " *
-                "`stations` codes; pass the antenna table (or the station codes) instead.",
+                "`antennas` codes; pass the antenna table (or the antenna codes) instead.",
         ),
     )
     return _plan_layout(model.phase, model.logamp, Int(nant), geom)
 end
 
 function plan_parameters(model::GainModel, antennas, geom::DataGeometry; require_nonempty::Bool = true)
-    names = _station_names(antennas)
+    names = _antenna_names(antennas)
     mat = resolve(model, names, geom)
     require_nonempty && validate_gain_model(mat)
     nant = length(names)
-    isempty(mat.stations) &&
+    isempty(mat.antennas) &&
         return plan_parameters(mat, nant, geom; require_nonempty = false)
-    trees = [station_components(mat, n) for n in names]
+    trees = [antenna_components(mat, n) for n in names]
     members = collect(1:nant)
-    ptree = _merge_station_trees(Any[t.phase for t in trees], members, nant, (:phase,))
-    ltree = _merge_station_trees(Any[t.logamp for t in trees], members, nant, (:logamp,))
+    ptree = _merge_antenna_trees(Any[t.phase for t in trees], members, nant, (:phase,))
+    ltree = _merge_antenna_trees(Any[t.logamp for t in trees], members, nant, (:logamp,))
     return _plan_layout(ptree, ltree, nant, geom)
 end
 
@@ -408,14 +408,14 @@ end
 # ── Station blocks: the public iteration surface of a (possibly ragged) leaf ──
 
 """
-    station_blocks(layout::ParameterLayout, θ, path::Symbol...) -> Vector
+    antenna_blocks(layout::ParameterLayout, θ, path::Symbol...) -> Vector
 
 The station blocks of one component name, the unit a heterogeneity-aware
 solver loops over. `path` descends the layout's plantree starting at `:phase`
-or `:logamp` (e.g. `station_blocks(layout, θ, :phase, :bandpass)`); each
-returned block is `(; stations, θ, plan)`:
+or `:logamp` (e.g. `antenna_blocks(layout, θ, :phase, :bandpass)`); each
+returned block is `(; antennas, θ, plan)`:
 
-- `stations` — the global station indices this block's `:AntennaName` axis spans, in
+- `antennas` — the global station indices this block's `:AntennaName` axis spans, in
   axis order;
 - `θ` — the block's shaped leaf, a view into the given `θ` with axes
   `(param, node, Frequency, Ti, AntennaName)`;
@@ -428,14 +428,14 @@ A station-uniform component yields exactly one block spanning every station.
 Gauge note: the blocks of one name share a single physical degeneracy (one
 common offset across all stations carrying the component), not one per block.
 A solver must place its gauge constraint once across the union of the blocks'
-`stations` — constraining each block separately over-constrains the solve, and
-`stations` holds global indices precisely so a run-wide gauge
+`antennas` — constraining each block separately over-constrains the solve, and
+`antennas` holds global indices precisely so a run-wide gauge
 ([`AbstractGauge`](@ref)) resolves against them unchanged.
 """
-function station_blocks(layout::ParameterLayout, θ::AbstractVector, path::Symbol...)
+function antenna_blocks(layout::ParameterLayout, θ::AbstractVector, path::Symbol...)
     length(θ) == layout.nθ || throw(
         DimensionMismatch(
-            "station_blocks: θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)"
+            "antenna_blocks: θ has length $(length(θ)), expected layout.nθ = $(layout.nθ)"
         )
     )
     node = layout.plantree
@@ -445,26 +445,26 @@ function station_blocks(layout::ParameterLayout, θ::AbstractVector, path::Symbo
             "none — the path already names a component"
         (children isa NamedTuple && haskey(children, s)) || throw(
             ArgumentError(
-                "station_blocks: no component at path $(join(path, '.')); " *
+                "antenna_blocks: no component at path $(join(path, '.')); " *
                     "available here: $avail.",
             ),
         )
         node = children[s]
     end
-    return _station_blocks(node, layout.nant, θ, path)
+    return _antenna_blocks(node, layout.nant, θ, path)
 end
 
-_station_blocks(plan::ComponentPlan, nant::Int, θ, path) =
-    [(; stations = collect(1:nant), θ = _component_leaf(plan, θ), plan)]
-_station_blocks(g::GroupedComponentPlan, nant::Int, θ, path) = [
-    (; stations = g.stations[i], θ = _component_leaf(p, θ), plan = p)
+_antenna_blocks(plan::ComponentPlan, nant::Int, θ, path) =
+    [(; antennas = collect(1:nant), θ = _component_leaf(plan, θ), plan)]
+_antenna_blocks(g::GroupedComponentPlan, nant::Int, θ, path) = [
+    (; antennas = g.antennas[i], θ = _component_leaf(p, θ), plan = p)
         for (i, p) in enumerate(values(g.groups))
 ]
-function _station_blocks(nt::NamedTuple, nant::Int, θ, path)
+function _antenna_blocks(nt::NamedTuple, nant::Int, θ, path)
     ks = join(keys(nt), ", ")
     throw(
         ArgumentError(
-            "station_blocks: path $(join(path, '.')) names a component subtree " *
+            "antenna_blocks: path $(join(path, '.')) names a component subtree " *
                 "(keys: $ks); descend to a component.",
         ),
     )
@@ -476,14 +476,14 @@ end
 # `(path, groups)` pairs for every component name with more than one signature
 # or with stations that lack it. Empty exactly when every consumer may treat
 # the model as uniform.
-function _station_heterogeneity(mat::GainModel, names)
+function _antenna_heterogeneity(mat::GainModel, names)
     nant = length(names)
-    isempty(mat.stations) && return Tuple{Tuple, _ComponentGroups}[]
-    trees = [station_components(mat, n) for n in names]
+    isempty(mat.antennas) && return Tuple{Tuple, _ComponentGroups}[]
+    trees = [antenna_components(mat, n) for n in names]
     members = collect(1:nant)
     het = Tuple{Tuple, _ComponentGroups}[]
-    _hetero_leaves!(het, _merge_station_trees(Any[t.phase for t in trees], members, nant, (:phase,)), (:phase,))
-    _hetero_leaves!(het, _merge_station_trees(Any[t.logamp for t in trees], members, nant, (:logamp,)), (:logamp,))
+    _hetero_leaves!(het, _merge_antenna_trees(Any[t.phase for t in trees], members, nant, (:phase,)), (:phase,))
+    _hetero_leaves!(het, _merge_antenna_trees(Any[t.logamp for t in trees], members, nant, (:logamp,)), (:logamp,))
     return het
 end
 
@@ -493,28 +493,28 @@ function _hetero_leaves!(out, node::NamedTuple, path)
     end
     return out
 end
-_hetero_leaves!(out, ::Union{GainComponent, _StationComponents}, path) = out
+_hetero_leaves!(out, ::Union{GainComponent, _AntennaComponents}, path) = out
 _hetero_leaves!(out, g::_ComponentGroups, path) = push!(out, (path, g))
 
 """
-    require_station_uniform(model::GainModel, antennas, who) -> model
+    require_antenna_uniform(model::GainModel, antennas, who) -> model
 
 Assert that the resolved `model` assigns every station the same component
 signatures, throwing otherwise with the differing components, their
 signatures, and the stations carrying each. `who` names the consumer in the
 error — the framework calls this for a solve step that has not opted into
-heterogeneity (`supports_station_heterogeneity`).
+heterogeneity (`supports_antenna_heterogeneity`).
 """
-function require_station_uniform(model::GainModel, antennas, who::AbstractString)
-    names = _station_names(antennas)
-    het = _station_heterogeneity(model, names)
+function require_antenna_uniform(model::GainModel, antennas, who::AbstractString)
+    names = _antenna_names(antennas)
+    het = _antenna_heterogeneity(model, names)
     isempty(het) && return model
     lines = String[]
     for (path, g) in het
-        covered = reduce(vcat, g.stations)
+        covered = reduce(vcat, g.antennas)
         sigs = join(
             (
-                "[" * join(names[g.stations[i]], ", ") * "]: " * component_label(g.comps[i])
+                "[" * join(names[g.antennas[i]], ", ") * "]: " * component_label(g.comps[i])
                     for i in eachindex(g.comps)
             ), "; ",
         )
@@ -527,9 +527,9 @@ function require_station_uniform(model::GainModel, antennas, who::AbstractString
     end
     throw(
         ArgumentError(
-            "$who supports only station-uniform gain models (it does not declare " *
-                "`supports_station_heterogeneity`), but the compiled model differs " *
-                "across stations:\n" * join(lines, "\n"),
+            "$who supports only antenna-uniform gain models (it does not declare " *
+                "`supports_antenna_heterogeneity`), but the compiled model differs " *
+                "across antennas:\n" * join(lines, "\n"),
         ),
     )
 end

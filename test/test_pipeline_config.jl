@@ -9,7 +9,7 @@
         gauge = PinAntenna(1)
         sols = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
         @test all(s -> s isa CAL.CalibrationSolution, sols)
-        @test all(s -> length(s.geom.stations) == 4, sols)
+        @test all(s -> length(s.geom.antennas) == 4, sols)
         @test [s.name for s in sols] == [:fringe, :bandpass, :adhoc]
         @test startswith(first(sols).step, "BaselineFringeFit")
         out = _calibrate_chain(sols, ps)
@@ -26,9 +26,9 @@
         @test seen[] == length(ps)
     end
 
-    @testset "gauge by station code" begin
+    @testset "gauge by antenna code" begin
         ps, _ = _build_fringe_ps()    # antennas named A1..A4
-        names = CAL.DataGeometry(ps).stations
+        names = CAL.DataGeometry(ps).antennas
         @test resolve_gauge(PinAntenna(3), names).refs == [3]
         @test resolve_gauge(PinAntenna("A2"), names).refs == [2]
         @test resolve_gauge(PinAntenna(:A4), names).refs == [4]
@@ -48,7 +48,7 @@
         sol = fit(Bandpass(; gauge = PinAntenna(2)), ps)
         @test sol.name === :bandpass
         @test !haskey(sol.info, :search)
-        @test length(sol.geom.stations) == 4
+        @test length(sol.geom.antennas) == 4
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
@@ -95,7 +95,7 @@ end
         geom = CAL.DataGeometry(ps)
         groups = XRadio.groupby(ps, XRadio.ByScan())
         sizes = [Gustavo._group_bytes(g) for g in values(groups)]
-        gauge = resolve_gauge(PinAntenna(1), geom.stations)
+        gauge = resolve_gauge(PinAntenna(1), geom.antennas)
         ctx = Gustavo._step_context(ff, (; geom), gauge, groups, sizes, ExecutionConfig())
         @test isconcretetype(typeof(ctx))
         for f in (:model, :layout, :geom, :θ, :gauge, :groups, :exec, :passes)

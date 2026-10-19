@@ -5,7 +5,7 @@
 # Reuses `_build_fringe_ps` + the FP/CAL aliases from test_pipeline.jl
 # (included earlier in runtests.jl).
 
-@testset "Per-station weight scale" begin
+@testset "Per-antenna weight scale" begin
     ps, _ = _build_fringe_ps()
     ws = Dict("A1" => 1.0, "A2" => 0.5, "A3" => 0.5, "A4" => 1.0)
     scale(name) = ws[name]

@@ -353,16 +353,16 @@ function coherence_report(
     )
     scan = _group_scan(group)
     members = collect(values(group))
-    member_pairs = map(_member_station_pairs, members)
-    stations, feeds = _cross_cell_labels(member_pairs, map(feed_pairs, members), DataGeometry(group))
-    isempty(stations) && throw(ArgumentError("scan $scan holds no cross baselines"))
+    member_pairs = map(_member_antenna_pairs, members)
+    antennas, feeds = _cross_cell_labels(member_pairs, map(feed_pairs, members), DataGeometry(group))
+    isempty(antennas) && throw(ArgumentError("scan $scan holds no cross baselines"))
     times = [Float64.(collect(XRadio.times(ms))) for ms in members]
     freqs = [Float64.(collect(XRadio.frequencies(ms))) for ms in members]
     dts = isnothing(timescales) ? _sweep(times) : sort!(Float64.(collect(timescales)))
     dnus = isnothing(bandwidths) ? _sweep(freqs) : sort!(Float64.(collect(bandwidths)))
 
-    cell = LinearIndices((length(stations), length(feeds)))
-    pair_i = Dict(p => j for (j, p) in pairs(stations))
+    cell = LinearIndices((length(antennas), length(feeds)))
+    pair_i = Dict(p => j for (j, p) in pairs(antennas))
     feed_i = Dict(f => q for (q, f) in pairs(feeds))
     numT, numF = zeros(length(dts), length(cell)), zeros(length(dnus), length(cell))
     denT, denF, dvarT, dvarF = (zeros(length(cell)) for _ in 1:4)
@@ -392,7 +392,7 @@ function coherence_report(
     end
     marginalize || (denF, dvarF = denT, dvarT)
 
-    sd, pd, fd = _scan_dim([scan]), _station_pair_dim(stations), FeedPair(feeds)
+    sd, pd, fd = _scan_dim([scan]), _antenna_pair_dim(antennas), FeedPair(feeds)
     time, time_pooled = _feed_curves(numT, denT, dvarT, debias, (sd, pd, fd), AveragingTime(dts))
     freq, freq_pooled = _feed_curves(numF, denF, dvarF, debias, (sd, pd, fd), AveragingBandwidth(dnus))
     return DimStack((; time, freq, time_pooled, freq_pooled))

@@ -45,7 +45,7 @@
 
         @testset "residual_group" begin
             model = Gustavo.model_components(BaselineFringeFit(; gauge = PinAntenna(1)), (; geom))
-            layout = CAL.plan_parameters(model, length(geom.stations), geom)
+            layout = CAL.plan_parameters(model, length(geom.antennas), geom)
             a = FP.residual_group(layout, θ(reference), ps, geom)
             b = FP.residual_group(layout, θ(reference), other, geom)
             for (k, ms) in pairs(b)

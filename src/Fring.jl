@@ -97,7 +97,7 @@ function plot_coherence end
 export FringeSearch, baseline_fringe_search, fringe_plane
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, FringeDelay, FringeRate, baseline_fringe_map, fringe_search_map, fringe_pfa, fringe_snr_cut
-export Stationization, station_closure_residuals
+export Stationization, antenna_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
 export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointKalmanSmoother
 export solve_adhoc_phasing, default_adhoc_model, default_adhoc_prior
@@ -105,9 +105,9 @@ export default_bandpass_model
 export JointSmoother
 export TrackStatus, TrackNoData, TrackSolved, TrackFlat
 export fringe_snr_table, fringe_detections, cat_scans
-export fringe_station_solutions
+export fringe_antenna_solutions
 export baseline_spectra, freq_group_coherence, fringe_freq_groups, FreqGroup, Triangle
-export fringe_station_flags
+export fringe_antenna_flags
 export baseline_delays, delay_closure
 export can_fit, validate_model
 export BandGroups, default_fringe_model

@@ -14,12 +14,12 @@ const _NC_NCHAN = 256
 function _nc_sums(; seed, noise, kw...)
     ps, _ = _build_fringe_ps(;
         nant = 4, nspw = 1, nchan = _NC_NCHAN, ntime = 8, noise, seed,
-        station_gains = false, eltype = ComplexF64, kw...,
+        antenna_gains = false, eltype = ComplexF64, kw...,
     )
     geom = Gustavo.Calibration.DataGeometry(ps)
     members = collect(values(ps))
     pairs, feeds = _NC_FR._cross_cell_labels(
-        map(_NC_FR._member_station_pairs, members), map(feed_pairs, members), geom,
+        map(_NC_FR._member_antenna_pairs, members), map(feed_pairs, members), geom,
     )
     return _NC_FR.accumulate_bandpass(ps, geom, pairs, feeds)
 end

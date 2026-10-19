@@ -154,7 +154,7 @@ Fields:
 - `scan_names`    : scan label of each distinct `scan_of_time` id, in the order
                     the ids are dense-ranked (`scan_names[s]` names segment `s`).
 - `spw_names`     : spw label of each distinct `spw_of_chan` id, likewise.
-- `stations`      : the run's station names; a baseline's antennas are
+- `antennas`      : the run's station names; a baseline's antennas are
                     indices into it. Empty for a geometry built without one.
 - `nfeed`         : the number of feeds (receptors) per station, every
                     station's feed axis `1:nfeed`.
@@ -180,7 +180,7 @@ struct DataGeometry
     f0::Float64
     scan_names::Vector{String}
     spw_names::Vector{String}
-    stations::Vector{String}
+    antennas::Vector{String}
     nfeed::Int
 end
 
@@ -194,7 +194,7 @@ function DataGeometry(;
         f0::Real = isempty(channel_freqs) ? 0.0 : sum(channel_freqs) / length(channel_freqs),
         scan_names::AbstractVector{<:AbstractString} = String[],
         spw_names::AbstractVector{<:AbstractString} = String[],
-        stations::AbstractVector{<:AbstractString} = String[],
+        antennas::AbstractVector{<:AbstractString} = String[],
         nfeed::Integer,
     )
     nfeed >= 1 || throw(ArgumentError("DataGeometry: nfeed must be at least 1, got $nfeed"))
@@ -219,12 +219,12 @@ function DataGeometry(;
         throw(ArgumentError("DataGeometry: channel widths must be finite and positive"))
     _check_names("scan_names", scan_names, scan_of_time)
     _check_names("spw_names", spw_names, spw_of_chan)
-    allunique(stations) || throw(ArgumentError("DataGeometry: station names repeat: $(join(stations, ", "))"))
+    allunique(antennas) || throw(ArgumentError("DataGeometry: antenna names repeat: $(join(antennas, ", "))"))
     return DataGeometry(
         Float64.(collect(times)), Int.(collect(scan_of_time)),
         Float64.(collect(channel_freqs)), Int.(collect(spw_of_chan)),
         Float64.(collect(channel_widths)), Float64(t0), Float64(f0),
-        String.(collect(scan_names)), String.(collect(spw_names)), String.(collect(stations)),
+        String.(collect(scan_names)), String.(collect(spw_names)), String.(collect(antennas)),
         Int(nfeed),
     )
 end

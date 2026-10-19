@@ -28,7 +28,7 @@ function _uvfits_staxof(m::AbstractMount)
     x, y, z = XRadio.axis_offset(m)
     iszero(y) && iszero(z) || throw(
         ArgumentError(
-            "write_uvfits: $m has an axis offset off the station's x axis, which " *
+            "write_uvfits: $m has an axis offset off the antenna's x axis, which " *
                 "the AN table's scalar STAXOF cannot state"
         )
     )

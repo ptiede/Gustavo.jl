@@ -586,13 +586,13 @@ function kalman_mv_filter(pairs, ys, rs, times, models)
         ),
     )
     nsteps = length(times)
-    nstation = length(models)
+    nantenna = length(models)
     dims = map(statedim, models)
     offsets = cumsum(dims) .- dims
     n = sum(dims)
     starts = [initial(m, T) for m in models]
     any(isnothing, starts) &&
-        throw(ArgumentError("the joint filter needs a proper start for every station's model"))
+        throw(ArgumentError("the joint filter needs a proper start for every antenna's model"))
     xf = zeros(T, n, nsteps)
     Pf = zeros(T, n, n, nsteps)
     xp = zeros(T, n, nsteps)
@@ -609,7 +609,7 @@ function kalman_mv_filter(pairs, ys, rs, times, models)
         x = view(xf, :, k)
         P = view(Pf, :, :, k)
         if k == 1
-            for i in 1:nstation
+            for i in 1:nantenna
                 μ0, P0 = starts[i]
                 x[block(i)] .= μ0
                 P[block(i), block(i)] .= P0
@@ -617,7 +617,7 @@ function kalman_mv_filter(pairs, ys, rs, times, models)
         else
             Δt = times[k] - times[k - 1]
             A = view(As, :, :, k)
-            for i in 1:nstation
+            for i in 1:nantenna
                 Ai, Qi = transition(models[i], Δt, T)
                 A[block(i), block(i)] .= Ai
                 Q[block(i), block(i)] .= Qi
@@ -637,9 +637,9 @@ function kalman_mv_filter(pairs, ys, rs, times, models)
             rj = rk[j]
             (isfinite(yj) && isfinite(rj) && rj > 0) || continue
             sa, sb = pairs[j]
-            (1 <= sa <= nstation && 1 <= sb <= nstation) || throw(
+            (1 <= sa <= nantenna && 1 <= sb <= nantenna) || throw(
                 ArgumentError(
-                    "observation row references stations $sa/$sb outside 1:$nstation",
+                    "observation row references antennas $sa/$sb outside 1:$nantenna",
                 ),
             )
             ia, ib = offsets[sa] + 1, offsets[sb] + 1

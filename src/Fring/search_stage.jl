@@ -157,7 +157,7 @@ end
 
 # What the matched filter requires of a `(; phase, logamp)` model tree. Each
 # absent item costs the step its own output silently rather than crashing:
-# `solve_station_systems!` skips a kind with no components, dropping every
+# `solve_antenna_systems!` skips a kind with no components, dropping every
 # scan's search estimate for that observable.
 function validate_fringe_model(model)
     name = "BaselineFringeFit"
@@ -218,16 +218,16 @@ function _residual_member(layout::ParameterLayout, θ, ms::XRadio.MeasurementSet
     win = GeometryWindow(geom, ms)
     g = evaluate_gains(layout, θ, win.chan_idx, win.ti_idx)   # (nchan, nti, nant, nfeed)
     V = DimensionalData.modify(Array, ms[:visibility])
-    _divide_residual!(V, g, win.stations, feed_pairs(ms))
+    _divide_residual!(V, g, win.antennas, feed_pairs(ms))
     out = copy(ms)
     out[:visibility] = V
     return out
 end
 
-function _divide_residual!(V, g, stations, feeds)
+function _divide_residual!(V, g, antennas, feeds)
     for I in CartesianIndices(feeds)
         p, bi = Tuple(I)
-        a, b = stations[bi]
+        a, b = antennas[bi]
         fa, fb = feeds[p, bi]
         plane = _cell_plane(V, bi, p)
         for t in axes(plane, 2), c in axes(plane, 1)
@@ -294,21 +294,21 @@ function detection_table(scan_dets)
 end
 
 """
-    scan_station_terms(model, layout, θ, ti, stations) -> (delay, rate)
+    scan_antenna_terms(model, layout, θ, ti, antennas) -> (delay, rate)
 
-Per-`(station, feed)` group delay (s) and fringe rate (Hz) at time index `ti`,
+Per-`(antenna, feed)` group delay (s) and fringe rate (Hz) at time index `ti`,
 summed over the stage-B components of `model`, as `DimArray`s over
-`AntennaName(stations) × Feed`; `stations` names the layout's stations in order. This is the decode
-[`fringe_station_solutions`](@ref) reports, for one scan and without a finished
+`AntennaName(antennas) × Feed`; `antennas` names the layout's stations in order. This is the decode
+[`fringe_antenna_solutions`](@ref) reports, for one scan and without a finished
 solution, so a solve step can read its own station parameters while the scan's
 data is still resident. Entries are `NaN` where no component constrains that node.
 """
-function scan_station_terms(model, layout, θ, ti::Integer, stations)
-    length(stations) == layout.nant || throw(
-        DimensionMismatch("the layout covers $(layout.nant) stations but $(length(stations)) are named")
+function scan_antenna_terms(model, layout, θ, ti::Integer, antennas)
+    length(antennas) == layout.nant || throw(
+        DimensionMismatch("the layout covers $(layout.nant) antennas but $(length(antennas)) are named")
     )
     comps = fringe_stage_components(model, layout)
-    delay = fill(NaN, AntennaName(collect(stations)), Feed(1:layout.nfeed))
+    delay = fill(NaN, AntennaName(collect(antennas)), Feed(1:layout.nfeed))
     rate = similar(delay)
     fill!(rate, NaN)
     for a in axes(delay, 1), f in axes(delay, 2)
@@ -336,7 +336,7 @@ Re-measure every cell of `res`, the [`search_scan`](@ref) result for scan group
 `group`, at the delay and rate the station solution predicts for it
 (`τ_{a,fa} − τ_{b,fb}`, and the same difference in rate) rather than at a
 blind search peak. `sta_delay` and `sta_rate` are `DimArray`s over
-`AntennaName × Feed`, as [`scan_station_terms`](@ref) returns them; the result
+`AntennaName × Feed`, as [`scan_antenna_terms`](@ref) returns them; the result
 is labeled like `res`.
 
 This recovers a fringe too weak to survive a blind search: the trial count
@@ -365,7 +365,7 @@ function steer_scan(
     nan() = fill(T(NaN), DimensionalData.dims(res))
     sdelay, srate, samp, ssnr, spfa = nan(), nan(), nan(), nan(), nan()
     ws = FringeWorkspace(C)
-    station(x, a, f) = x[AntennaName(At(a)), Feed(At(f))]
+    antenna(x, a, f) = x[AntennaName(At(a)), Feed(At(f))]
     for q in eachindex(gc.feeds), j in eachindex(gc.antenna_pairs)
         cell = (AntennaPair(j), FeedPair(q))
         res[:valid][cell] || continue
@@ -373,8 +373,8 @@ function steer_scan(
         snr0 > 0 || continue
         a, b = gc.antenna_pairs[j]
         fa, fb = gc.feeds[q]
-        dpred = station(sta_delay, a, fa) - station(sta_delay, b, fb)
-        rpred = station(sta_rate, a, fa) - station(sta_rate, b, fb)
+        dpred = antenna(sta_delay, a, fa) - antenna(sta_delay, b, fb)
+        rpred = antenna(sta_rate, a, fa) - antenna(sta_rate, b, fb)
         (isfinite(dpred) && isfinite(rpred)) || continue
         V, W, F = _gather_cell!(ws, gc, j, q)
         # σ of the blind pass, recovered from its own reported SNR.
@@ -400,10 +400,10 @@ end
 
 # The flag block for the solution `info` (plain parallel vectors): the
 # stage-B-unconstrained (station name, feed, scan) triples.
-function flag_table(station_flags)
+function flag_table(antenna_flags)
     return (;
-        flagged_ant = String[f[1] for f in station_flags],
-        flagged_feed = Int[f[2] for f in station_flags],
-        flagged_scan = Int[f[3] for f in station_flags],
+        flagged_ant = String[f[1] for f in antenna_flags],
+        flagged_feed = Int[f[2] for f in antenna_flags],
+        flagged_scan = Int[f[3] for f in antenna_flags],
     )
 end

@@ -585,7 +585,7 @@ end
     # so each cell is joined across members by label and A4's cells take no
     # rows from the second window.
     full, _ = _build_fringe_ps(; nspw = 1, spw_origins = [230.0e9])
-    partial, _ = _build_fringe_ps(; nspw = 1, spw_origins = [230.1e9], omit_station = 4)
+    partial, _ = _build_fringe_ps(; nspw = 1, spw_origins = [230.1e9], omit_antenna = 4)
     group = XRadio.ProcessingSet(
         OrderedDict{Symbol, XRadio.MeasurementSet}(
             :hi => only(values(partial)), :lo => only(values(full)),

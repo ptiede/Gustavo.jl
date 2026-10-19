@@ -41,12 +41,12 @@ keywords always give the same data.
   scans.
 - `dtec`: per-station TEC (TECU), feed-common.
 - `feed_common`: tie delay and phase across feeds.
-- `station_rate`: per-station feed-common rate (Hz) replacing the draw;
+- `antenna_rate`: per-station feed-common rate (Hz) replacing the draw;
   `rel_rate`: a feed-2 − feed-1 rate offset (Hz).
-- `station_positions`: per-station xyz (m).
-- `omit_station`: a station index in the antenna dataset but on no baseline.
+- `antenna_positions`: per-station xyz (m).
+- `omit_antenna`: a station index in the antenna dataset but on no baseline.
 - `receptor_order`: station name => its receptors, in place of `receptors`.
-- `station_gains = false`: zero delay, rate, phase and screen, leaving the
+- `antenna_gains = false`: zero delay, rate, phase and screen, leaving the
   bandpass as the only station gain.
 - `eltype`: the visibilities' element type.
 """
@@ -57,19 +57,19 @@ function _build_fringe_ps(;
         ref_freq = 230.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
         seed = 1234,
         bandpass = nothing, amp_bandpass = nothing, dtec = nothing,
-        feed_common = false, station_rate = nothing, rel_rate = nothing,
-        spw_origins = nothing, station_positions = nothing, omit_station = nothing,
+        feed_common = false, antenna_rate = nothing, rel_rate = nothing,
+        spw_origins = nothing, antenna_positions = nothing, omit_antenna = nothing,
         receptor_order = Dict{String, Vector{String}}(),
-        station_gains = true, eltype = ComplexF32,
+        antenna_gains = true, eltype = ComplexF32,
         weight = isnothing(noise) ? 1.0e3 : 2 / noise^2,
     )
     rng = StableRNG(seed)
     names = ["A$i" for i in 1:nant]
     antenna_xds = Testing.antenna(
         names;
-        positions = station_positions === nothing ?
+        positions = antenna_positions === nothing ?
             [1.0e4 * c * i for c in 1:3, i in 1:nant] :
-            reduce(hcat, (Float64.(p) for p in station_positions)),
+            reduce(hcat, (Float64.(p) for p in antenna_positions)),
         receptors,
     )
     if !isempty(receptor_order)
@@ -79,7 +79,7 @@ function _build_fringe_ps(;
         end
         antenna_xds[:polarization_type] = rebuild(antenna_xds[:polarization_type], types)
     end
-    drop = omit_station === nothing ? String[] : [names[omit_station]]
+    drop = omit_antenna === nothing ? String[] : [names[omit_antenna]]
 
     integration = 30.0
     t_epoch = datetime2unix(DateTime(Date("2021-03-04")))
@@ -99,7 +99,7 @@ function _build_fringe_ps(;
     delay = zeros(nant, nfeed)
     rate = zeros(nant, nfeed)
     phi = zeros(nant, nfeed)
-    if station_gains
+    if antenna_gains
         for a in 2:nant
             rc = (rand(rng) - 0.5) * 2.0e-3
             for f in 1:nfeed
@@ -109,7 +109,7 @@ function _build_fringe_ps(;
             end
         end
     end
-    station_rate === nothing || (rate .= station_rate)
+    antenna_rate === nothing || (rate .= antenna_rate)
     rel_rate === nothing || (rate[:, 2] .= rate[:, 1] .+ rel_rate)
     if feed_common
         delay .= delay[:, 1]
@@ -119,7 +119,7 @@ function _build_fringe_ps(;
     # Feed-common, since the atmosphere is not birefringent: a per-station
     # offset plus a slow track, drawn afresh for each scan.
     screen = zeros(nant, nfeed, ntime, nscans)
-    for s in 1:nscans, a in (station_gains ? (2:nant) : 1:0)
+    for s in 1:nscans, a in (antenna_gains ? (2:nant) : 1:0)
         base = (rand(rng) - 0.5) * 1.0
         for ti in 1:ntime
             screen[a, :, ti, s] .= base + 0.2 * sin(0.5 * ti + a)

@@ -211,7 +211,7 @@ end
                 ),
             ),
         )
-        layout = CALu.plan_parameters(model, geom.stations, geom)
+        layout = CALu.plan_parameters(model, geom.antennas, geom)
         sol = CALu.CalibrationSolution(
             model, layout, geom, 0.3 .* randn(StableRNG(3), layout.nθ), (;); name = :hand,
         )

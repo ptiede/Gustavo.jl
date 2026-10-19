@@ -28,14 +28,14 @@ end
 # ── Dividing out a solution's gains ──────────────────────────────────────────
 
 # Target station index → the solution's own (0 = absent from the solution).
-function _station_map(sol::Calibration._AppliedSolution, stations)
-    solnames = sol.geom.stations
-    m = [something(findfirst(==(n), solnames), 0) for n in stations]
+function _antenna_map(sol::Calibration._AppliedSolution, antennas)
+    solnames = sol.geom.antennas
+    m = [something(findfirst(==(n), solnames), 0) for n in antennas]
     all(iszero, m) && throw(
         ArgumentError(
-            "the solution shares no station with this data, so it would correct " *
+            "the solution shares no antenna with this data, so it would correct " *
                 "nothing. It knows $(join(map(repr, solnames), ", ")); the data has " *
-                "$(join(map(repr, stations), ", "))."
+                "$(join(map(repr, antennas), ", "))."
         )
     )
     return m
@@ -73,7 +73,7 @@ function _divide_gains!(
         ms::XRadio.MeasurementSet, win::GeometryWindow, sol::Calibration._AppliedSolution;
         flag_bad::Bool, executor = DynamicScheduler(),
     )
-    amap = _station_map(sol, win.geom.stations)
+    amap = _antenna_map(sol, win.geom.antennas)
     vis = ms[:visibility]
     weight = ms[:weight]
     flag = ms[:flag]
@@ -90,7 +90,7 @@ function _divide_gains!(
     # storage, so tasks split by product would share and write cache lines.
     tforeach(axes(V, 4); scheduler = executor) do t
         gt = tconst ? firstindex(g, 2) : t
-        _divide_sample!(V, W, F, g, t, gt, win.stations, amap, feeds, flag_bad)
+        _divide_sample!(V, W, F, g, t, gt, win.antennas, amap, feeds, flag_bad)
     end
     return ms
 end
@@ -100,9 +100,9 @@ end
 const _GAIN_FLOOR = 1.0e-12
 
 # Time sample `t` of `_divide_gains`, its gains at time index `gt`.
-function _divide_sample!(V, W, F, g, t, gt, stations, amap, feeds, flag_bad::Bool)
+function _divide_sample!(V, W, F, g, t, gt, antennas, amap, feeds, flag_bad::Bool)
     for bi in axes(V, 3)
-        a, b = stations[bi]
+        a, b = antennas[bi]
         sa, sb = amap[a], amap[b]
         (sa == 0 || sb == 0) && continue
         for c in axes(V, 2), p in axes(V, 1)

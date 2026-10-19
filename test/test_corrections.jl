@@ -16,16 +16,16 @@ function _hand_solution(geom; info = (;), seed = 7)
         phase = (; ph = CALc.GainComponent(CALc.ConstantTerm(); Ti = CALc.PerScan(), Frequency = CALc.PerSpectralWindow(), Feed = CALc.PerFeed())),
         logamp = (; la = CALc.GainComponent(CALc.ConstantTerm(); Ti = CALc.GlobalTime(), Frequency = CALc.ChannelBlocks(1), Feed = CALc.PerFeed())),
     )
-    layout = CALc.plan_parameters(model, geom.stations, geom)
+    layout = CALc.plan_parameters(model, geom.antennas, geom)
     θ = 0.3 .* randn(StableRNG(seed), layout.nθ)
     return CALc.CalibrationSolution(
         model, layout, geom, θ, info; name = :hand,
     )
 end
 
-_with_stations(geom, stations) = CALc.DataGeometry(;
+_with_antennas(geom, antennas) = CALc.DataGeometry(;
     geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.channel_widths, geom.t0, geom.f0,
-    geom.scan_names, geom.spw_names, stations, geom.nfeed,
+    geom.scan_names, geom.spw_names, antennas, geom.nfeed,
 )
 
 # The largest relative error of `out` against `ms` divided by `sol`'s gains,
@@ -36,7 +36,7 @@ function _division_error(out, ms, sol, geom)
     feeds = Gustavo.feed_pairs(ms)
     worst = 0.0
     for p in axes(feeds, 1), bi in axes(feeds, 2), c in eachindex(win.chan_idx), t in eachindex(win.ti_idx)
-        a, b = win.stations[bi]
+        a, b = win.antennas[bi]
         fa, fb = feeds[p, bi]
         den = g[c, t, a, fa] * conj(g[c, t, b, fb])
         cell = (Polarization(p), BaselineID(bi), Frequency(c), Ti(t))
@@ -83,7 +83,7 @@ end
         @test_throws "different numbers of receptors per antenna" CALc.DataGeometry(mixed)
 
         model = CALc.GainModel(; phase = (; p = CALc.GainComponent(CALc.ConstantTerm(); Ti = CALc.GlobalTime(), Feed = CALc.SingleFeed(3))))
-        @test_throws "SingleFeed(3) names a feed the data does not have" CALc.plan_parameters(model, geom.stations, geom)
+        @test_throws "SingleFeed(3) names a feed the data does not have" CALc.plan_parameters(model, geom.antennas, geom)
     end
 
     @testset "calibrate! divides out the gains in place" begin
@@ -110,13 +110,13 @@ end
         @test _division_error(calibrate!(onewin, fresh()), ms, onewin, own) < 1.0e-6
     end
 
-    @testset "calibrate! matches stations by name" begin
-        @test_throws "must name its stations" CALc.CalibrationSolution(_with_stations(geom, String[]), sol.name, sol.components)
-        strangers = _hand_solution(_with_stations(geom, ["X1", "X2", "X3", "X4"]))
-        @test_throws "shares no station" calibrate!(strangers, fresh())
+    @testset "calibrate! matches antennas by name" begin
+        @test_throws "must name its antennas" CALc.CalibrationSolution(_with_antennas(geom, String[]), sol.name, sol.components)
+        strangers = _hand_solution(_with_antennas(geom, ["X1", "X2", "X3", "X4"]))
+        @test_throws "shares no antenna" calibrate!(strangers, fresh())
         # A station the solution lacks: its cross baselines are flagged under
         # `apply_flags`, and otherwise pass through uncorrected.
-        partial = _hand_solution(_with_stations(geom, ["A1", "A2", "A3", "X4"]))
+        partial = _hand_solution(_with_antennas(geom, ["A1", "A2", "A3", "X4"]))
         names = collect(XRadio.baselines(ms))
         a4 = findall(((a, b),) -> "A4" in (a, b) && a != b, names)
         others = findall(((a, b),) -> !("A4" in (a, b)), names)
@@ -194,7 +194,7 @@ end
         end
     end
 
-    @testset "flags the baselines of an unconstrained station, on that scan only" begin
+    @testset "flags the baselines of an unconstrained antenna, on that scan only" begin
         out = calibrate(sol, ps)
         for ms in values(out), (bi, pair) in pairs(collect(XRadio.baselines(ms)))
             on_scan1 = ms[:scan_name] .== "1"
@@ -230,7 +230,7 @@ end
         ms = read(first(ps))
         renamed = CALc.DataGeometry(;
             geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.channel_widths, geom.t0, geom.f0,
-            scan_names = ["x" * n for n in geom.scan_names], geom.spw_names, geom.stations, geom.nfeed,
+            scan_names = ["x" * n for n in geom.scan_names], geom.spw_names, geom.antennas, geom.nfeed,
         )
         win = CALc.GeometryWindow(geom, ms)
         @test_throws "is not in the solution, which covers" Gustavo._flag_unconstrained!(

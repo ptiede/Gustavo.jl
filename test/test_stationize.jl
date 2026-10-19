@@ -56,11 +56,11 @@ const SCAN_SPREAD = (freq_rms = 2.0e9 / sqrt(12), time_rms = 300.0 / sqrt(12))
 delay_sigma(snr) = inv(2π * SCAN_SPREAD.freq_rms * snr)
 rate_sigma(snr) = inv(2π * SCAN_SPREAD.time_rms * snr)
 
-# Station `i` of these fixtures is named "A$i"; `STATIONS` numbers them so.
-const STATIONS = ["A$i" for i in 1:64]
-named(bl) = [(STATIONS[a], STATIONS[b]) for (a, b) in bl]
+# Station `i` of these fixtures is named "A$i"; `ANTENNAS` numbers them so.
+const ANTENNAS = ["A$i" for i in 1:64]
+named(bl) = [(ANTENNAS[a], ANTENNAS[b]) for (a, b) in bl]
 detstack(D, bl, pols; kw...) = FR.detection_stack(D, named(bl), pols; SCAN_SPREAD..., kw...)
-solve_named!(θ, scans, comps; kw...) = FR.solve_station_systems!(θ, scans, comps, STATIONS; kw...)
+solve_named!(θ, scans, comps; kw...) = FR.solve_antenna_systems!(θ, scans, comps, ANTENNAS; kw...)
 
 # The station model these tests are written against: one column per (station,
 # feed) for each of delay and rate, over a single scan.
@@ -117,7 +117,7 @@ function stationize(
     )
 end
 
-@testset "Stationize: per-(station,feed) recovery up to gauge" begin
+@testset "Stationize: per-(antenna,feed) recovery up to gauge" begin
     rng = MersenneTwister(0x5712)
     nant = 5
     ref = 1
@@ -167,7 +167,7 @@ end
 
     layout = perfeed_scan_layout(nant)
     scans = (FR.detection_stack(D32, named(bl), pols; ti = 1, SCAN_SPREAD...),)
-    slot = Dict(n => i for (i, n) in pairs(STATIONS))
+    slot = Dict(n => i for (i, n) in pairs(ANTENNAS))
     for (T, kind, plan) in ((Float32, :delay, layout.plans[1]), (Float64, :rate, layout.plans[2]))
         r = @inferred FR._solve_kind_cols!(
             zeros(layout.nθ), scans, [plan], slot, PinAntenna(1),
@@ -208,7 +208,7 @@ end
     D = inject_detections(bl, pols, 1.0e-9 .* randn(rng, nant, 2), zeros(nant, 2); φ = 0.25 .* randn(rng, nant, 2))
     # Same-feed products (11 = 1, 22 = 4) close exactly on noiseless data.
     for prod in (1, 4), obs in (:delay, :phase)
-        res = FR.station_closure_residuals(detstack(D, bl, pols; ti = 1); observable = obs, feeds = pols[prod])
+        res = FR.antenna_closure_residuals(detstack(D, bl, pols; ti = 1); observable = obs, feeds = pols[prod])
         @test !isempty(res)
         @test maximum(abs, res) < 1.0e-9
     end
@@ -269,8 +269,8 @@ end
     D = inject_detections(bl, pols, τ, ṙ)
 
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(absent_ref))
-    @test sol.ref_covered == Set((STATIONS[a], f, 1) for a in 1:4 for f in 1:2)
-    @test !any(c -> first(c) == STATIONS[absent_ref], sol.ref_covered)     # never fabricated
+    @test sol.ref_covered == Set((ANTENNAS[a], f, 1) for a in 1:4 for f in 1:2)
+    @test !any(c -> first(c) == ANTENNAS[absent_ref], sol.ref_covered)     # never fabricated
     # The solution is exact despite the missing reference: only its gauge is
     # arbitrary, and a gauge cancels on every baseline of its own component.
     r = recon_residuals(D, sol, bl, pols)
@@ -296,7 +296,7 @@ end
     D = inject_detections(bl, pols, τ, ṙ)
 
     sol = stationize(D, bl, pols, nant; gauge = PinAntenna(1))
-    @test sol.ref_covered == Set((STATIONS[a], f, 1) for a in 1:nant for f in 1:2)
+    @test sol.ref_covered == Set((ANTENNAS[a], f, 1) for a in 1:nant for f in 1:2)
     r = recon_residuals(D, sol, bl, pols)
     @test r.delay < 1.0e-20
     @test r.rate < 1.0e-15
@@ -353,7 +353,7 @@ end
     @test all(isnan, sol_hi.delay)
 end
 
-@testset "Stationize: an unconstrained station's θ is identity" begin
+@testset "Stationize: an unconstrained antenna's θ is identity" begin
     nant = 4
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
@@ -368,7 +368,7 @@ end
     θ = zeros(layout.nθ)
     plans = ((layout.plans[1], :delay), (layout.plans[2], :rate))
     _, covered = solve_named!(θ, (FR.detection_stack(D, named(bl), pols; ti = 1, SCAN_SPREAD...),), plans; gauge = PinAntenna(1))
-    @test covered == Set((STATIONS[a], f, 1) for a in 1:3 for f in 1:2)
+    @test covered == Set((ANTENNAS[a], f, 1) for a in 1:3 for f in 1:2)
     for (plan, _) in plans, f in 1:2
         @test θ[plan_off1(plan)[4, f, 1, 1]] == 0
         @test any(a -> θ[plan_off1(plan)[a, f, 1, 1]] != 0, 1:3)
@@ -407,7 +407,7 @@ end
     _, covered = solve_named!(θ, (detstack(D, bl, pols; ti = 1),), comps; gauge = PinAntenna(ref))
 
     col(plan, a, f) = θ[plan_off1(plan)[a, f, 1, 1]]
-    @test covered == Set((STATIONS[a], f, 1) for a in 1:nant for f in 1:2 if (a, f) != (lone, 2))
+    @test covered == Set((ANTENNAS[a], f, 1) for a in 1:nant for f in 1:2 if (a, f) != (lone, 2))
     @test col(rel, lone, 2) == 0
     for a in 1:nant
         a == lone || @test col(rel, a, 2) ≈ δ[a] atol = 1.0e-12
@@ -812,7 +812,7 @@ function sharedfeeds_scan_layout(nant)
     return CALs.plan_parameters(model, nant, geom)
 end
 
-@testset "Stationize: a single-feed station solves on shared-feed delay and rate" begin
+@testset "Stationize: a single-feed antenna solves on shared-feed delay and rate" begin
     rng = MersenneTwister(0x7a11)
     nant = 5
     single = 4                                    # single-feed station: feed 2 only

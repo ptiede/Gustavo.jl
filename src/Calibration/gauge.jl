@@ -20,7 +20,7 @@ constraint per [`GaugeFreedom`](@ref).
 A gauge implements [`gauge_constraint`](@ref)`(g, freedom) -> (row, value)`, one
 constraint per freedom, or, for a rule that ties freedoms together,
 [`gauge_constraints`](@ref)`(g, freedoms) -> (C, d)` over all freedoms of a
-system. [`gauge_anchor`](@ref) and [`gauge_station_order`](@ref) have defaults.
+system. [`gauge_anchor`](@ref) and [`gauge_antenna_order`](@ref) have defaults.
 A gauge that names stations also implements [`resolve_gauge`](@ref) and
 [`remap_gauge`](@ref).
 """
@@ -60,14 +60,14 @@ scans than under a pin.
 struct ZeroSumPhase <: AbstractGauge end
 
 """
-    GaugeFreedom(; nodes, station, feed, scan, component, observable, direction, weight)
+    GaugeFreedom(; nodes, antenna, feed, scan, component, observable, direction, weight)
 
 One gauge freedom of a solve: moving the values of `nodes` together along
 `direction` changes no row the data must hold, so the solve needs one constraint
 to fix it. `nodes` index the system's unknowns; every other field runs parallel
 to `nodes` and describes each one:
 
-- `station`: station index;
+- `antenna`: station index;
 - `feed`: feed index from 1, or 0 for an unknown every feed shares;
 - `scan`: scan index, or 0 for an unknown spanning scans or a solve without scans;
 - `component`: the model component's path, e.g. `(:phase, :mbd)`, or `()` where
@@ -78,7 +78,7 @@ to `nodes` and describes each one:
 """
 struct GaugeFreedom{N, S, F, SC, C, O, D, W}
     nodes::N
-    station::S
+    antenna::S
     feed::F
     scan::SC
     component::C
@@ -86,8 +86,8 @@ struct GaugeFreedom{N, S, F, SC, C, O, D, W}
     direction::D
     weight::W
 end
-GaugeFreedom(; nodes, station, feed, scan, component, observable, direction, weight) =
-    GaugeFreedom(nodes, station, feed, scan, component, observable, direction, weight)
+GaugeFreedom(; nodes, antenna, feed, scan, component, observable, direction, weight) =
+    GaugeFreedom(nodes, antenna, feed, scan, component, observable, direction, weight)
 
 """
     GaugeFreedoms{T}(freedoms, nnodes)
@@ -148,17 +148,17 @@ node per freedom, as that pin.
 
 This is a numerical starting point, not the gauge itself: unwrapping propagates
 relative phases outward from a real node, which a zero-sum constraint does not
-supply. The default takes the first station of [`gauge_station_order`](@ref)
+supply. The default takes the first station of [`gauge_antenna_order`](@ref)
 present in `f` (its node of the lowest feed index), else the node with the most
 row weight.
 """
 function gauge_anchor(g::AbstractGauge, f::GaugeFreedom)
     # The lowest feed, so a station's reported values stay referenced to the
     # same feed wherever it is present.
-    for a in gauge_station_order(g)
+    for a in gauge_antenna_order(g)
         best = 0
-        for i in eachindex(f.nodes, f.station, f.feed)
-            f.station[i] == a && (best == 0 || f.feed[i] < f.feed[best]) && (best = i)
+        for i in eachindex(f.nodes, f.antenna, f.feed)
+            f.antenna[i] == a && (best == 0 || f.feed[i] < f.feed[best]) && (best = i)
         end
         best == 0 || return f.nodes[best]
     end
@@ -201,7 +201,7 @@ end
 _gauge_refs(r::Integer) = (Int(r),)
 _gauge_refs(r::AbstractVector{<:Integer}) = r
 _gauge_refs(r) = error(
-    "gauge references must be resolved to station indices before use; got $(typeof(r)). " *
+    "gauge references must be resolved to antenna indices before use; got $(typeof(r)). " *
         "Call `resolve_gauge(gauge, ant_names)` first.",
 )
 
@@ -234,7 +234,7 @@ end
 _antenna_index(r::Integer, ant_names, who) = Int(r)
 function _antenna_index(r, ant_names, who)
     i = findfirst(==(String(r)), ant_names)
-    isnothing(i) && error("$who: station code \"$r\" not in antenna table $(ant_names).")
+    isnothing(i) && error("$who: antenna code \"$r\" not in antenna table $(ant_names).")
     return i
 end
 
@@ -249,15 +249,15 @@ remap_gauge(g::PinAntenna, map) = PinAntenna([map[a] for a in _gauge_refs(g.refs
 remap_gauge(g::ZeroSumPhase, map) = g
 
 """
-    gauge_station_order(g::AbstractGauge) -> collection of Int
+    gauge_antenna_order(g::AbstractGauge) -> collection of Int
 
 The station indices this gauge prefers as a numerical anchor, best first.
 
 Empty by default: a gauge that names no station (a summed constraint) leaves the
 caller to pick on its own criterion, typically the best-observed station.
 """
-gauge_station_order(g::PinAntenna) = _gauge_refs(g.refs)
-gauge_station_order(::AbstractGauge) = ()
+gauge_antenna_order(g::PinAntenna) = _gauge_refs(g.refs)
+gauge_antenna_order(::AbstractGauge) = ()
 
 """
     ByComponent(choices::NamedTuple; default::AbstractGauge)

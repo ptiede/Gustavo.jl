@@ -56,7 +56,7 @@ end
 # for a station no block covers.
 function _block_locations(blocks, nant)
     loc = fill((0, 0), nant)
-    for (k, b) in pairs(blocks), (ai, a) in pairs(b.stations)
+    for (k, b) in pairs(blocks), (ai, a) in pairs(b.antennas)
         loc[a] = (k, ai)
     end
     return loc
@@ -76,7 +76,7 @@ _gain_blocks(phase_blocks, amp_blocks) = isempty(phase_blocks) ? amp_blocks : ph
 
 function _block_gains(block, geom::DataGeometry, C::Type)
     ax = (
-        _station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed),
+        _antenna_dim(geom.antennas[block.antennas]), Feed(1:geom.nfeed),
         Frequency(1:block.plan.shape.Frequency), Ti(1:block.plan.shape.Ti),
     )
     return DimStack((;
@@ -86,7 +86,7 @@ function _block_gains(block, geom::DataGeometry, C::Type)
 end
 
 """
-    _station_freq_segments(blocks, nant) -> (fseg, cells)
+    _antenna_freq_segments(blocks, nant) -> (fseg, cells)
 
 The frequency cells a joint solve reduces its data onto — the coarsest
 channel partition every block's own segmentation is a union of cells of — and
@@ -97,11 +97,11 @@ Stations that share one frequency segmentation give the identity refinement, so
 `cells` is that segmentation's own channel groups and every station's cell maps
 to itself.
 """
-function _station_freq_segments(blocks, nant)
+function _antenna_freq_segments(blocks, nant)
     cell_ids, ncell = common_refinement([b.plan.fseg_id for b in blocks])
     cells = segment_groups(cell_ids, ncell)
     fseg = zeros(Int, Base.OneTo(nant), Base.OneTo(ncell))
-    for b in blocks, a in b.stations
+    for b in blocks, a in b.antennas
         for (k, chans) in pairs(cells)
             # A cell lies wholly inside one segment of every block's
             # segmentation, so its first channel names them all.
@@ -217,7 +217,7 @@ function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     freedoms = map(1:ncomp) do c
         cn = findall(==(c), compid)
         GaugeFreedom(;
-            nodes = cn, station = [blocks[slot[n][1]].stations[slot[n][2][1]] for n in cn],
+            nodes = cn, antenna = [blocks[slot[n][1]].antennas[slot[n][2][1]] for n in cn],
             feed = [slot[n][2][2] for n in cn], scan = zeros(Int, length(cn)),
             component = [blocks[slot[n][1]].plan.path for n in cn], observable = fill(:phase, length(cn)),
             direction = ones(T, length(cn)), weight = nodew[cn],

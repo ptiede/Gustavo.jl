@@ -221,7 +221,7 @@ _resolve_node(nt::NamedTuple, solve, target, chan_idx, ti_idx, tspan) =
 _resolve_node(g::GroupedComponentPlan, solve, target, chan_idx, ti_idx, tspan) =
     GroupedComponentPlan(
     map(p -> _resolve_node(p, solve, target, chan_idx, ti_idx, tspan), g.groups),
-    g.stations, g.group_of, g.local_of,
+    g.antennas, g.group_of, g.local_of,
 )
 
 function _resolve_node(plan::ComponentPlan, solve, target, chan_idx, ti_idx, tspan)

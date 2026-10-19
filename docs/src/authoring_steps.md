@@ -24,7 +24,7 @@ A `SolveStep` subtype implements [`solve`](@ref) and some of these hooks:
 | [`provides`](@ref) | the step's solution slot name (`sol[:name]`) | `:nothing` |
 | [`step_gauge`](@ref) | the gauge that fixes the step's undetermined station values | `nothing` |
 | [`solve`](@ref) | fill θ; return diagnostics | required |
-| [`supports_station_heterogeneity`](@ref) | can the solver loop over ragged station blocks? | `false` |
+| [`supports_antenna_heterogeneity`](@ref) | can the solver loop over ragged station blocks? | `false` |
 
 The execution model behind them:
 
@@ -140,12 +140,12 @@ component, so an undeclared solver never gets θ blocks it would silently
 leave unsolved. A step whose solver can handle raggedness declares
 
 ```julia
-supports_station_heterogeneity(::MyStep) = true
+supports_antenna_heterogeneity(::MyStep) = true
 ```
 
 and writes its solve as a loop over
-[`station_blocks`](@ref Gustavo.Calibration.station_blocks)`(layout, θ, :phase, :name)`
-— each block is `(; stations, θ, plan)`: the global station indices it spans,
+[`antenna_blocks`](@ref Gustavo.Calibration.antenna_blocks)`(layout, θ, :phase, :name)`
+— each block is `(; antennas, θ, plan)`: the global station indices it spans,
 a shaped view into θ, and the block's own segment tables. A uniform model
 yields exactly one block spanning every station, so the loop costs nothing in
 the common case. Gauge caution: the blocks of one component share a *single*

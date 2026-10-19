@@ -7,7 +7,7 @@
 # are stubs in `Fring.jl`, implemented by `GustavoMakieExt`.
 
 DimensionalData.@dim FreqGroup "Frequency group"
-DimensionalData.@dim Triangle "Station triangle"
+DimensionalData.@dim Triangle "Antenna triangle"
 
 function _fringe_info(sol::CalibrationSolution)
     sol.name === :fringe || throw(ArgumentError("the solution is not a fringe solution; it holds $(repr(sol.name))"))
@@ -40,7 +40,7 @@ end
     fringe_detections(sol::CalibrationSolution) -> DimStack
 
 Every (baseline, product) cell the fringe search measured, over
-`(Scan, AntennaPair, FeedPair)` — scan name, `(station, station)` and
+`(Scan, AntennaPair, FeedPair)` — scan name, `(antenna, antenna)` and
 `(feed, feed)`. Layers: `snr`, `pfa` (family-wise, [`fringe_pfa`](@ref)),
 `delay` (s), `rate` (Hz), `phase` (rad), and `detected`, whether the search
 accepted the cell as a fringe (`pfa ≤ Stationization.pfa_max`). A cell a scan
@@ -58,7 +58,7 @@ function fringe_detections(sol::CalibrationSolution)
     info = _fringe_info(sol)
     pairs = unique(tuple.(String.(info.det_ant_a), String.(info.det_ant_b)))
     feeds = sort!(unique(tuple.(Int.(info.det_feed_a), Int.(info.det_feed_b))))
-    d = (_scan_dim(info.scan_names), _station_pair_dim(pairs), FeedPair(feeds))
+    d = (_scan_dim(info.scan_names), _antenna_pair_dim(pairs), FeedPair(feeds))
     n = map(length, d)
     stack = DimStack(
         (;
@@ -85,7 +85,7 @@ function fringe_detections(sol::CalibrationSolution)
 end
 
 """
-    fringe_station_solutions(sol::CalibrationSolution) -> DimStack
+    fringe_antenna_solutions(sol::CalibrationSolution) -> DimStack
 
 The fringe step's per-scan station delay and rate, decoded
 from its solved parameters (no data is read), over
@@ -102,25 +102,25 @@ gauge-invariant.
 
 The parameters are dense: a (scan, station, feed) the solve never constrained
 reads back as 0, indistinguishable from a solved zero. Mask it with
-[`fringe_station_flags`](@ref).
+[`fringe_antenna_flags`](@ref).
 """
-function fringe_station_solutions(sol::CalibrationSolution)
+function fringe_antenna_solutions(sol::CalibrationSolution)
     _fringe_info(sol)
     groups = Calibration._applied(sol).groups
     length(groups) == 1 || error(
-        "fringe_station_solutions: the fringe components differ across stations; decode each " *
-            "station set's components from their `params` instead"
+        "fringe_antenna_solutions: the fringe components differ across antennas; decode each " *
+            "antenna set's components from their `params` instead"
     )
     (; model, layout, θ) = only(groups)
     nant = layout.nant
     comps = fringe_stage_components(model, layout)   # (plan, kind ∈ :delay/:rate)
     refplan = _perscan_delay_plan(model, layout)
     refplan === nothing &&
-        error("fringe_station_solutions: model has no per-scan (feed-common) delay component")
+        error("fringe_antenna_solutions: model has no per-scan (feed-common) delay component")
     nscan = refplan.shape.Ti                                # PerScan ⇒ ntseg == #scan groups
     names = sol.geom.scan_names
     length(names) == nscan || error(
-        "fringe_station_solutions: the solution's geometry names $(length(names)) scans for " *
+        "fringe_antenna_solutions: the solution's geometry names $(length(names)) scans for " *
             "$nscan scan segments"
     )
     # First time index landing in each scan segment — used to look up every plan's
@@ -132,7 +132,7 @@ function fringe_station_solutions(sol::CalibrationSolution)
         (1 <= k <= nscan && t0[k] == 0) && (t0[k] = ti)
     end
     scans = findall(!=(0), t0)
-    d = (_scan_dim(names[scans]), _station_dim(sol.geom.stations), Feed(1:sol.geom.nfeed))
+    d = (_scan_dim(names[scans]), _antenna_dim(sol.geom.antennas), Feed(1:sol.geom.nfeed))
     n = map(length, d)
     delay, rate = fill(NaN, n), fill(NaN, n)
     for (s, k) in enumerate(scans), a in 1:nant, f in 1:sol.geom.nfeed
@@ -149,7 +149,7 @@ function fringe_station_solutions(sol::CalibrationSolution)
 end
 
 """
-    fringe_station_flags(sol::CalibrationSolution) -> DimArray{Bool}
+    fringe_antenna_flags(sol::CalibrationSolution) -> DimArray{Bool}
 
 Over `(Scan, AntennaName, Feed)`: `true` where the fringe step left the
 station's feed unconstrained in the scan — no accepted detection (`pfa ≤
@@ -159,9 +159,9 @@ a row constrains the fit without fixing a fringe location. `calibrate` flags
 every product with a flagged (station, feed) on either side in that scan
 (`apply_flags = true`).
 """
-function fringe_station_flags(sol::CalibrationSolution)
+function fringe_antenna_flags(sol::CalibrationSolution)
     info = _fringe_info(sol)
-    d = (_scan_dim(info.scan_names), _station_dim(sol.geom.stations), Feed(1:sol.geom.nfeed))
+    d = (_scan_dim(info.scan_names), _antenna_dim(sol.geom.antennas), Feed(1:sol.geom.nfeed))
     flags = fill(false, d)
     for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
         flags[
@@ -258,11 +258,11 @@ function baseline_spectra(avg::XRadio.ProcessingSet)
     isempty(avg) && throw(ArgumentError("the processing set holds no Measurement Sets"))
     members = collect(values(avg))
     geom = DataGeometry(avg)
-    pairs = [p for p in _station_pairs(reduce(vcat, map(_member_station_pairs, members)), geom) if p[1] != p[2]]
+    pairs = [p for p in _canonical_antenna_pairs(reduce(vcat, map(_member_antenna_pairs, members)), geom) if p[1] != p[2]]
     feeds = sort!(unique!(reduce(vcat, (vec(feed_pairs(ms)) for ms in members))))
     scans = unique(reduce(vcat, (String.(collect(ms[:scan_name])) for ms in members)))
     freqs = sort!(unique!(reduce(vcat, (collect(XRadio.frequencies(ms)) for ms in members))))
-    d = (_scan_dim(scans), _station_pair_dim(pairs), FeedPair(feeds), Frequency(freqs))
+    d = (_scan_dim(scans), _antenna_pair_dim(pairs), FeedPair(feeds), Frequency(freqs))
     n = map(length, d)
     V = mapreduce(ms -> eltype(ms[:visibility]), promote_type, members)
     W = mapreduce(ms -> eltype(ms[:weight]), promote_type, members)
@@ -280,18 +280,18 @@ function baseline_spectra(avg::XRadio.ProcessingSet)
 end
 
 function _place_spectra!(vis, weight, seen, (scan_i, pair_i, feed_i, freq_i), V, W, F, ms)
-    stations = _member_station_pairs(ms)
+    antennas = _member_antenna_pairs(ms)
     feeds = feed_pairs(ms)
     scans = String.(collect(ms[:scan_name]))
     freqs = collect(lookup(V, Frequency))
     for ti in axes(V, Ti), bi in axes(V, BaselineID), p in axes(V, Polarization)
-        haskey(pair_i, stations[bi]) || continue                # autocorrelations
-        s, j, q = scan_i[scans[ti]], pair_i[stations[bi]], feed_i[feeds[p, bi]]
+        haskey(pair_i, antennas[bi]) || continue                # autocorrelations
+        s, j, q = scan_i[scans[ti]], pair_i[antennas[bi]], feed_i[feeds[p, bi]]
         for c in axes(V, Frequency)
             k = freq_i[freqs[c]]
             seen[s, j, q, k] && throw(
                 ArgumentError(
-                    "the set holds more than one sample of scan $(scans[ti]) on $(stations[bi]); " *
+                    "the set holds more than one sample of scan $(scans[ti]) on $(antennas[bi]); " *
                         "average over time first: `average(ps, ByScan())`"
                 )
             )
@@ -406,10 +406,10 @@ nonzero closure.
 function delay_closure(spectra::AbstractDimStack)
     delay = baseline_delays(spectra)
     pairs = collect(lookup(delay, AntennaPair))
-    stations = unique(Iterators.flatten(pairs))
+    antennas = unique(Iterators.flatten(pairs))
     index = Dict(p => i for (i, p) in enumerate(pairs))
     triangles = [
-        (a, b, c) for (i, a) in enumerate(stations) for (j, b) in enumerate(stations) for (k, c) in enumerate(stations)
+        (a, b, c) for (i, a) in enumerate(antennas) for (j, b) in enumerate(antennas) for (k, c) in enumerate(antennas)
             if i < j < k && all(e -> haskey(index, e) || haskey(index, reverse(e)), ((a, b), (b, c), (c, a)))
     ]
     parallel = [f for f in lookup(delay, FeedPair) if f[1] == f[2]]
@@ -471,7 +471,7 @@ function fringe_search_map(
     t0 = sum(gc.times) / length(gc.times)
     m = _fringe_map(V, W, F, gc.freqs, gc.times, sol.geom.f0, t0, opts, ws, _family_cells(gc, opts))
     refdims = (
-        _scan_dim([scan]), _station_pair_dim([gc.antenna_pairs[j]]),
+        _scan_dim([scan]), _antenna_pair_dim([gc.antenna_pairs[j]]),
         FeedPair(DimensionalData.Lookups.Categorical([gc.feeds[q]]; order = DimensionalData.Lookups.Unordered())),
     )
     return FringeSearchMap(DimensionalData.rebuild(m.snr; refdims), m.detection, m.ncells, m.pfa)

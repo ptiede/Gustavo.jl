@@ -17,17 +17,17 @@ visibilities are taken to be normalized already, or to need no normalization.
 """
 function normalize_by_autocorrelations!(ms::XRadio.MeasurementSet)
     feeds = feed_pairs(ms)
-    stations = _antenna_pairs(ms)
+    antennas = _antenna_pairs(ms)
     autos = Dict(
         (a, first(feeds[p, bi])) => (Polarization(p), BaselineID(bi))
-            for (bi, (a, b)) in pairs(stations) if a == b
+            for (bi, (a, b)) in pairs(antennas) if a == b
             for p in axes(feeds, 1) if allequal(feeds[p, bi])
     )
     isempty(autos) && return ms
     vis = ms[:visibility]
     weight = ms[:weight]
     flag = ms[:flag]
-    for (bi, (a, b)) in pairs(stations)
+    for (bi, (a, b)) in pairs(antennas)
         a == b && continue
         for p in axes(feeds, 1)
             fa, fb = feeds[p, bi]
@@ -37,7 +37,7 @@ function normalize_by_autocorrelations!(ms::XRadio.MeasurementSet)
             )
         end
     end
-    for (bi, (a, b)) in pairs(stations)
+    for (bi, (a, b)) in pairs(antennas)
         a == b && (view(flag, BaselineID(bi)) .= true)
     end
     return ms

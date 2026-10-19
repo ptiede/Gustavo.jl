@@ -140,7 +140,7 @@ _plan_node(tree, path) = foldl((node, k) -> node[k], path; init = tree)
 _is_shape_node(plan::ComponentPlan) = plan.fseg isa ChannelBlocks
 _is_shape_node(g::Calibration.GroupedComponentPlan) = _is_shape_node(first(values(g.groups)))
 
-# The station blocks `(; stations, θ, plan)` of an observable's (`:phase` or
+# The station blocks `(; antennas, θ, plan)` of an observable's (`:phase` or
 # `:logamp`) shape or level component, empty when the model has none. The paths
 # are resolved by name: `layout.plans` holds one entry per station-signature
 # group, so its positions do not name the components once a model differs
@@ -149,31 +149,31 @@ _bandpass_blocks(setup, θ, group::Symbol) = _path_blocks(setup, θ, setup.paths
 _bandpass_level_blocks(setup, θ, group::Symbol) = _path_blocks(setup, θ, setup.paths[group].level)
 
 _path_blocks(setup, θ, ::Nothing) = NamedTuple[]
-_path_blocks(setup, θ, path) = station_blocks(setup.layout, θ, path...)
+_path_blocks(setup, θ, path) = antenna_blocks(setup.layout, θ, path...)
 
 """
-    accumulate_bandpass(group::XRadio.ProcessingSet, geom::DataGeometry, station_pairs, feeds;
+    accumulate_bandpass(group::XRadio.ProcessingSet, geom::DataGeometry, antenna_pairs, feeds;
                         executor = SerialScheduler()) -> (rl, wl)
 
 One scan group's inverse-variance sums over time per (station pair, feed pair,
-channel), `rl = Σ w·v` and `wl = Σ w`, on data already gain-corrected. Both are `DimArray`s over `AntennaPair(station_pairs)`,
+channel), `rl = Σ w·v` and `wl = Σ w`, on data already gain-corrected. Both are `DimArray`s over `AntennaPair(antenna_pairs)`,
 `FeedPair(feeds)` and `Frequency(geom.channel_freqs)` — labels shared by every
 group of a solve, so the sums of different scans line up — in the element types
 of the data. Autocorrelations never contribute; a cross pair or feed pair of the
 group that the labels do not hold is an error.
 """
 function accumulate_bandpass(
-        group::XRadio.ProcessingSet, geom::DataGeometry, station_pairs, feeds;
+        group::XRadio.ProcessingSet, geom::DataGeometry, antenna_pairs, feeds;
         executor = SerialScheduler(),
     )
     isempty(group) && throw(ArgumentError("the scan group holds no Measurement Sets"))
     parts = tmap(ms -> _member_bandpass_sums(ms, geom), _members_by_frequency(group); scheduler = executor)
-    ax = (_station_pair_dim(station_pairs), FeedPair(feeds), Frequency(geom.channel_freqs))
+    ax = (_antenna_pair_dim(antenna_pairs), FeedPair(feeds), Frequency(geom.channel_freqs))
     rl = zeros(mapreduce(p -> eltype(p.wv), promote_type, parts), ax)
     wl = zeros(mapreduce(p -> eltype(p.ws), promote_type, parts), ax)
     for p in parts
         chans = Frequency(At(geom.channel_freqs[p.chan]))
-        _add_by_label!(rl, wl, p.wv, p.ws, p.stations, p.feeds, chans; autos = false)
+        _add_by_label!(rl, wl, p.wv, p.ws, p.antennas, p.feeds, chans; autos = false)
     end
     return rl, wl
 end
@@ -181,7 +181,7 @@ end
 function _member_bandpass_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
     wv, ws = weighted_sums(_member_layers(ms)...; dims = Ti)
     chan = Calibration._channel_indices(geom, XRadio.frequencies(ms))
-    return (; wv, ws, stations = _member_station_pairs(ms), feeds = feed_pairs(ms), chan)
+    return (; wv, ws, antennas = _member_antenna_pairs(ms), feeds = feed_pairs(ms), chan)
 end
 
 # Write one station's feed-`f` levels, each through `gauge`, and return them;
@@ -287,7 +287,7 @@ _segment_levels(level, seg) = [level[p] for p in seg.piece_of]
 function _block_status_array(block, geom::DataGeometry)
     (; plan) = block
     ax = (
-        _station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed),
+        _antenna_dim(geom.antennas[block.antennas]), Feed(1:geom.nfeed),
         Frequency(_segment_lookup(geom.channel_freqs, _shape_segments(plan, geom).piece_chans)),
         Ti(_time_segment_lookup(plan, geom)),
     )
@@ -303,7 +303,7 @@ _block_slip_array(block, geom::DataGeometry) = fill(NaN, dims(_block_status_arra
 # its station's own prior.
 function _block_prior_array(block, geom::DataGeometry)
     (; plan) = block
-    ax = (_station_dim(geom.stations[block.stations]), Feed(1:geom.nfeed), Ti(_time_segment_lookup(plan, geom)))
+    ax = (_antenna_dim(geom.antennas[block.antennas]), Feed(1:geom.nfeed), Ti(_time_segment_lookup(plan, geom)))
     arr = DimArray(Array{Union{Nothing, AbstractPrior}}(undef, map(length, ax)), ax)
     for a in axes(arr, 1)
         arr[a, :, :] .= Ref(_prior_along(plan.priors[a], :Frequency))
@@ -378,7 +378,7 @@ function _warn_degenerate_bandpass(report, warn_fraction)
     frac = degenerate / total
     frac > warn_fraction || return nothing
     @warn """
-    Bandpass: $(round(100 * frac; digits = 1))% of (station, feed, frequency segment) pieces \
+    Bandpass: $(round(100 * frac; digits = 1))% of (antenna, feed, frequency segment) pieces \
     carry no measured frequency shape — $(report.n_flat) fit flat, $(report.n_nodata) \
     with no usable data (of $total). They are unit gain or a constant in the solution, not a measured \
     response. Check per-segment SNR and the detection coverage of the bandpass scans.
@@ -403,7 +403,7 @@ function _warn_uncertain_branches(report, max_slip_probability)
 end
 
 """
-    _station_time_segments(blocks, results, nant) -> Matrix{Int}
+    _antenna_time_segments(blocks, results, nant) -> Matrix{Int}
 
 Each station's own time segment for each scan: `tseg[ant, i]` is the segment
 `results[i]` falls in under the segmentation `blocks` gives that station, and `0`
@@ -414,9 +414,9 @@ smoothers accept, so its first sample (`res.ti`) names the segment.
 A station-uniform model has one block spanning every station, so every row is the
 same.
 """
-function _station_time_segments(blocks, results, nant)
+function _antenna_time_segments(blocks, results, nant)
     tseg = zeros(Int, Base.OneTo(nant), axes(results, 1))
-    for b in blocks, a in b.stations
+    for b in blocks, a in b.antennas
         for (i, res) in pairs(results)
             tseg[a, i] = b.plan.tseg_id[res.ti]
         end
@@ -534,14 +534,14 @@ function validate_model(::JointSmoother, model)
     ph.Frequency == la.Frequency || throw(
         ArgumentError(
             "JointSmoother requires the phase and logamp shapes to share one frequency " *
-                "segmentation — it solves one COMPLEX gain per (station, feed, segment). Got " *
+                "segmentation — it solves one COMPLEX gain per (antenna, feed, segment). Got " *
                 "$(repr(ph.Frequency)) (phase) vs $(repr(la.Frequency)) (logamp).",
         ),
     )
     ph.Ti == la.Ti || throw(
         ArgumentError(
             "JointSmoother requires the phase and logamp components to share one time " *
-                "segmentation — one complex gain per (station, feed, segment) is solved over " *
+                "segmentation — one complex gain per (antenna, feed, segment) is solved over " *
                 "one stretch of time, not two. Got $(repr(ph.Ti)) (phase) vs " *
                 "$(repr(la.Ti)) (logamp).",
         ),
@@ -565,7 +565,7 @@ function _solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::Abstract
     # One complex gain per (station, feed, segment) means one time segmentation
     # for both observables — `validate_model` holds each station's two plans to
     # it — so either side's table is the whole solve's.
-    tseg = _station_time_segments(_gain_blocks(phase_blocks, amp_blocks), results, length(geom.stations))
+    tseg = _antenna_time_segments(_gain_blocks(phase_blocks, amp_blocks), results, length(geom.antennas))
     arrays(f, blocks) = isempty(blocks) ? nothing : [f(b, geom) for b in blocks]
     phase_status = arrays(_block_status_array, phase_blocks)
     amp_status = arrays(_block_status_array, amp_blocks)
