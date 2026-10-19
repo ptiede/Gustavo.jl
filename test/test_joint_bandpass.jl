@@ -251,12 +251,35 @@ end
 # channel, time segment))` positions; empty for a gauge imposed as constraints.
 function _joint_pins(geom, blocks, results, tseg, gauge)
     nant = length(geom.stations)
-    fseg, _ = FP._station_freq_segments(blocks, nant)
-    data = (; ends = FP._cell_nodes(first(results).rl, geom.stations, PerFeed()))
+    fseg, cells = FP._station_freq_segments(blocks, nant)
+    r, w = FP._reduce_all_scans(results, cells)
+    data = (; w, ends = FP._cell_nodes(r, geom.stations, PerFeed()))
     layout = (; loc = FP._block_locations(blocks, nant), tseg, fseg)
     gains = [FP._block_gains(b, geom, ComplexF64) for b in blocks]
     FP._joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     return Set((k, Tuple(I)) for (k, st) in pairs(gains) for I in findall(parent(st.pinned)))
+end
+
+@testset "JointSmoother: a reference-free pin anchors the best-measured station" begin
+    nant, nchan = 4, 6
+    geom = _seg_geometry(nchan)
+    model = CAL.GainModel(;
+        phase = (; bandpass = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(nchan), Feed = PerFeed())),
+    )
+    l = CAL.plan_parameters(model, geom.stations, geom)
+    st = (; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase)))
+    blocks = FP._bandpass_blocks(st, zeros(l.nθ), :phase)
+    # A1 has the most correlations, but A2's are weighted far above the rest.
+    bl_pairs = [(1, 2), (1, 3), (1, 4), (2, 3)]
+    feeds = [(1, 1), (2, 2)]
+    g = ones(ComplexF64, nant, 2, 1, nchan)
+    S = ones(ComplexF64, 4, length(bl_pairs), length(feeds))
+    results = _joint_scan_accumulators(g, S, fill(1, nant, 4), bl_pairs, feeds, geom)
+    for res in results, bi in (1, 4)
+        res.wl[bi, :, :] .= 100
+    end
+    @test _joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(Int[])) ==
+        Set([(1, (2, 1, 1, 1)), (1, (2, 2, 1, 1))])
 end
 
 @testset "JointSmoother: each station's own time segments in one ALS" begin

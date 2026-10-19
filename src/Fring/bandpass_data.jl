@@ -124,9 +124,8 @@ end
 # (station, feed, that station's own frequency segment, its own time segment) —
 # one edge per (scan, station pair, feed pair, refinement cell) correlation,
 # joining its two ends in the segments they are in for that scan and that cell.
-# Node degree stands in for the row weight the gauge scores elsewhere; the graph
-# is built from the correlations that exist, so a node's degree is the
-# observation count available to anchor it.
+# `nodew[n]` sums the data weights of the correlations touching node `n`, the
+# score the gauge falls back to when choosing an anchor.
 #
 # The node set is the gauge condition. An edge names the two gain slots one
 # correlation reads, and a shared phase cancels out of `g_a·S·conj(g_b)` only
@@ -138,11 +137,11 @@ end
 # `ids` numbers the slots (`_gain_slot_ids`); `compid[n]` is `0` for a slot no
 # correlation touches.
 function _joint_bandpass_graph(data, layout, ids)
-    (; ends) = data
+    (; w, ends) = data
     (; loc, tseg, fseg) = layout
     nslots = sum(length, ids; init = 0)
     edges = Tuple{Int, Int}[]
-    deg = zeros(Int, nslots)
+    nodew = zeros(Base.eltype(w), nslots)
     for si in axes(tseg, 2), p in axes(ends, FeedPair), bi in axes(ends, AntennaPair)
         _solvable(ends[bi, p]) || continue
         (a, fa), (b, fb) = ends[bi, p]
@@ -155,12 +154,12 @@ function _joint_bandpass_graph(data, layout, ids)
             na = ids[ka][ia, fa, fseg[a, cell], ta]
             nb = ids[kb][ib, fb, fseg[b, cell], tb]
             push!(edges, (na, nb))
-            deg[na] += 1
-            deg[nb] += 1
+            nodew[na] += w[si, bi, p, cell]
+            nodew[nb] += w[si, bi, p, cell]
         end
     end
     compid, ncomp, _ = connected_components(nslots, edges)
-    return compid, ncomp, deg
+    return compid, ncomp, nodew
 end
 
 """
@@ -213,7 +212,7 @@ station through the inconsistency.
 function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     T = real(eltype(first(gains).g))
     ids = _gain_slot_ids(gains)
-    compid, ncomp, deg = _joint_bandpass_graph(data, layout, ids)
+    compid, ncomp, nodew = _joint_bandpass_graph(data, layout, ids)
     slot = [(k, I) for (k, idk) in pairs(ids) for I in CartesianIndices(idk)]
     freedoms = map(1:ncomp) do c
         cn = findall(==(c), compid)
@@ -221,7 +220,7 @@ function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
             nodes = cn, station = [blocks[slot[n][1]].stations[slot[n][2][1]] for n in cn],
             feed = [slot[n][2][2] for n in cn], scan = zeros(Int, length(cn)),
             component = [blocks[slot[n][1]].plan.path for n in cn], observable = fill(:phase, length(cn)),
-            direction = ones(T, length(cn)), weight = deg[cn],
+            direction = ones(T, length(cn)), weight = nodew[cn],
         )
     end
     C, d = _gauge_system(gauge, GaugeFreedoms{T}(freedoms, length(compid)))
