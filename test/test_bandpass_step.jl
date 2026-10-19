@@ -426,6 +426,40 @@ function _fit_one_track(y, w, x, pieces, prior; level = nothing, nlevel = 0, pha
     return (; values, status, prior = only(priors), levels = any(t.active) ? only(levels) : Dict{Int, Float64}(), slip)
 end
 
+@testset "Bandpass: a branch choice that raises the prior energy is undone" begin
+    nband, nchan = 2, 64
+    n = nband * nchan
+    pieces = [((b - 1) * nchan + 1):(b * nchan) for b in 1:nband]
+    x = collect(range(8.6e10, 8.6e10 + 6.4e7; length = n))
+    prior = CAL.RandomWalkPrior(; order = 2, σ = sqrt(3 / (2 * (x[2] - x[1])^3)))
+    known = trues(n)
+    fits = [(; phase = (; x, pieces, prior, level = nothing, nlevel = 0))]
+    t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:n, 1, 1, n, 1)], [(1, 1)], [[1]], 1, known))
+    tl = FP._track_layout(t)
+    energy(φ) = first(FP._track_energy(tl, prior, φ))
+    rng = MersenneTwister(3)
+
+    # Low SNR: the most probable branches of the noisy estimates put kinks in a
+    # smooth track.
+    smooth = cumsum(cumsum(0.7 .* randn(rng, n))) ./ 10
+    w = ones(n)
+    y = smooth .+ rem2pi.(randn(rng, n), RoundNearest)
+    raw = copy(smooth)
+    @test any(!iszero, FP._choose_branches!(raw, t, prior, y, w, known))
+    @test energy(raw) > energy(smooth)
+    φ = copy(smooth)
+    @test all(iszero, FP._choose_descending_branches!(φ, tl, t, prior, y, w, known))
+    @test φ == smooth
+
+    # High SNR: unwrapping a steep track lowers its energy and is kept.
+    steep = 0.5 .* (1:n) .+ 0.01 .* randn(rng, n)
+    wrapped = rem2pi.(steep, RoundNearest)
+    φ = copy(wrapped)
+    shift = FP._choose_descending_branches!(φ, tl, t, prior, wrapped, fill(1.0e4, n), known)
+    @test any(!iszero, shift)
+    @test energy(φ) < energy(wrapped)
+end
+
 @testset "Bandpass: per-piece outcome codes" begin
     nband, nchan = 4, 32
     pieces = [((b - 1) * nchan + 1):(b * nchan) for b in 1:nband]
