@@ -568,7 +568,7 @@ function _inverse_curvature(C)
 end
 
 """
-    _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterations) -> Bool
+    _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterations) -> (; converged, steps)
 
 Type-II MAP of the hyperparameters `tracks`' priors give as densities, written
 into `priors` (each track's resolved prior, the current values on entry): the
@@ -586,14 +586,15 @@ need only the covariances `_selected_inverse` gives.
 
 The search is quasi-Newton with one secant (BFGS) block per track, started from
 the curvature of that expected log density and kept in `curvature` from call to
-call, each step backtracked until the log posterior is no lower. It stops once
+call, each track's step shortened to change no hyperparameter by more than a
+factor of 10 and backtracked until the log posterior is no lower. It stops once
 the Newton step is within `tolerance` of its standard error, `gᵀH⁻¹g ≤
 tolerance²`, by every track's curvature measured along a step of its own, and
-returns whether it did within `max_iterations` steps.
+returns whether it did within `max_iterations` steps and how many steps it took.
 """
 function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterations)
     est = [i for i in eachindex(tracks) if _hyper_count(tracks[i].prior) > 0]
-    isempty(est) && return true
+    isempty(est) && return (; converged = true, steps = 0)
     specs = [tracks[i].prior for i in est]
     θ = [_log_hypers(tracks[i].prior, priors[i]) for i in est]
     # Each evaluation factors into one of two factorizations, the accepted point's
@@ -635,14 +636,16 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
             (curvature[i] = (; inverse = _inverse_curvature(-_hyper_hessian(fs[k], θ[k], specs[k])), measured = false))
     end
     g = map(_hyper_gradient, fs, θ, specs)
-    converged = false
+    converged, steps = false, 0
     for _ in 1:max_iterations
         Hinv = [curvature[i].inverse for i in est]
         if sum(dot.(g, Hinv .* g)) <= tolerance^2 && all(i -> curvature[i].measured, est)
             converged = true
             break
         end
-        d = Hinv .* g
+        # At most a factor of 10 per step: the curvature carried over from the last
+        # call may not fit this linearization, and a no-worse step can overshoot far.
+        d = map(v -> v .* min(1, log(10) / maximum(abs, v)), Hinv .* g)
         α = 1.0
         next = nothing
         while true
@@ -656,6 +659,7 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
         # No step changes the hyperparameters: they are at the maximum to rounding.
         isnothing(next) && (converged = true; break)
         θ1, at = next
+        steps += 1
         cur = 3 - cur
         fs = expected(at)
         g1 = map(_hyper_gradient, fs, θ1, specs)
@@ -669,7 +673,7 @@ function _fit_hypers!(priors, curvature, sys, tracks, λ; tolerance, max_iterati
         θ, g = θ1, g1
     end
     priors[est] .= at.trial[est]
-    return converged
+    return (; converged, steps)
 end
 
 # Each slot's own estimate of one observable given every other gain and `S`, from

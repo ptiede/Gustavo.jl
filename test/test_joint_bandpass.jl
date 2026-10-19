@@ -791,7 +791,7 @@ end
         end
     end
 
-    @testset "hyperparameters are resolved every iteration and recorded" begin
+    @testset "hyperparameters are resolved and recorded" begin
         ou = CAL.OUPrior(; scale = LogNormal(log(2.0e6), 1.0), σ = LogNormal(log(0.2), 1.0))
         l = CAL.plan_parameters(
             CAL.GainModel(;

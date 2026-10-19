@@ -189,7 +189,9 @@ profiled over that constant as well. Each iteration:
    slot's own estimate given all the other gains and `S` (`_choose_branches!`);
 3. fits the hyperparameters given as densities, all tracks together, by type-II
    MAP on the marginal likelihood of the linearized posterior (`_fit_hypers!`),
-   as closely as the last step moved the gains;
+   as closely as the last step moved the gains; an observable whose last fit
+   took no step is not refit until its gains have moved by that fit's
+   tolerance, and is refit before the solve can stop as converged;
 4. takes one Levenberg–Marquardt step of the posterior, solved exactly as one
    sparse system over the slots, the priors' latent states and levels, with the
    gauge solved for one slot per constraint (`_map_step`), and accepts it once
@@ -339,7 +341,11 @@ function solve_joint_bandpass!(
     Hφ, hpos = _curvature_pattern(jl.slot_pairs, nslots)
     Hℓ = copy(Hφ)
     change, worst, stalled, converged, hypers_fit = Inf, 0, false, false, true
-    μ, ν, near = 1.0e-3, 2.0, false
+    μ, ν, near, verify = 1.0e-3, 2.0, false, false
+    hypers_converged = Dict(:phase => true, :amp => true)
+    # Per observable, the gains and tolerance of its last hyperparameter fit,
+    # kept while that fit took no step.
+    settled = Dict{Symbol, @NamedTuple{x::Vector{Float64}, tolerance::Float64}}()
     for iteration in 1:max_iterations
         lin = _linearize(gains_of(ℓ, φ), S, data, jl, nslots)
         if fitted.phase
@@ -347,6 +353,7 @@ function solve_joint_bandpass!(
             for (j, i) in pairs(acting.phase)
                 shift = _choose_branches!(φ, tracks.phase[i], priors.phase[j], y, wy, free.phase; slip = slips[i])
                 isnothing(gauge_rows) || _shift_gauge!(gauge_rows, shift)
+                any(!iszero, shift) && delete!(settled, :phase)
             end
         end
         # Levenberg–Marquardt: each observable's step is damped by `μ` times the
@@ -372,15 +379,29 @@ function solve_joint_bandpass!(
         end
         # The hyperparameters' optimum moves with the linearization, so they are
         # fit only as closely as the gains last moved, and to `tolerance` once the
-        # gains have converged.
+        # gains have converged. A fit that took no step is not repeated until the
+        # gains have moved by its tolerance since, or a stop needs it verified.
         hyper_tolerance = max(tolerance, change)
-        hypers_fit = all((:phase, :amp)) do obs
-            fitted[obs] || return true
-            return _fit_hypers!(
+        hypers_fit = true
+        for obs in (:phase, :amp)
+            fitted[obs] || continue
+            xo = current[obs]
+            previous = get(settled, obs, nothing)
+            if !(near || verify) && !isnothing(previous)
+                Δx = xo .- previous.x
+                drift, _ = obs === :phase ? _largest_weighted_change(zero(Δx), Δx, lin.W) : _largest_weighted_change(Δx, zero(Δx), lin.W)
+                drift < previous.tolerance && (hypers_fit = false; continue)
+            end
+            hyperfit = _fit_hypers!(
                 priors[obs], view(curvature[obs], acting[obs]), systems[obs], tracks[obs][acting[obs]], eps() * scale[obs];
                 tolerance = hyper_tolerance, max_iterations,
             )
+            hypers_converged[obs] = hyperfit.converged
+            estimating = any(i -> _hyper_count(tracks[obs][i].prior) > 0, acting[obs])
+            estimating && iszero(hyperfit.steps) ? (settled[obs] = (; x = copy(xo), tolerance = hyper_tolerance)) : delete!(settled, obs)
         end
+        hypers_fit &= all(values(hypers_converged))
+        verify = false
         function propose(μ)
             steps = map((:phase, :amp)) do obs
                 fitted[obs] || return current[obs], 0.0
@@ -428,7 +449,10 @@ function solve_joint_bandpass!(
         end
         # A plateau: the step lowered the posterior by less than a step of
         # `tolerance` standard errors would (`tolerance²/2`).
-        decrease < tolerance^2 / 2 && hypers_fit && (converged = true; break)
+        if decrease < tolerance^2 / 2
+            hypers_fit && (converged = true; break)
+            verify = true
+        end
         near = change < tolerance
     end
     free_amp = fitted.amp ? _split_free_amplitudes!(ℓ, jl.slot_pairs[measured], free.amp, tracks.amp) : NamedTuple[]
@@ -463,8 +487,8 @@ function solve_joint_bandpass!(
             "their phase is held more than π/2 from their data, by a phase prior or the gauge, so the " *
             "amplitude that fits them best is zero. Give the amplitude a prior."
     end
-    hypers_fit || @warn "the joint bandpass hyperparameter fit did not converge in $max_iterations " *
-        "steps at the last iteration; raise `JointSmoother(; max_iterations)`"
+    all(values(hypers_converged)) || @warn "the joint bandpass hyperparameter fit did not converge in $max_iterations " *
+        "steps at its last fit; raise `JointSmoother(; max_iterations)`"
     stalled || converged || @warn "the joint bandpass solve did not converge in " *
         "$max_iterations iterations: the last step moved a gain by $change of its standard error$location, " *
         "against a tolerance of $tolerance; raise `JointSmoother(; max_iterations)`"
