@@ -2,10 +2,12 @@
     load_uvfits(path; element_type = nothing) -> XRadio.ProcessingSet
 
 Load an AIPS random-groups UVFITS file as an `XRadio.ProcessingSet` holding one
-Measurement Set per (NX scan, FQ row, subarray), keyed
+Measurement Set per (scan, FQ row, subarray), keyed
 `:<source>_spw_<n>[_sub_<n>]_scan_<n>` (e.g. `:src_3C273_spw_0_scan_1`); the
 `sub_<n>` segment appears only when the file carries more than one AN table, and
-each subarray's Measurement Set takes its antennas from its own.
+each subarray's Measurement Set takes its antennas from its own. The scans are
+the rows of the NX table; a file without one is split into scans where more
+than 60 s pass between consecutive record times, as `XRadio.fitsidi2msv4` does.
 
 Each Measurement Set conforms to [`GUSTAVO_VISIBILITY_SCHEMA`](@ref): dense
 `(polarization, frequency, baseline_id, time)` visibility, flag and weight

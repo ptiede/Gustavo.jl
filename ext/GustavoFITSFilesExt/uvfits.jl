@@ -353,6 +353,16 @@ function _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
     return rows
 end
 
+const _SCAN_GAP_SECONDS = 60.0
+
+# Each record's scan, numbered from 1 in time order, a new scan starting where
+# more than `gap` seconds pass between consecutive record times.
+function _scans_at_gaps(obs_time, gap)
+    times = sort(unique(obs_time))
+    scan = cumsum([1; diff(times) .> gap])
+    return [scan[searchsortedfirst(times, t)] for t in obs_time]
+end
+
 function _assign_records_to_nx_rows(
         obs_time, nx_lower, nx_upper;
         nx_start_vis = nothing, nx_end_vis = nothing,
@@ -468,7 +478,6 @@ function _read_uvfits(path, element_type)
     end
     isempty(an_hdus) && error("load_uvfits: no AIPS AN HDU found in $(path)")
     isnothing(fq_hdu) && error("load_uvfits: no AIPS FQ HDU found in $(path)")
-    isnothing(nx) && error("load_uvfits: no AIPS NX HDU found in $(path)")
 
     raw = _record_cube(cards, dt.data)
     T = isnothing(element_type) ? eltype(raw) : element_type
@@ -537,33 +546,40 @@ function _read_uvfits(path, element_type)
     # word for word), stated in light-seconds where MSv4 states meters.
     uvw_raw = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
-    # Materialize the NX columns up front: they come back as lazy
-    # `DiskArrays`-backed broadcasts. Each NX row defines one MSv4 partition.
-    # AIPS NX has no SCAN_NUMBER column, so the row index becomes the
-    # canonical scan label.
-    nx_time::Vector{Float64} = Float64.(collect(nx.TIME))
-    nx_dt::Vector{Float64} = Float64.(collect(nx.var"TIME INTERVAL"))
-    # NX TIME / TIME INTERVAL are days-since-RDATE; shift onto `obs_time`'s
-    # absolute seconds.
-    nx_rdate_unix = jd_to_unix(rdate_jd)
-    nx_lower::Vector{Float64} = nx_rdate_unix .+ (nx_time .- nx_dt ./ 2) .* 86400.0
-    nx_upper::Vector{Float64} = nx_rdate_unix .+ (nx_time .+ nx_dt ./ 2) .* 86400.0
-    nx_freqid::Vector{Int32} = hasproperty(nx, Symbol("FREQ ID")) ?
-        round.(Int32, collect(nx.var"FREQ ID")) : ones(Int32, length(nx_time))
-    nx_subarray::Vector{Int32} = hasproperty(nx, :SUBARRAY) ?
-        round.(Int32, collect(nx.SUBARRAY)) : ones(Int32, length(nx_time))
-    nx_start_vis = hasproperty(nx, Symbol("START VIS")) ?
-        collect(getproperty(nx, Symbol("START VIS"))) : nothing
-    nx_end_vis = hasproperty(nx, Symbol("END VIS")) ?
-        collect(getproperty(nx, Symbol("END VIS"))) : nothing
+    # Without an NX table, a scan ends where more than `_SCAN_GAP_SECONDS` pass
+    # between consecutive times, as `XRadio.fitsidi2msv4` splits them.
+    record_nx_row, nx_freqid, nx_subarray = if isnothing(nx)
+        _scans_at_gaps(obs_time, _SCAN_GAP_SECONDS), Int32[], Int32[]
+    else
+        # Materialize the NX columns up front: they come back as lazy
+        # `DiskArrays`-backed broadcasts. Each NX row defines one MSv4 partition.
+        # AIPS NX has no SCAN_NUMBER column, so the row index becomes the
+        # canonical scan label.
+        nx_time::Vector{Float64} = Float64.(collect(nx.TIME))
+        nx_dt::Vector{Float64} = Float64.(collect(nx.var"TIME INTERVAL"))
+        # NX TIME / TIME INTERVAL are days-since-RDATE; shift onto `obs_time`'s
+        # absolute seconds.
+        nx_rdate_unix = jd_to_unix(rdate_jd)
+        nx_lower::Vector{Float64} = nx_rdate_unix .+ (nx_time .- nx_dt ./ 2) .* 86400.0
+        nx_upper::Vector{Float64} = nx_rdate_unix .+ (nx_time .+ nx_dt ./ 2) .* 86400.0
+        nx_freqid::Vector{Int32} = hasproperty(nx, Symbol("FREQ ID")) ?
+            round.(Int32, collect(nx.var"FREQ ID")) : ones(Int32, length(nx_time))
+        nx_subarray::Vector{Int32} = hasproperty(nx, :SUBARRAY) ?
+            round.(Int32, collect(nx.SUBARRAY)) : ones(Int32, length(nx_time))
+        nx_start_vis = hasproperty(nx, Symbol("START VIS")) ?
+            collect(getproperty(nx, Symbol("START VIS"))) : nothing
+        nx_end_vis = hasproperty(nx, Symbol("END VIS")) ?
+            collect(getproperty(nx, Symbol("END VIS"))) : nothing
 
-    # Prefer explicit NX record ranges when present: they're exact and avoid
-    # an O(nrecord * nscan) nearest-center search on large files. Fall back to
-    # time-based assignment for files that omit START/END VIS.
-    record_nx_row = _assign_records_to_nx_rows(
-        obs_time, nx_lower, nx_upper;
-        nx_start_vis = nx_start_vis, nx_end_vis = nx_end_vis,
-    )
+        # Prefer explicit NX record ranges when present: they're exact and avoid
+        # an O(nrecord * nscan) nearest-center search on large files. Fall back to
+        # time-based assignment for files that omit START/END VIS.
+        rows = _assign_records_to_nx_rows(
+            obs_time, nx_lower, nx_upper;
+            nx_start_vis = nx_start_vis, nx_end_vis = nx_end_vis,
+        )
+        rows, nx_freqid, nx_subarray
+    end
 
     # Per-record SPW index: prefer a per-record PTYPE (FREQSEL / FREQID),
     # else propagate the per-NX-row FREQ ID column, else default to 1.

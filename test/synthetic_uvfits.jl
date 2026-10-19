@@ -25,7 +25,7 @@ Write a UVFITS file holding one record per entry of `times` (Unix seconds),
 - `antennas`, `positions` (`3 × nant`, geocentric meters), `mntsta`, `staxof`,
   `poltya`, `poltyb`, `polaa`, `polab` (degrees), `diameter` (`nothing` omits
   the column): the AN table.
-- `scans`: one `(start, stop)` window in Unix seconds per NX row.
+- `scans`: one `(start, stop)` window in Unix seconds per NX row; `nothing` writes no NX table.
 - `bunit`: the `BUNIT` card, or `nothing` to omit it.
 - `object`, `ra`, `dec` (degrees), `telescope`, `instrume`, `rdate`, and the
   AN table's Earth-orientation cards `gstia0`, `degpdy`, `ut1utc`, `polarx`,
@@ -124,6 +124,7 @@ function write_synthetic_uvfits(
     )
 
     rdate_unix = (datetime2julian(DateTime(Date(rdate))) - _JD_UNIX_EPOCH) * 86400
+    isnothing(scans) && (write(path, HDU[primary, an, fq]); return path)
     nx = HDU(
         Bintable, (;
             TIME = [((lo + hi) / 2 - rdate_unix) / 86400 for (lo, hi) in scans],

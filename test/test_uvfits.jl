@@ -41,6 +41,15 @@ end
         @test isempty(XRadio.check(ps; schemas = [schema]))
     end
 
+    @testset "without an NX table, scans split at time gaps over 60 s" begin
+        nonx = load_uvfits(first(uvfits_fixture(; scans = nothing)))
+        @test collect(keys(nonx)) == collect(keys(ps))
+        for (m, n) in zip(ps, nonx)
+            @test isequal(parent(m[:visibility]), parent(n[:visibility]))
+            @test collect(m[:scan_name]) == collect(n[:scan_name])
+        end
+    end
+
     @testset "axes" begin
         ms = ps[:src_3C273_spw_0_scan_1]
         @test map(DimensionalData.name, dims(ms[:visibility])) ==
