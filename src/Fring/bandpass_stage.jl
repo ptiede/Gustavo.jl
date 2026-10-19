@@ -221,11 +221,13 @@ end
 
 The outcome of fitting one piece (one spectral window) of a bandpass track, as
 the bandpass report records it: `TrackNoData` (no usable channel; unit gain),
-`TrackSolved` (fit, with frequency structure) or `TrackFlat` (fit, but its range
-is below `JointSmoother`'s `flat_span`). θ alone cannot tell these apart: an unfitted
-piece reads back as unit gain and a flat one as a constant.
+`TrackSolved` (fit, with frequency structure), `TrackFlat` (fit, but its range
+is below `JointSmoother`'s `flat_span`) or `TrackDeclined` (its data do not
+determine its phase's 2π branches; unit gain, its correlations flagged). θ alone
+cannot tell these apart: an unfitted or declined piece reads back as unit gain
+and a flat one as a constant.
 """
-@enum TrackStatus::Int8 TrackNoData TrackSolved TrackFlat
+@enum TrackStatus::Int8 TrackNoData TrackSolved TrackFlat TrackDeclined
 
 # The outcome code for one fitted piece: nothing estimated, a constant (a range
 # below `flat_span`), or a real shape.
@@ -342,7 +344,7 @@ as the solution's components name the station blocks, each over its own
 stations and segments.
 
 Returns the arrays as `phase_status`/`amp_status`/`phase_priors`/`amp_priors`/`phase_slip`
-alongside the counts `n_solved`/`n_flat`/`n_nodata` summed over both
+alongside the counts `n_solved`/`n_flat`/`n_nodata`/`n_declined` summed over both
 observables. `flat` and `nodata` are the two ways a piece can occupy a slot
 without measuring anything, and they are what the counts exist to expose: θ
 itself records an unfitted piece as unit gain and a starved one as a constant,
@@ -363,7 +365,7 @@ function _bandpass_track_report(phase_status, amp_status; phase_priors = nothing
         phase_priors = something(phase_priors, empty_priors),
         amp_priors = something(amp_priors, empty_priors),
         phase_slip = something(phase_slip, Array{Float64, 4}(undef, 0, 0, 0, 0)),
-        n_nodata = counts[1], n_solved = counts[2], n_flat = counts[3],
+        n_nodata = counts[1], n_solved = counts[2], n_flat = counts[3], n_declined = counts[4],
     )
 end
 
@@ -372,17 +374,36 @@ end
 # measured — the caller cannot tell from θ, which is why this is a warning and not
 # only a record.
 function _warn_degenerate_bandpass(report, warn_fraction)
-    total = report.n_nodata + report.n_solved + report.n_flat
+    total = report.n_nodata + report.n_solved + report.n_flat + report.n_declined
     total > 0 || return nothing
-    degenerate = report.n_flat + report.n_nodata
+    degenerate = report.n_flat + report.n_nodata + report.n_declined
     frac = degenerate / total
     frac > warn_fraction || return nothing
     @warn """
     Bandpass: $(round(100 * frac; digits = 1))% of (antenna, feed, frequency segment) pieces \
     carry no measured frequency shape — $(report.n_flat) fit flat, $(report.n_nodata) \
-    with no usable data (of $total). They are unit gain or a constant in the solution, not a measured \
+    with no usable data, $(report.n_declined) declined (of $total). They are unit gain or a constant in the solution, not a measured \
     response. Check per-segment SNR and the detection coverage of the bandpass scans.
     """ n_solved = report.n_solved
+    return nothing
+end
+
+# Warn when pieces were declined, naming their stations: the solution holds no
+# bandpass for them.
+function _warn_declined(report, max_slip_probability)
+    report.n_declined > 0 || return nothing
+    names = sort!(unique(
+        String(n) for a in _status_arrays(report.phase_status)
+            for (n, row) in zip(lookup(a, AntennaName), eachslice(parent(a); dims = 1)) if TrackDeclined in row
+    ))
+    @warn """
+    Bandpass: declined $(report.n_declined) (antenna, feed, frequency segment) pieces of \
+    $(join(names, ", ")): their phase's posterior probability of a 2π slip exceeds \
+    max_slip_probability = $max_slip_probability, so their data do not determine the phase \
+    branch from channel to channel. They are unit gain, their correlations were left out of \
+    the solve, and `calibrate!(…; apply_flags = true)` flags them. See the report's \
+    `phase_status`.
+    """
     return nothing
 end
 
@@ -495,9 +516,14 @@ its starting point.
 A phase prior depends on each segment's 2π branch, which the data leave open, so
 every iteration chooses the branches of each phase piece as well, by a Gaussian-sum
 Kalman filter over branch histories, and fits the hyperparameters on those
-branches (see the [fitting-under-priors](@ref fitting-under-priors) page). The report's `phase_slip`
-gives each piece's posterior probability of a 2π slip, and the solve warns when
-any piece's reaches `max_slip_probability`. A fitted piece whose range is below
+branches (see the [fitting-under-priors](@ref fitting-under-priors) page). A piece whose
+posterior probability of a 2π slip at the start exceeds `max_slip_probability`
+is declined: its data do not determine its branches, so it is left at unit
+gain, its correlations are left out of the solve, and the step reports it
+`TrackDeclined` and warns, naming its stations; `calibrate!` flags its
+channels on its station's baselines under `apply_flags`. The report's
+`phase_slip` gives each piece's posterior probability of a 2π slip, and the
+solve warns when any fitted piece's reaches `max_slip_probability`. A fitted piece whose range is below
 `flat_span` (radians or nepers) is reported flat rather than as a measured shape,
 and the solve warns when more than `warn_fraction` of its pieces are flat or
 without data.
@@ -578,7 +604,7 @@ function _solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::Abstract
             phase_level_blocks = _bandpass_level_blocks(setup, θ, :phase),
             amp_level_blocks = _bandpass_level_blocks(setup, θ, :logamp),
             gauge, sm.max_iterations, sm.tolerance, sm.flat_span, sm.eltype,
-            tseg = view(tseg, :, idx),
+            sm.max_slip_probability, tseg = view(tseg, :, idx),
         )
         _record_track_fits!(phase_status, phase_priors, phase_slip, fits.phase)
         _record_track_fits!(amp_status, amp_priors, nothing, fits.amp)
@@ -589,6 +615,7 @@ function _solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::Abstract
         phase_priors = leaves(phase_priors), amp_priors = leaves(amp_priors), phase_slip = leaves(phase_slip),
     )
     _warn_degenerate_bandpass(report, sm.warn_fraction)
+    _warn_declined(report, sm.max_slip_probability)
     _warn_uncertain_branches(report, sm.max_slip_probability)
     return report
 end

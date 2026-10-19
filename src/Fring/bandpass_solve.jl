@@ -124,7 +124,8 @@ end
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
                           gauge, max_iterations = 50, tolerance = 0.01,
-                          flat_span = 0.01, eltype = nothing, tseg = nothing) -> (; phase, amp)
+                          flat_span = 0.01, eltype = nothing, tseg = nothing,
+                          max_slip_probability = Inf) -> (; phase, amp)
 
 Jointly solve the per-(station, feed, frequency segment) complex bandpass gain
 and a per-scan, per-station-pair, per-feed-pair constant source coherence (see
@@ -200,7 +201,13 @@ profiled over that constant as well. Each iteration:
    the posterior with `S` re-solved is no lower.
 
 The solve starts from every slot's own estimate given unit gains elsewhere, and
-the hyperparameters from type-II MAP on each track alone. Convergence is judged
+the hyperparameters from type-II MAP on each track alone. A phase piece whose
+posterior probability of a 2π slip there exceeds `max_slip_probability` is
+declined, with the pieces sharing its level: the data do not determine its
+branches. The solve is then repeated with the correlations of the declined
+slots flagged (`declined`), so they reach no gain, source term or gauge; both
+observables of a declined piece stay at unit gain and are reported
+`TrackDeclined`. Convergence is judged
 on the largest change the undamped step makes to any (station, feed, segment)
 gain's log, in standard errors of that gain from the data, so a gain the data
 barely constrain counts for as little as its precision. The solve stops once
@@ -231,6 +238,7 @@ function solve_joint_bandpass!(
         gauge::AbstractGauge, max_iterations::Integer = 50, tolerance::Real = 0.01,
         flat_span::Real = 0.01, eltype = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
+        max_slip_probability::Real = Inf, declined::AbstractSet{<:Integer} = Set{Int}(),
     )
     isempty(scans) && return (; phase = [], amp = [])
     nant = length(geom.antennas)
@@ -254,6 +262,14 @@ function solve_joint_bandpass!(
         present = [sort!(filter!(!iszero, unique(view(tsg, a, :)))) for a in axes(tsg, 1)],
     )
     gains = [_block_gains(b, geom, Base.eltype(r)) for b in blocks]
+    ids = _gain_slot_ids(gains)
+    jl = _joint_gain_layout(data, layout, ids)
+    # The correlations of declined slots are flagged for this solve: they reach no
+    # gain, `S` or the gauge.
+    for I in CartesianIndices(jl.edge)
+        e = jl.edge[I]
+        !iszero(e) && any(in(declined), jl.slot_pairs[e]) && (w[I] = 0)
+    end
     # The gauge fixes phases; a solve that holds every phase at zero has none to fix.
     gauge_state = isempty(phase_blocks) ? nothing : _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     gauge_rows = isnothing(gauge_state) ? nothing : (; gauge_state.rows, d = Float64.(gauge_state.d))
@@ -272,8 +288,6 @@ function solve_joint_bandpass!(
         return (; phase = track(phase_blocks, phase_level[a]), amp = track(amp_blocks, amp_level[a]))
     end
 
-    ids = _gain_slot_ids(gains)
-    jl = _joint_gain_layout(data, layout, ids)
     slot = [(k, I) for (k, idk) in pairs(ids) for I in CartesianIndices(idk)]
     nslots = length(slot)
     pinned = [gains[k].pinned[I] for (k, I) in slot]
@@ -332,6 +346,16 @@ function solve_joint_bandpass!(
         isempty(acting[obs]) && return []
         y, wy = estimates[obs]
         return [_seed_prior(tracks[obs][i], y, wy; phase = obs === :phase) for i in acting[obs]]
+    end
+    # Phase pieces whose branches the data do not determine are declined, and the
+    # solve is repeated without their correlations.
+    if fitted.phase && isempty(declined)
+        undetermined = _undetermined_slots(tracks.phase, acting.phase, priors.phase, estimates.phase..., max_slip_probability)
+        isempty(undetermined) || return solve_joint_bandpass!(
+            θ, scans, geom, phase_blocks, amp_blocks;
+            phase_level_blocks, amp_level_blocks, gauge, max_iterations, tolerance, flat_span, eltype, tseg,
+            max_slip_probability, declined = undetermined,
+        )
     end
     energy(obs, x) = sum((first(_track_energy(track_layouts[obs][i], priors[obs][j], x)) for (j, i) in pairs(acting[obs])); init = 0.0)
     objective(ℓ, φ, S) = _chi2(gains_of(ℓ, φ), S, data, jl) / 2 + energy(:phase, φ) + energy(:amp, ℓ)
@@ -515,6 +539,7 @@ function solve_joint_bandpass!(
             t = tracks[obs][i]
             j = prior_of[i]
             status = map(t.pieces) do p
+                all(in(declined), t.slots[p]) && return TrackDeclined
                 all(pinned[t.slots[p]]) && obs === :phase && return TrackSolved
                 return _band_track_status([valid[n] ? x[n] : NaN for n in t.slots[p]], flat_span)
             end

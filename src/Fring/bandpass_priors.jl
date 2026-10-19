@@ -752,6 +752,22 @@ function _fitted_track(model, y, r, x; level::Bool)
     return b / c .+ smooth_track(model, y .- b / c, r, x)
 end
 
+# The slots of the phase pieces under a prior whose 2π branches the data do not
+# determine: those whose slip probability under the track's resolved prior
+# exceeds `max_slip`, with every piece sharing a level with one.
+function _undetermined_slots(tracks, acting, priors, y, wy, max_slip)
+    out = Set{Int}()
+    for (j, i) in pairs(acting)
+        t = tracks[i]
+        slip = fill(NaN, length(t.pieces))
+        _choose_branches!(zeros(length(y)), t, priors[j], y, wy, falses(length(y)); slip)
+        undetermined = [p for p in eachindex(slip) if t.active[p] && slip[p] > max_slip]
+        isnothing(t.level) || (undetermined = findall(in(t.level[undetermined]), t.level))
+        foreach(p -> union!(out, t.slots[t.pieces[p]]), undetermined)
+    end
+    return out
+end
+
 # `_choose_branches!`, undone unless it leaves track `t`'s prior energy no
 # higher (`tl` is its `_track_layout`). A shift leaves every gain unchanged, so
 # this keeps the branch choice a descent move of the posterior.

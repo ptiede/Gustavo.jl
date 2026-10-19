@@ -23,6 +23,7 @@ import StatsAPI
 using StatsAPI: fit
 
 using DimensionalData: AbstractDimArray, hasdim, branches, metadata
+using DimensionalData.Lookups: intervalbounds
 using Statistics: mean
 using AstroLib: ct2lst
 

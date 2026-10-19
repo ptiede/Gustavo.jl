@@ -194,23 +194,48 @@ function _flag_absent_antennas!(ms::XRadio.MeasurementSet, win::GeometryWindow, 
     return ms
 end
 
-# The unconstrained (station name, feed, scan id) triples the step of `sol`
-# records, as a lookup set, `nothing` when it records none.
+# What the step of `sol` records to flag: its unconstrained (station name, feed,
+# scan id) triples as a lookup set (`scans`, `nothing` for none) and its declined
+# bandpass pieces (`pieces`, see `_declined_pieces`); `nothing` when it records
+# neither.
 function _solution_flag_sets(sol::CalibrationSolution)
     info = sol.info
-    haskey(info, :flagged_ant) || return nothing
-    flagged = Set(
-        (String(info.flagged_ant[i]), Int(info.flagged_feed[i]), Int(info.flagged_scan[i]))
-            for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
-    )
-    return isempty(flagged) ? nothing : flagged
+    scans = haskey(info, :flagged_ant) ? Set(
+            (String(info.flagged_ant[i]), Int(info.flagged_feed[i]), Int(info.flagged_scan[i]))
+                for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
+        ) : nothing
+    scans = isnothing(scans) || isempty(scans) ? nothing : scans
+    pieces = _declined_pieces(info)
+    isnothing(scans) && isempty(pieces) && return nothing
+    return (; scans, pieces)
+end
+
+# The bandpass pieces the step declined, from its `phase_status`: per piece its
+# station name, feed and the closed ranges of channel frequencies and sample
+# times it covers.
+function _declined_pieces(info)
+    pieces = @NamedTuple{antenna::String, feed::Int, freq::Tuple{Float64, Float64}, time::Tuple{Float64, Float64}}[]
+    haskey(info, :phase_status) || return pieces
+    for st in Fring._status_arrays(info.phase_status), I in CartesianIndices(st)
+        st[I] == Fring.TrackDeclined || continue
+        a, f, c, t = Tuple(I)
+        push!(pieces, (;
+            antenna = String(lookup(st, AntennaName)[a]), feed = Int(lookup(st, Feed)[f]),
+            freq = Float64.(intervalbounds(lookup(st, Frequency))[c]), time = Float64.(intervalbounds(lookup(st, Ti))[t]),
+        ))
+    end
+    return pieces
 end
 
 # Flag the samples of each product whose (station, feed) on either side is in
-# `flagged` for that scan, scans indexing the solution's geometry `solgeom`,
-# matched by name.
+# `flagged.scans` for that scan, scans indexing the solution's geometry
+# `solgeom`, matched by name, and each product's channels and times inside a
+# declined piece of either side's (station, feed).
 function _flag_unconstrained!(ms::XRadio.MeasurementSet, win::GeometryWindow, solgeom::DataGeometry, flagged)
     isnothing(flagged) && return ms
+    _flag_declined!(ms, win, flagged.pieces)
+    isnothing(flagged.scans) && return ms
+    flagged = flagged.scans
     antenna = win.geom.antennas
     scan = [_solution_scan(solgeom, String(c)) for c in ms[:scan_name]]
     feeds = feed_pairs(ms)
@@ -222,6 +247,26 @@ function _flag_unconstrained!(ms::XRadio.MeasurementSet, win::GeometryWindow, so
             fa, fb = feeds[p, bi]
             ((sa, fa, scan[ti]) in flagged || (sb, fb, scan[ti]) in flagged) || continue
             view(flag, Polarization(p), BaselineID(bi), Ti(ti)) .= true
+        end
+    end
+    return ms
+end
+
+function _flag_declined!(ms::XRadio.MeasurementSet, win::GeometryWindow, pieces)
+    isempty(pieces) && return ms
+    antenna = win.geom.antennas
+    feeds = feed_pairs(ms)
+    flag = ms[:flag]
+    freqs, times = lookup(flag, Frequency), lookup(flag, Ti)
+    for piece in pieces
+        chans = findall(f -> piece.freq[1] <= f <= piece.freq[2], freqs)
+        tis = findall(t -> piece.time[1] <= t <= piece.time[2], times)
+        (isempty(chans) || isempty(tis)) && continue
+        for (bi, (a, b)) in pairs(win.antennas), p in axes(feeds, 1)
+            a == b && continue
+            fa, fb = feeds[p, bi]
+            ((antenna[a], fa) == (piece.antenna, piece.feed) || (antenna[b], fb) == (piece.antenna, piece.feed)) || continue
+            view(flag, Polarization(p), BaselineID(bi), Frequency(chans), Ti(tis)) .= true
         end
     end
     return ms
