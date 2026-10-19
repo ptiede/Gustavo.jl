@@ -19,16 +19,16 @@ const EARTH_ORIENTATION = XRadio.DictSpec(
     [
         XRadio.AttrSpec(
             :gst_iat0, :float;
-            doc = "Greenwich sidereal time at IAT 0 on the reference date, in degrees"
+            doc = "Greenwich sidereal time at 0h on the reference date in the array's time system, in degrees"
         ),
         XRadio.AttrSpec(
             :earth_rot_rate, :float;
-            doc = "Earth rotation rate, in degrees per IAT day"
+            doc = "Earth rotation rate on the reference date, in degrees per day"
         ),
         XRadio.AttrSpec(:ut1utc, :float; doc = "UT1 − UTC, in seconds"),
         XRadio.AttrSpec(:polarx, :float; doc = "Polar motion x, in arcseconds"),
         XRadio.AttrSpec(:polary, :float; doc = "Polar motion y, in arcseconds"),
-        XRadio.AttrSpec(:datutc, :float; doc = "IAT − UTC, in seconds"),
+        XRadio.AttrSpec(:datutc, :float; doc = "The array's time system − UTC, in seconds: 0 for UTC"),
         XRadio.AttrSpec(
             :xyzhand, :str; values = ["RIGHT", "LEFT"],
             doc = "Handedness of the antenna coordinate system"

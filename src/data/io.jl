@@ -83,9 +83,10 @@ back with. `BUNIT` is the visibilities' `units` (`Jy` as `JY`, `uncalib` as
 `integration_time`. `DATE` is the Julian Date of the day's 0h UT and the fraction of that day.
 
 The AN table's Earth-orientation cards come from the `earth_orientation`
-attribute ([`GUSTAVO_VISIBILITY_SCHEMA`](@ref)); a set without one, such as a
-store from `XRadio.fitsidi2msv4`, is written with `load_uvfits`' defaults, with a
-warning naming them.
+attribute ([`GUSTAVO_VISIBILITY_SCHEMA`](@ref)). A set without one, such as a
+store from `XRadio.fitsidi2msv4`, is written with GSTIA0 and DEGPDY computed
+from RDATE (GMST at 0h UT, IAU 1982, UT1 − UTC taken as zero) and the other
+cards at `load_uvfits`' defaults, with a warning naming them.
 
 Not written: the sub-datasets other than antenna and field
 (`system_calibration`, `gain_curve`, `weather`, `phase_calibration`),

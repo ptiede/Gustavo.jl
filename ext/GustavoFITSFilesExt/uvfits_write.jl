@@ -1,6 +1,6 @@
 using FITSFiles: Bintable, Card, Random
 using DimensionalData: DimensionalData, Ti, branches, lookup
-using Dates: unix2datetime
+using Dates: Date, DateTime, datetime2julian, unix2datetime
 using XRadio: AbstractMount
 
 # ── Encoders ────────────────────────────────────────────────────────────────
@@ -48,9 +48,18 @@ function _fits_float_type(T::Type{<:AbstractFloat})
 end
 
 const _EARTH_ORIENTATION_DEFAULTS = (
-    gst_iat0 = 0.0, earth_rot_rate = 360.0, ut1utc = 0.0, polarx = 0.0, polary = 0.0,
-    datutc = 0.0, xyzhand = "RIGHT", poltype = "",
+    ut1utc = 0.0, polarx = 0.0, polary = 0.0, datutc = 0.0, xyzhand = "RIGHT", poltype = "",
 )
+
+# Greenwich mean sidereal time at 0h UT on `rdate` (IAU 1982, UT1 − UTC taken
+# as zero), in degrees, and the Earth's rotation rate on that date in degrees
+# per day.
+function _sidereal_time(rdate::Date)
+    T = (datetime2julian(DateTime(rdate)) - 2451545.0) / 36525
+    seconds = 24110.54841 + 8640184.812866T + 0.093104T^2 - 6.2e-6T^3
+    turns_per_day = 1.002737909350795 + 5.9006e-11T - 5.9e-15T^2
+    return (; gst_iat0 = mod(seconds / 240, 360), earth_rot_rate = 360 * turns_per_day)
+end
 
 # ── Validation of the set's shape ───────────────────────────────────────────
 
@@ -277,15 +286,16 @@ function _only_value(ps, f, what)
     return only(values)
 end
 
-function _earth_orientation(ps)
+function _earth_orientation(ps, rdate::Date)
     eo = _only_value(ps, ms -> get(DimensionalData.metadata(ms), :earth_orientation, nothing), "Earth orientation")
     if isnothing(eo)
         @warn "write_uvfits: the Measurement Sets state no `earth_orientation`; the AN \
-               table's GSTIA0, DEGPDY, UT1UTC, POLARX, POLARY, DATUTC, XYZHAND and \
-               POLTYPE are written as defaults" defaults = _EARTH_ORIENTATION_DEFAULTS
-        return _EARTH_ORIENTATION_DEFAULTS
+               table's GSTIA0 and DEGPDY are computed from RDATE, and UT1UTC, POLARX, \
+               POLARY, DATUTC, XYZHAND and POLTYPE are written as defaults" defaults = _EARTH_ORIENTATION_DEFAULTS
+        return merge(_sidereal_time(rdate), _EARTH_ORIENTATION_DEFAULTS)
     end
-    return NamedTuple{keys(_EARTH_ORIENTATION_DEFAULTS)}(Tuple(eo[k] for k in keys(_EARTH_ORIENTATION_DEFAULTS)))
+    names = (:gst_iat0, :earth_rot_rate, keys(_EARTH_ORIENTATION_DEFAULTS)...)
+    return NamedTuple{names}(Tuple(eo[k] for k in names))
 end
 
 function _bunit(units)
@@ -349,7 +359,6 @@ function Gustavo.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = 
     codes = _stokes_codes(ps)
     rows, diameters, arrnam = _antenna_union(ps)
     number = Dict(ant.name => n for (n, ant) in pairs(rows))
-    eo = _earth_orientation(ps)
     units = _only_value(ps, ms -> get(DimensionalData.metadata(XRadio.correlated(ms)), :units, nothing), "visibility units")
     T = _fits_float_type(
         mapreduce(promote_type, ps) do ms
@@ -368,7 +377,9 @@ function Gustavo.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = 
     nrec > 0 || throw(ArgumentError("write_uvfits: every sample of the set is a gap; no record to write"))
 
     t0 = minimum(s.times[first(first(s.keep))] for s in written if !isempty(s.keep))
-    rdate = string(Date(unix2datetime(t0)))
+    day = Date(unix2datetime(t0))
+    rdate = string(day)
+    eo = _earth_orientation(ps, day)
     rdate_unix = jd_to_unix(_rdate_jd_or_zero(rdate))
 
     npol = length(codes)

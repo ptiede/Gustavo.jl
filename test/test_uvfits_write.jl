@@ -7,7 +7,7 @@ using Test
 using DimensionalData
 using DimensionalData: lookup, Ti
 using FITSFiles
-using Dates: DateTime
+using Dates: Date, DateTime
 import XRadio
 
 @isdefined(uvfits_fixture) || include("synthetic_uvfits.jl")
@@ -168,6 +168,20 @@ _quiet_write(path, ps) = Test.@test_logs (:warn, r"earth_orientation") write_uvf
         @test iszero(_layer(back[1], :visibility)[1, 1, 2, 1])
         hdus = FITSFiles.fits(out)
         @test getfield(hdus[1], :data).format.shape[3:4] == (8, 2)
+
+        # Without an `earth_orientation`, GSTIA0 and DEGPDY come from RDATE.
+        an = only(h for h in hdus if _FITS_EXT.card_value(h.cards, "EXTNAME") == "AIPS AN")
+        rdate = Date(_FITS_EXT.card_value(an.cards, "RDATE"))
+        @test _FITS_EXT.card_value(an.cards, "GSTIA0") == _FITS_EXT._sidereal_time(rdate).gst_iat0
+        @test _FITS_EXT.card_value(an.cards, "DEGPDY") == _FITS_EXT._sidereal_time(rdate).earth_rot_rate
+    end
+
+    @testset "sidereal time at 0h UT on RDATE" begin
+        # AIPS Memo 117's AN header example: RDATE 2010-03-08, UT1UTC 0.0438 s;
+        # its GSTIA0 includes UT1 − UTC, which the formula takes as zero.
+        st = _FITS_EXT._sidereal_time(Date(2010, 3, 8))
+        @test st.gst_iat0 ≈ 165.59053797569999 - 0.043832778930664062 * 360.9856 / 86400 atol = 1.0e-5
+        @test st.earth_rot_rate ≈ 360.98564385930001 atol = 1.0e-5
     end
 
     idi = joinpath(@__DIR__, "..", "testdata", "references", "chain_two_scans.idifits")
