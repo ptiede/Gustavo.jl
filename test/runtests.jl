@@ -17,6 +17,10 @@ using PolarizedTypes: RPol, LPol
 # Test helper: reconstruct the legacy off1/off2 index tables from a ComponentPlan.
 include("plan_offsets.jl")
 
+# Bytes of a Measurement Set's visibility, weight and flag layers. A per-sample
+# loop on layers whose types do not infer allocates many times this.
+_layer_bytes(ms) = sum(k -> sizeof(parent(ms[k])), (:visibility, :weight, :flag))
+
 include("test_synthetic_ps.jl")
 include("test_measurementset.jl")
 include("test_uvfits.jl")

@@ -5,10 +5,10 @@
     pole = [0.0 0.0 0.0; 0.0 0.0 0.0; 6356752.314245 6356752.314245 6356752.314245]
     dec = 0.5
     t0 = 1.614816e9                         # 2021-03-04T00:00:00, day 63
-    function uncalibrated()
+    function uncalibrated(; frequencies = 2.3e11 .+ 2.0e6 .* (0:7))
         ms = XRadio.Testing.measurement_set(;
             antennas = names, antenna_xds = XRadio.Testing.antenna(names; positions = pole),
-            direction = (1.0, dec), times = t0 .+ [0.0, 30.0, 120.0, 150.0],
+            direction = (1.0, dec), times = t0 .+ [0.0, 30.0, 120.0, 150.0], frequencies,
         )
         # Two scans of two 30 s integrations, ninety seconds apart.
         ms[:scan_name] = DimArray(["1", "1", "2", "2"], dims(ms[:scan_name]); metadata = metadata(ms[:scan_name]))
@@ -36,8 +36,8 @@
     63 00:02:00   70.0   80.0
     /
     """)
-    function from_antab()
-        ms = uncalibrated()
+    function from_antab(; kw...)
+        ms = uncalibrated(; kw...)
         @test_logs (:warn,) XRadio.read_antab!(one_member(ms), antab; ifs = Dict("spw_0" => 1))
         return ms
     end
@@ -204,6 +204,14 @@
         @test_throws "gives antennas AA, whose `digitizer_levels` fix it" apriori_calibrate!(
             eight(); quantization_efficiency = Dict("AA" => 2 / π, "MG" => 0.8825)
         )
+    end
+
+    @testset "allocates within a small multiple of the data" begin
+        wide() = from_antab(; frequencies = 2.3e11 .+ 2.0e6 .* (0:511))
+        apriori_calibrate!(wide())
+        ms = wide()
+        bytes = @allocated apriori_calibrate!(ms)
+        @test bytes < 4 * _layer_bytes(ms)
     end
 
     @testset "what it refuses" begin

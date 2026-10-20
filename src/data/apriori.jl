@@ -69,7 +69,15 @@ function apriori_calibrate!(
     scale = _sefd_scale(ms, T, curves, tsys, Float64(min_elevation), plausible)
     feeds = feed_pairs(ms)
     V, W, F = _storage_order(vis), _storage_order(ms[:weight]), _storage_order(ms[:flag])
-    for (bi, (a, b)) in pairs(_antenna_pairs(ms))
+    _scale_samples!(V, W, F, scale, η, feeds, _antenna_pairs(ms))
+    metadata(vis)[:units] = "Jy"
+    return ms
+end
+
+# Separate from `apriori_calibrate!` so the loop compiles for the layers'
+# concrete types, which a Measurement Set lookup does not infer.
+function _scale_samples!(V, W, F, scale, η, feeds, antenna_pairs)
+    for (bi, (a, b)) in pairs(antenna_pairs)
         if a == b
             view(F, :, :, bi, :) .= true
             continue
@@ -88,8 +96,7 @@ function apriori_calibrate!(
             end
         end
     end
-    metadata(vis)[:units] = "Jy"
-    return ms
+    return nothing
 end
 
 _channel(scale, c) = size(scale, 4) == 1 ? 1 : c

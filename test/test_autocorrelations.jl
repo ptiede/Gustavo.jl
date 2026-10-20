@@ -6,11 +6,11 @@ using XRadio: XRadio
 # antenna with itself, relabeled from the synthetic builder's six cross
 # baselines among four antennas. A2's receptors are stored `L, R`, so its
 # feed 1 is `L`.
-function _autocorrelated_ms(; antenna2 = ["A1", "A2", "A3", "A2", "A3", "A3"])
+function _autocorrelated_ms(; antenna2 = ["A1", "A2", "A3", "A2", "A3", "A3"], kw...)
     names = ["A1", "A2", "A3", "A4"]
     ant = XRadio.Testing.antenna(names)
     parent(ant[:polarization_type])[:, 2] .= ["L", "R"]
-    ms = XRadio.Testing.measurement_set(; antennas = names, antenna_xds = ant)
+    ms = XRadio.Testing.measurement_set(; antennas = names, antenna_xds = ant, kw...)
     parent(ms[:baseline_antenna1_name]) .= ["A1", "A1", "A1", "A2", "A2", "A3"]
     parent(ms[:baseline_antenna2_name]) .= antenna2
     return ms
@@ -95,6 +95,14 @@ end
             @test all(view(flag, :, :, bi, :)) == (a == b || 3 in (a, b) || 4 in (a, b))
             @test any(view(flag, :, :, bi, :)) == all(view(flag, :, :, bi, :))
         end
+    end
+
+    @testset "allocates within a small multiple of the data" begin
+        wide() = _set_autocorrelations!(_autocorrelated_ms(; frequencies = 2.3e11 .+ 2.0e6 .* (0:511)))
+        Gustavo.normalize_by_autocorrelations!(wide())
+        ms = wide()
+        bytes = @allocated Gustavo.normalize_by_autocorrelations!(ms)
+        @test bytes < 4 * _layer_bytes(ms)
     end
 
     @testset "leaves a set without autocorrelations unchanged" begin

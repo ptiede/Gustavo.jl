@@ -92,6 +92,14 @@ end
         @test out === target
         @test _division_error(out, ms, sol, geom) < 1.0e-6
         @test parent(out[:flag]) == parent(ms[:flag])
+
+        wide_ps, _ = _build_fringe_ps(; nscans = 2, nspw = 1, nchan = 256)
+        wide_sol = _hand_solution(CALc.DataGeometry(wide_ps))
+        wide = read(first(wide_ps))
+        calibrate!(wide_sol, deepcopy(wide); apply_flags = false)
+        target = deepcopy(wide)
+        bytes = @allocated calibrate!(wide_sol, target; apply_flags = false)
+        @test bytes < 4 * _layer_bytes(target)
     end
 
     @testset "calibrate! on one window matches the run's geometry" begin
@@ -139,6 +147,9 @@ end
             @test parent(out[:weight][BaselineID = bi]) ≈ f .* parent(ms[:weight][BaselineID = bi])
         end
         @test parent(out[:visibility]) == parent(ms[:visibility])
+        target = fresh()
+        bytes = @allocated scale_weights!(target, scale)
+        @test bytes < 4 * _layer_bytes(target)
         @test_throws "scale_weights!: every factor must be finite and positive" scale_weights!(
             fresh(), Dict("A1" => 1.0, "A2" => 0.0)
         )

@@ -65,6 +65,8 @@ end
     )
     ms = build(2 / noise^2)
     s = weight_scales(ms)
+    bytes = @allocated weight_scales(ms)
+    @test bytes < 4 * _layer_bytes(ms)
     @test dims(s) == (dims(ms[:weight], Polarization), dims(ms[:weight], BaselineID))
     @test all(x -> isapprox(x, 1; rtol = 0.15), s)
     @test mean(s) ≈ 1 rtol = 0.03
