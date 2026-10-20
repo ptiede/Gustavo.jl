@@ -2,8 +2,8 @@
 # for correlator weights that are miscalibrated on particular stations. It must
 # leave the fringe search alone, move the solve only through the stages that
 # weight baselines against each other, and carry into the calibrated weights.
-# Reuses `_build_fringe_ps` + the FP/CAL aliases from test_pipeline.jl
-# (included earlier in runtests.jl).
+
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
 @testset "Per-antenna weight scale" begin
     ps, _ = _build_fringe_ps()
@@ -54,4 +54,44 @@
             end
         end
     end
+end
+
+@testset "Weight scales from consecutive time samples" begin
+    # A constant signal (no antenna gains) under noise whose per-component
+    # variance is noise²/2; 64 channels × 39 consecutive pairs per cell.
+    noise = 0.5
+    build(weight) = Gustavo.materialize(
+        first(values(first(_build_fringe_ps(; noise, weight, antenna_gains = false, nspw = 1, nchan = 64, ntime = 40))))
+    )
+    ms = build(2 / noise^2)
+    s = weight_scales(ms)
+    @test dims(s) == (dims(ms[:weight], Polarization), dims(ms[:weight], BaselineID))
+    @test all(x -> isapprox(x, 1; rtol = 0.15), s)
+    @test mean(s) ≈ 1 rtol = 0.03
+
+    # Weights claiming 4× less noise than the data carry.
+    ms = build(8 / noise^2)
+    s = weight_scales(ms)
+    @test mean(s) ≈ 0.25 rtol = 0.03
+    w = copy(ms[:weight])
+    scale_weights!(ms, s)
+    @test all(
+        ms[:weight][Polarization(At(p)), BaselineID(At(b))] == w[Polarization(At(p)), BaselineID(At(b))] .* s[Polarization(At(p)), BaselineID(At(b))]
+            for p in lookup(s, Polarization), b in lookup(s, BaselineID)
+    )
+    @test mean(weight_scales(ms)) ≈ 1 rtol = 0.03
+
+    # A fully flagged cell has no estimate and holds no data to scale; one whose
+    # unflagged samples are never consecutive has data and no estimate.
+    ms = build(2 / noise^2)
+    flag = ms[:flag]
+    view(flag, BaselineID(1), Polarization(1)) .= true
+    single = view(flag, BaselineID(2), Polarization(2))
+    single .= true
+    view(single, Ti(2)) .= false
+    a, b = XRadio.baselines(ms)[2]
+    pol = lookup(flag, Polarization)[2]
+    s = @test_logs (:warn, "weight_scales: no consecutive unflagged time samples to estimate the weight scale of $pol on $(a)–$(b); their factor is 1") weight_scales(ms)
+    @test s[Polarization(1), BaselineID(1)] == 1
+    @test s[Polarization(2), BaselineID(2)] == 1
 end

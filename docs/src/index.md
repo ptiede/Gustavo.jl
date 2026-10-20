@@ -120,7 +120,8 @@ time and hands it to a function.
 **Corrections.** A correction is a function that modifies a Measurement Set in
 place and returns it. The built-in ones are
 [`normalize_by_autocorrelations!`](@ref Gustavo.normalize_by_autocorrelations!),
-[`scale_weights!`](@ref),
+[`scale_weights!`](@ref) (with factors per antenna, or per baseline from
+[`weight_scales`](@ref)),
 [`apriori_calibrate!`](@ref Gustavo.apriori_calibrate!), which puts the
 visibilities in janskys from the system temperatures and gain curves the
 Measurement Set records (XRadio's `read_antab!` adds them from an ANTAB file)

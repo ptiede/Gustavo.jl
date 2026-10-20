@@ -269,10 +269,15 @@ that per-component variance:
 ```
 
 This is the convention of the radiometer equation: `XRadio.fitsidi2msv4`
-writes ``w = f \cdot 2\Delta\nu\,\tau\,\eta_a\eta_b`` for a correlation
-coefficient, the inverse variance of each of its real and imaginary parts. A
+writes ``w = f \cdot 2\Delta\nu\,\tau / (A_a A_b)``, the inverse variance of
+each of the real and imaginary parts of a visibility whose correlation
+coefficient is ``V / \sqrt{A_a A_b}`` (``A`` the autocorrelation amplitudes). The
+coefficient as the correlator writes it is not corrected for quantization, and
+neither is its weight. A
 weight column that departs from it (a station whose weights are off by a
-factor) is corrected before fitting with `scale_weights!`.
+factor) is corrected before fitting with `scale_weights!`;
+`weight_scales` estimates the factor per (polarization, baseline) from the
+scatter between consecutive time samples, `scale_weights!(ms, weight_scales(ms))`.
 
 ### The matched filter under noise
 

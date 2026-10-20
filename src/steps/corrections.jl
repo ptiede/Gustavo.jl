@@ -152,3 +152,66 @@ function scale_weights!(ms::XRadio.MeasurementSet, scale::AbstractDict)
     end
     return ms
 end
+
+"""
+    scale_weights!(ms::MeasurementSet, scale::AbstractDimArray) -> ms
+
+Scale the weights of `ms` in place by `scale`, matched to them by dimension,
+such as the factors per (polarization, baseline) of [`weight_scales`](@ref).
+
+    scale_weights!(ms, weight_scales(ms))
+"""
+function scale_weights!(ms::XRadio.MeasurementSet, scale::AbstractDimArray)
+    weight = ms[:weight]
+    @d weight .*= scale
+    return ms
+end
+
+"""
+    weight_scales(ms::MeasurementSet) -> DimArray
+
+The factor per (polarization, baseline) that makes the weights of `ms` inverse
+variances of each visibility component, estimated from the scatter between
+consecutive time samples of one channel. For two such samples,
+`z = (V₁ − V₂)/√(1/w₁ + 1/w₂)` has `E|z|² = 2` when the weights are inverse
+variances and the signal does not change between them, so the factor is
+`2 ln 2 / median|z|²` (the median of an exponential with mean 2 is `2 ln 2`).
+Pairs with either sample flagged are skipped.
+
+The signal cancels as long as its phase moves little in one integration; an
+uncorrected rate `r` moves it by `2π r τ` over an integration of length `τ`.
+
+Autocorrelations, and cross-correlations with no unflagged consecutive pair,
+get 1; a warning names the cross-correlations among them that hold unflagged
+data. Apply the factors with [`scale_weights!`](@ref).
+"""
+function weight_scales(ms::XRadio.MeasurementSet)
+    V, W, F = ms[:visibility], ms[:weight], ms[:flag]
+    T = float(eltype(W))
+    scale = ones(T, dims(W, (Polarization, BaselineID)))
+    baselines = XRadio.baselines(ms)
+    unestimated = String[]
+    for cell in DimensionalData.DimIndices(scale)
+        p, bi = map(DimensionalData.val, cell)
+        a, b = baselines[bi]
+        a == b && continue
+        z2 = _consecutive_z2(view(V, cell), view(W, cell), view(F, cell))
+        if !isempty(z2)
+            scale[cell] = 2 * log(T(2)) / median!(z2)
+        elseif !all(view(F, cell))
+            push!(unestimated, "$(lookup(W, Polarization)[p]) on $(a)–$(b)")
+        end
+    end
+    isempty(unestimated) || @warn "weight_scales: no consecutive unflagged time samples to " *
+        "estimate the weight scale of $(join(unestimated, ", ")); their factor is 1"
+    return scale
+end
+
+# |z|² of each pair of consecutive time samples of one channel, both unflagged.
+function _consecutive_z2(v, w, f)
+    nt = size(v, Ti)
+    t1, t2 = Ti(1:(nt - 1)), Ti(2:nt)
+    ok = @d .!(view(f, t1) .| view(f, t2)) (dims = (Frequency, Ti), strict = false)
+    z2 = @d abs2.(view(v, t2) .- view(v, t1)) ./ (inv.(view(w, t1)) .+ inv.(view(w, t2))) (dims = (Frequency, Ti), strict = false)
+    return parent(z2)[parent(ok)]
+end
