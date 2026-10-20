@@ -88,7 +88,7 @@ function _branch_filter(
     trail = Vector{Vector{NTuple{2, Int}}}()
     steps = Int[]
     children, links = _BranchHistory{D, T}[], NTuple{2, Int}[]
-    workspace = _prune_workspace()
+    workspace = (; scores = Float64[], order = Int[], kept = Int[], head = Dict{Int, Int}(), next = Int[])
     for k in k0:lastindex(θ)
         if k > firstindex(θ)
             A, Q = transition(model, x[k] - x[k - 1], T)
@@ -142,8 +142,6 @@ function _branch_filter(
     return (; histories, loglik, best)
 end
 
-# Scratch space for `_prune_histories!`, reused from sample to sample.
-_prune_workspace() = (; scores = Float64[], order = Int[], kept = Int[], head = Dict{Int, Int}(), next = Int[])
 
 # The indices of `children` to carry on, most probable first: within `prune` of
 # the best, at most `maxhyp`, each history that predicts the same as a more

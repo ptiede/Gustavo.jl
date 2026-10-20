@@ -43,12 +43,6 @@ smoother.
 """
 supports_antenna_heterogeneity(step::SolveStep) = false
 
-# How the heterogeneity rejection names its subject. A step that delegates its
-# solve is not itself the thing that cannot take the model, so it names the
-# solver and the configuration that would accept it; the step type alone leaves
-# the user nothing to change.
-heterogeneity_rejector(step::SolveStep) = string(nameof(typeof(step)))
-
 """
     provides(step::SolveStep) -> Symbol
 
@@ -179,7 +173,7 @@ end
 function _map_groups(work::F, groups, sizes, exec::ExecutionConfig; stage::Symbol) where {F}
     items = collect(values(groups))
     total = length(items)
-    progress = progress_callback(exec)
+    progress = exec.progress
     _report_progress(progress, stage, 0, total)
     done = Threads.Atomic{Int}(0)
     function wrapped(group)

@@ -280,8 +280,6 @@ function _piece_levels(level_plan, seg)
     return level, length(level_plan.nchan_seg)
 end
 
-# The level id of each of `seg`'s segments.
-_segment_levels(level, seg) = [level[p] for p in seg.piece_of]
 
 # A station block's outcome per piece over `(AntennaName, Feed, Frequency, Ti)`:
 # its stations, every feed, each spectral window of its shape over the extent of

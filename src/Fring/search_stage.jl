@@ -136,14 +136,6 @@ end
 
 # ── The matched filter's capability ──────────────────────────────────────────
 
-# One search per scan group yields one (delay, rate) per scan, written to
-# the θ column holding the scan's first epoch. A term whose time segmentation
-# splits a scan therefore has every other column of that scan left at identity
-# while `calibrate` places each sample in the column its own epoch falls in, so
-# the geometry decides this as much as the term does: `TimeBlocks` coarser than
-# the scans is fitted, finer is not.
-fringe_can_fit(tc, geom) = matched_kind(tc) !== nothing && !splits_a_scan(tc.Ti, geom)
-
 # Whether `seg` resolves more than one time segment inside any one scan.
 function splits_a_scan(seg, geom)
     scans, _ = time_segment_ids(PerScan(), geom)

@@ -286,7 +286,6 @@ _antenna_slot(slot, name) = get(slot, name) do
     throw(ArgumentError("detection antenna `$name` is not among the antennas " * join(keys(slot), ", ")))
 end
 _scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc).ti
-_scan_spread(sc::AbstractDimStack, key::Symbol) = getproperty(DimensionalData.metadata(sc), key)
 
 """
     solve_antenna_systems!(θ, scans, components, antennas; gauge, opts) -> (ncomp, covered, unlinked)
@@ -400,7 +399,7 @@ function _solve_kind_cols!(
         ti = _scan_ti(sc)
         # Per scan, not per row: the band and duration are properties of the
         # observation, so every row of one scan shares this lever arm.
-        σ = T(_require_spread(_scan_spread(sc, spread_key), kind, opts.loss))
+        σ = T(_require_spread(getproperty(DimensionalData.metadata(sc), spread_key), kind, opts.loss))
         σν = kind === :delay ? σ : one(T)
         σt = kind === :rate ? σ : one(T)
         for bi in eachindex(bl_pairs), p in eachindex(feeds)

@@ -37,16 +37,10 @@ struct TimeBlocks <: AbstractTimeSegmentation
         return new(Float64(duration_s))
     end
 end
-TimeBlocks(duration::Period) = TimeBlocks(_period_seconds(duration))
-
-# A fixed-length `Period` in seconds. Nanosecond is the finest `Dates` unit, and
-# Int64 nanoseconds span ±292 years, so every calendar-independent period is
-# representable; `Month` and `Year` have no fixed length and throw here.
-#
-# Dividing by 1e9 rather than multiplying by 1e-9 keeps the result correctly
-# rounded: 1e-9 is not exact in binary, so `3.0e10 * 1.0e-9` gives
-# 30.000000000000004 where the division gives 30.0.
-_period_seconds(p::Period) = Float64(Nanosecond(p).value) / 1.0e9
+# `Month` and `Year` have no fixed length and throw in the `Nanosecond`
+# conversion. Dividing by 1e9 keeps seconds correctly rounded; multiplying by
+# the inexact 1e-9 turns 30 s into 30.000000000000004.
+TimeBlocks(duration::Period) = TimeBlocks(Float64(Nanosecond(duration).value) / 1.0e9)
 
 """
 One segment per user-specified instrument-scan window. `boundaries_s` lists
@@ -524,9 +518,10 @@ const _FREQ_RTOL = 1.0e-9
 The solve-side time segment id of each `target` epoch selected by `ti_idx` — the
 space `ComponentPlan.tseg_id` and a component's θ leaf are indexed by, so a
 solution evaluates on `target`'s grid by reading these ids. `ti_idx` selects the
-window to place; `time_span[k]` is the interval the `k`-th selected sample
-integrates over (the time coordinate's `integration_time`), checked against the solution's
-own bins where the segmentation places by a formula on a coordinate.
+window to place; `time_span` is the interval the selected samples integrate over
+(the time coordinate's `integration_time`), one number for all of them or one
+per sample, checked against the solution's own bins where the segmentation
+places by a formula on a coordinate.
 
 Throws when a target sample falls in no segment of `seg` as the solve resolved
 it, naming the segmentation and the sample.
@@ -765,10 +760,11 @@ function _bin_ids(bins)
 end
 
 _span_at(::Nothing, k) = 0.0
+_span_at(span::Real, k) = span
 _span_at(span, k) = isempty(span) ? 0.0 : span[k]
 
 function _check_span_length(seg, span, ti_idx)
-    (span === nothing || isempty(span) || length(span) == length(ti_idx)) || throw(
+    (span isa Union{Nothing, Real} || isempty(span) || length(span) == length(ti_idx)) || throw(
         DimensionMismatch(
             "$(_seg_label(seg)): time_span has $(length(span)) entries for $(length(ti_idx)) " *
                 "placed samples."

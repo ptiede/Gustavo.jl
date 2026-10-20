@@ -17,12 +17,11 @@ end
 _one_member(ms::XRadio.MeasurementSet) =
     XRadio.ProcessingSet(OrderedDict{Symbol, XRadio.MeasurementSet}(:ms => ms))
 
-# The interval each time sample integrates over, from the time coordinate's
+# The interval every time sample integrates over, from the time coordinate's
 # `integration_time`; `nothing` when the Measurement Set does not state it.
 function _time_span(ms::XRadio.MeasurementSet)
     it = get(DimensionalData.metadata(dims(ms, Ti)), :integration_time, nothing)
-    isnothing(it) && return nothing
-    return fill(Float64(it.value), length(XRadio.times(ms)))
+    return isnothing(it) ? nothing : Float64(it.value)
 end
 
 # ── Dividing out a solution's gains ──────────────────────────────────────────
@@ -63,9 +62,6 @@ function _time_constant_over(sol::Calibration._AppliedSolution, win::GeometryWin
     return true
 end
 
-# The span of just the first sample, to match a single evaluated time column.
-_head_span(span) = span === nothing || isempty(span) ? span : span[1:1]
-
 # `sol`'s gains divided out of `ms` in place, placed through `win`. A cell
 # whose gain is degenerate is left as it is (`flag_bad = false`), or given a NaN
 # visibility and a flag (`flag_bad = true`).
@@ -81,7 +77,7 @@ function _divide_gains!(
     tspan = _time_span(ms)
     tconst = _time_constant_over(sol, win, tspan)
     gwin = tconst ? GeometryWindow(win.geom, win.chan_idx, win.ti_idx[1:1]) : win
-    g = parent(gains(sol, gwin; time_span = tconst ? _head_span(tspan) : tspan))
+    g = gains(sol, gwin; time_span = tspan)
     V, W, F = _storage_order(vis), _storage_order(weight), _storage_order(flag)
     axes(V, 2) == axes(g, 1) && (tconst || axes(V, 4) == axes(g, 2)) || throw(
         DimensionMismatch("gains $(axes(g)) do not cover the data $(axes(V))"),

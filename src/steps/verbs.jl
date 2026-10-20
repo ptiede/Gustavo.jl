@@ -287,15 +287,13 @@ end
 
 # ── The runner ───────────────────────────────────────────────────────────────
 
-_resolve_step_gauge(g::AbstractGauge, ant_names) = resolve_gauge(g, ant_names)
-_resolve_step_gauge(::Nothing, ant_names) = nothing
-
 # Solve one step: compile its model against the data's geometry, then run its
 # `solve` over the scan groups.
 function _run_step(st::SolveStep, exec::ExecutionConfig, ps::XRadio.ProcessingSet)
     geom = DataGeometry(ps)
     spec = (; geom)
-    gauge = _resolve_step_gauge(step_gauge(st), geom.antennas)
+    unresolved = step_gauge(st)
+    gauge = isnothing(unresolved) ? nothing : resolve_gauge(unresolved, geom.antennas)
     groups = groupby(ps, XRadio.ByScan())
     sizes = [_group_bytes(g) for g in values(groups)]
     ctx = _step_context(st, spec, gauge, groups, sizes, exec)
@@ -323,7 +321,7 @@ function _step_context(st::SolveStep, spec, gauge, groups, sizes, exec)
     antennas = spec.geom.antennas
     model = Calibration.resolve(model_components(st, spec), antennas, spec.geom)
     supports_antenna_heterogeneity(st) ||
-        Calibration.require_antenna_uniform(model, antennas, heterogeneity_rejector(st))
+        Calibration.require_antenna_uniform(model, antennas, string(nameof(typeof(st))))
     layout = plan_parameters(model, antennas, spec.geom; require_nonempty = false)
     return SolveContext(
         model, layout, spec.geom, zeros(layout.nθ), gauge, length(antennas),

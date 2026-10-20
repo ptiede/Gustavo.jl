@@ -316,8 +316,6 @@ end
 # `Ti`, overwritten with its fitted values; `w` is its per-AP coherent weight.
 # Returns the prior the track was fit under.
 
-_track_times(track) = parent(lookup(track, Ti))
-
 smooth_track!(::PerTrackAdhocSmoother, track, w, ::Nothing) = nothing
 
 # Under a proper prior the track's level is the per-scan constant the demean
@@ -325,7 +323,7 @@ smooth_track!(::PerTrackAdhocSmoother, track, w, ::Nothing) = nothing
 # hyperparameter fit, then estimated by GLS and restored around the zero-mean
 # MAP. A walk without an init leaves its level free already.
 function smooth_track!(::PerTrackAdhocSmoother, track, w, prior::Union{OUPrior, RandomWalkPrior})
-    x = _track_times(track)
+    x = parent(lookup(track, Ti))
     if !_proper_prior(prior)
         resolved = _estimate_hypers(prior, [track], [w], [x])
         _estimate_map!(track, resolved, track, w, x)

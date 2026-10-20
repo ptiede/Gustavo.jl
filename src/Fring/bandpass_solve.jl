@@ -680,7 +680,7 @@ function _antenna_levels(level_blocks, segs, loc, geom::DataGeometry, θ, ::Type
         level, nlevel = _piece_levels(lb.plan, segs[k])
         out[a] = (;
             level, nlevel, leaf = lb.θ, tying = lb.plan.tying, ai = li,
-            seg = _segment_levels(level, segs[k]), nts = lb.plan.shape.Ti, geom.nfeed, T,
+            seg = [level[p] for p in segs[k].piece_of], nts = lb.plan.shape.Ti, geom.nfeed, T,
         )
     end
     return out

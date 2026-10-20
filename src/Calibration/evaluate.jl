@@ -178,9 +178,10 @@ every sample, which is exactly the statement that the gain is constant across
 it. A sample with no such segment is an error, naming the segmentation that
 could not place it; that is the "coarser is fine, finer is not" contract.
 
-`time_span[k]` is the interval the `k`-th selected sample integrates over (the
-time coordinate's `integration_time`); where the segmentation bins a coordinate, a sample
-whose span crosses a bin boundary is rejected rather than assigned by its center.
+`time_span` is the interval the selected samples integrate over (the time
+coordinate's `integration_time`), one number for all of them or one per sample;
+where the segmentation bins a coordinate, a sample whose span crosses a bin
+boundary is rejected rather than assigned by its center.
 
 Coordinates (a `Delay`'s `f − f0`, a `Polynomial`'s scaled offset) are read
 pointwise from the solution's own resolved state, so they stay in the basis θ

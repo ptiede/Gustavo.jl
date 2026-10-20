@@ -232,6 +232,7 @@ end
         # Untouched data carries a span narrower than the AP spacing.
         @test CAL.time_segment_ids(CAL.PerIntegration(), aps, aps; time_span = fill(0.9, 3)) ==
             [1, 2, 3]
+        @test CAL.time_segment_ids(CAL.PerIntegration(), aps, aps; time_span = 0.9) == [1, 2, 3]
 
         # A near miss names both epochs, so a unit slip is diagnosable at a glance.
         off = CAL.DataGeometry(; nfeed = 2, times = [2.25], channel_freqs = [1.0e9])
@@ -244,6 +245,9 @@ end
         @test CAL.time_segment_ids(CAL.PerIntegration(), aps, avg) == [2]
         @test_throws "covering solve epochs 1.0, 2.0, 3.0" CAL.time_segment_ids(
             CAL.PerIntegration(), aps, avg; time_span = [2.5],
+        )
+        @test_throws "covering solve epochs 1.0, 2.0, 3.0" CAL.time_segment_ids(
+            CAL.PerIntegration(), aps, avg; time_span = 2.5,
         )
     end
 

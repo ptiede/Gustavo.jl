@@ -158,12 +158,6 @@ _check_step_gauge(gauge, ::GainModel) = throw(
 
 # ── Model components (compiled in step order into one GainModel) ───────
 
-# A step's model compiles without a geometry when a caller only wants the
-# components (`model_components(step, nothing)`). `can_fit` is handed the
-# `nothing` rather than a substitute, so a capability that genuinely needs the
-# geometry fails there instead of being answered from a default.
-_spec_geom(spec) = isnothing(spec) ? nothing : spec.geom
-
 model_components(s::BaselineFringeFit, spec) = _vet_step_model(
     s, s.model,
     "It fits a `Delay` or `Rate` on `Frequency = GlobalFrequency()` " *
@@ -188,7 +182,9 @@ function _vet_step_model(solver, m::GainModel, accepted, spec = nothing)
     for (antenna, tree) in _antenna_variants(m)
         at = antenna === nothing ? "" : " (antenna $(repr(antenna)) entry)"
         for tc in Calibration._flatten_components(tree)
-            Fring.can_fit(solver, tc, _spec_geom(spec)) || throw(
+            # Without a geometry `can_fit` gets `nothing`, so a capability that
+            # needs one fails there instead of being answered from a default.
+            Fring.can_fit(solver, tc, isnothing(spec) ? nothing : spec.geom) || throw(
                 ArgumentError(
                     "$(nameof(typeof(solver))) cannot fit the component " *
                         "$(Calibration.component_label(tc))$at; its parameters would " *
@@ -236,7 +232,12 @@ model_components(s::AdhocPhase, spec) = _vet_step_model(
 
 # ── BaselineFringeFit: per-scan search + closure-screened station solve ──────
 
-Fring.can_fit(::BaselineFringeFit, tc, geom) = Fring.fringe_can_fit(tc, geom)
+# One search per scan group yields one (delay, rate) per scan, written to the
+# θ column holding the scan's first epoch. A term whose time segmentation splits
+# a scan would leave the scan's other columns at identity, so `TimeBlocks`
+# coarser than the scans is fitted and finer is not.
+Fring.can_fit(::BaselineFringeFit, tc, geom) =
+    !isnothing(Fring.matched_kind(tc)) && !Fring.splits_a_scan(tc.Ti, geom)
 Fring.validate_model(::BaselineFringeFit, model) = Fring.validate_fringe_model(model)
 
 # One round and an all-per-scan model make the station systems block-diagonal

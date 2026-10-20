@@ -462,9 +462,6 @@ function _canonical!(canon::Vector{Float64}, x::Float64, atol)
     return x
 end
 
-_canonical_time!(canon::Vector{Float64}, t::Float64) = _canonical!(canon, t, _epoch_atol(t))
-_canonical_freq!(canon::Vector{Float64}, f::Float64) = _canonical!(canon, f, _freq_atol(f))
-
 # Read-only counterpart for a second pass over times already canonicalized.
 function _canonical_time(canon::AbstractVector{Float64}, t::Float64)
     i = _find_canonical(canon, t, _epoch_atol(t))
@@ -556,7 +553,8 @@ function _span_geometry(pieces, antennas, nfeed; f0, t0)
     freq_canon = Float64[]
     for piece in pieces
         for f in piece.freqs
-            f = _canonical_freq!(freq_canon, Float64(f))
+            f = Float64(f)
+            f = _canonical!(freq_canon, f, _freq_atol(f))
             prev = get(freq_spw, f, nothing)
             (prev === nothing || prev == piece.spw) || throw(
                 ArgumentError(
@@ -576,7 +574,7 @@ function _span_geometry(pieces, antennas, nfeed; f0, t0)
             )
         end
         for (t, scan) in zip(piece.times, piece.scans)
-            tk = _canonical_time!(time_canon, t)
+            tk = _canonical!(time_canon, t, _epoch_atol(t))
             prev = get(time_scan, tk, nothing)
             if prev === nothing
                 time_scan[tk] = scan
@@ -744,9 +742,9 @@ end
 The gains of `sol` at the samples `win` addresses: `win.chan_idx` and
 `win.ti_idx` index `win.geom`, which may be `sol.geom` itself or the geometry
 of other data. On a foreign geometry each sample is placed in the solve
-segment it belongs to (see [`evaluate_gains`](@ref)); `time_span[k]` is the
-interval the `k`-th selected time integrates over, so a sample straddling a
-segment boundary is rejected. Labeled like [`gains`](@ref)`(sol)`.
+segment it belongs to (see [`evaluate_gains`](@ref)); `time_span` is the
+interval the selected times integrate over, one number for all of them or one
+per time, so a sample straddling a segment boundary is rejected. Labeled like [`gains`](@ref)`(sol)`.
 """
 gains(sol::CalibrationSolution, win::GeometryWindow; time_span = nothing) =
     gains(_applied(sol), win; time_span)

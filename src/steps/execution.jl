@@ -44,9 +44,6 @@ group's Measurement Sets and the per-group kernels.
 """
 inner_executor(x::ExecutionConfig) = x.inner_executor
 
-# The `(stage, done, total)` callback, or `nothing`.
-progress_callback(x::ExecutionConfig) = x.progress
-
 """
     ProgressLogger(; min_interval = 5.0, io = stdout)
 
