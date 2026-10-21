@@ -858,6 +858,40 @@ function _choose_branches!(φ, t, prior, y, wy, free; slip = nothing)
     return shift
 end
 
+# Move the free slots of each active piece of phase track `t` by the multiples of
+# 2π that put every `order`-th difference of the piece in (−π, π], keeping a
+# piece's moves only if they lower the track's prior energy `energy(φ)`. A 2π move
+# leaves the data unchanged, so each kept move lowers the MAP objective, and a
+# second pass moves nothing. Returns the per-slot shifts (radians) and the
+# indices of the pieces whose moves were not kept.
+function _wrap_differences!(φ, t, order::Integer, free, energy)
+    coeff = [(-1)^(order - q) * binomial(order, q) for q in 0:order]
+    shift = zeros(length(φ))
+    E = energy(φ)
+    kept_back = Int[]
+    for (j, p) in pairs(t.pieces)
+        t.active[j] || continue
+        n = t.slots[p]
+        k = zeros(Int, length(n))
+        for i in (order + 1):length(n)
+            d = sum(coeff[q + 1] * (φ[n[i - order + q]] + 2π * k[i - order + q]) for q in 0:order)
+            k[i] -= round(Int, d / 2π)
+        end
+        moves = [(s, 2π * k[i]) for (i, s) in pairs(n) if free[s] && !iszero(k[i])]
+        isempty(moves) && continue
+        φ′ = copy(φ)
+        foreach(((s, δ),) -> φ′[s] += δ, moves)
+        E′ = energy(φ′)
+        if E′ < E
+            foreach(((s, δ),) -> (φ[s] = φ′[s]; shift[s] = δ), moves)
+            E = E′
+        else
+            push!(kept_back, j)
+        end
+    end
+    return shift, kept_back
+end
+
 # The track `smooth_track` fits to `y` under `model`; with `level`, the track's
 # estimated level plus the smoothed remainder.
 function _fitted_track(model, y, r, x; level::Bool)

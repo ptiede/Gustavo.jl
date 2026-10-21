@@ -588,10 +588,17 @@ histories.
 
 ### Branches
 
-The phase branches are chosen every iteration from the same slot estimates
-under the current hyperparameters (see
+The first iteration chooses the phase branches from the slot estimates under
+the starting hyperparameters (see
 [Phase tracks and their 2π branches](@ref phase-branches)). A branch change
-moves a phase by a multiple of ``2\pi``, which leaves its gain unchanged.
+moves a phase by a multiple of ``2\pi``, which leaves its gain unchanged, so it
+changes the posterior only through the prior energy. Later iterations move a
+piece's slots only so that every difference along it lies in ``(-\pi, \pi]``,
+and keep the move only where it lowers that energy. Each iteration then lowers
+the posterior, and a branch change is never undone by the next. The branch
+choice and the Levenberg–Marquardt step otherwise answer different questions,
+the most probable branches of each track alone against the posterior of all
+gains together, and alternating them can cycle.
 
 **References.**
 B. M. Bell (1994), The iterated Kalman smoother as a Gauss–Newton method,

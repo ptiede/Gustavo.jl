@@ -186,9 +186,12 @@ profiled over that constant as well. Each iteration:
 
 1. linearizes the χ² in every slot's log-amplitude and phase about the current
    gains, with `S` held;
-2. moves each phase slot to the 2π branch nearest the track fitted to the most
-   probable branches of every slot's own estimate given all the other gains and
-   `S` (`_choose_branches!`);
+2. moves phase slots by multiples of 2π: on the first iteration each slot to the
+   branch nearest the track fitted to the most probable branches of every slot's
+   own estimate given all the other gains and `S` (`_choose_branches!`); after
+   that, each piece so that every difference along it lies in (−π, π], kept only
+   where this lowers the prior energy (`_wrap_differences!`), so that, as the data
+   are unchanged by 2π, every move lowers the posterior and none is undone;
 3. fits the hyperparameters given as densities, all tracks together, by type-II
    MAP on the marginal likelihood of the linearized posterior (`_fit_hypers!`),
    as closely as the last step moved the gains; an observable whose last fit
@@ -371,12 +374,21 @@ function solve_joint_bandpass!(
     # Per observable, the gains and tolerance of its last hyperparameter fit,
     # kept while that fit took no step.
     settled = Dict{Symbol, @NamedTuple{x::Vector{Float64}, tolerance::Float64}}()
+    phase_energy(i, j) = x -> first(_track_energy(track_layouts[:phase][i], priors.phase[j], x))
+    kept_back = Set{Tuple{Int, Int}}()
     for iteration in 1:max_iterations
         lin = _linearize(gains_of(ℓ, φ), S, data, jl, nslots)
         if fitted.phase
-            y, wy = _slot_estimates(φ, lin, :phase)
+            y, wy = iteration == 1 ? _slot_estimates(φ, lin, :phase) : (nothing, nothing)
             for (j, i) in pairs(acting.phase)
-                shift = _choose_branches!(φ, tracks.phase[i], priors.phase[j], y, wy, free.phase; slip = slips[i])
+                shift = if iteration == 1
+                    _choose_branches!(φ, tracks.phase[i], priors.phase[j], y, wy, free.phase; slip = slips[i])
+                else
+                    order = priors.phase[j] isa RandomWalkPrior ? priors.phase[j].order : 1
+                    moved, pieces = _wrap_differences!(φ, tracks.phase[i], order, free.phase, phase_energy(i, j))
+                    union!(kept_back, ((i, p) for p in pieces))
+                    moved
+                end
                 isnothing(gauge_rows) || _shift_gauge!(gauge_rows, shift)
                 any(!iszero, shift) && delete!(settled, :phase)
             end
@@ -479,6 +491,14 @@ function solve_joint_bandpass!(
             verify = true
         end
         near = change < tolerance
+    end
+    isempty(kept_back) || @warn "the joint bandpass solve kept the current 2π branches of $(length(kept_back)) phase " *
+        "pieces where moving every difference to its nearest wrap would not have lowered the prior energy"
+    if fitted.phase
+        y, wy = _slot_estimates(φ, _linearize(gains_of(ℓ, φ), S, data, jl, nslots), :phase)
+        for (j, i) in pairs(acting.phase)
+            _choose_branches!(zeros(length(y)), tracks.phase[i], priors.phase[j], y, wy, falses(length(y)); slip = slips[i])
+        end
     end
     free_amp = fitted.amp ? _split_free_amplitudes!(ℓ, jl.slot_pairs[measured], free.amp, tracks.amp) : NamedTuple[]
     if !isempty(free_amp)

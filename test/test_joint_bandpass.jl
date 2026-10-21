@@ -1165,7 +1165,9 @@ end
         # amplitude is zero: the posterior has no mode and the solve says so,
         # with the phases still a smooth track the data pull on.
         prior = CAL.RandomWalkPrior(; order = 2, σ = sqrt(3 / (2 * 1.0e6^3)))
-        φp = @test_logs (:warn, r"did not converge") solve(1, 1, ZeroSumPhase(), geom, results; prior, max_iterations = 100)
+        φp = @test_logs (:warn, r"kept the current 2π branches") (:warn, r"did not converge") solve(
+            1, 1, ZeroSumPhase(), geom, results; prior, max_iterations = 100,
+        )
         @test all(isfinite, φp)
         @test product_error(φp, gtrue) > 1
     end

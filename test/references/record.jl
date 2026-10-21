@@ -3,44 +3,22 @@
 #
 #     julia --project=test/references test/references/record.jl [synthetic] [bt164a]
 #
-# Synthetic cases are built from seeded `StableRNG`s, so the same seed gives
-# the same data on any Julia version; each writes its input to
-# `testdata/references/<case>.idifits` and its outputs to
-# `testdata/references/<case>.zarr` (both ignored by git). BT164A writes beside
-# its data. Every store carries the commit, the settings, the seed, and the
-# changes expected to move its results (`expected_changes`).
+# Synthetic cases are built from seeded `StableRNG`s; each writes its input to
+# `testdata/references/<case>.ps.zarr` and its outputs to
+# `testdata/references/<case>.zarr` (both ignored by git). BT164A reads the store
+# `convert_bt164a` writes and records beside its data. Every store carries the
+# commit, the chain, and the changes expected to move its results
+# (`expected_changes`).
 
-using Gustavo
-using Gustavo: Calibration, Fring
-using DimensionalData: DimArray, dims, lookup, name as dimname
-using FITSFiles
+include(joinpath(@__DIR__, "chain.jl"))
+include(joinpath(@__DIR__, "..", "synthetic_ps.jl"))
+
+using DimensionalData: DimArray, AbstractDimArray, dims, lookup, name as dimname
 using Zarr
 using Dates: now
-using StableRNGs: StableRNG
 
-include(joinpath(@__DIR__, "..", "pipeline_helpers.jl"))
-
-const REPO = normpath(joinpath(@__DIR__, "..", ".."))
-const SYNTHETIC_DIR = joinpath(REPO, "testdata", "references")
-const BT164A_DIR = expanduser("~/Research/M87Monitor/BT164/BT164A")
-const BT164A_QBAND = joinpath(BT164A_DIR, "VLBA_BT164A_bt164aQband_BIN0_SRC0_0_260108T230453.idifits")
-
-const EXPECTED_CHANGES = [
-    "Weights: fitsidi2msv4 stores radiometer weights scaled by the quantization " *
-        "efficiencies eta_a*eta_b and divided by the autocorrelations, where " *
-        "load_fitsidi divides by the autocorrelations only; SNRs and weighted " *
-        "averages move, noiseless gains should not.",
-    "Flags: MSv4 carries FLAG as its own layer; a FITS-IDI FLAG row on a parallel " *
-        "hand also flags the cross hands that use that autocorrelation.",
-    "Feed invariance: refine fits, stationize and adhoc phasing stop splitting " *
-        "products into same-feed and feed-linking sets; results change only on " *
-        "baselines whose stations order their receptors differently.",
-    "Precision: fitsidi2msv4 keeps the FLUX column's element type.",
-    "Station order: compare by station name, not by position.",
-]
-
-# The standard four-step chain, used for BT164A and the default synthetic case.
-default_chain() = BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()
+# Changes since this recording that are expected to move its results.
+const EXPECTED_CHANGES = String[]
 
 function provenance()
     git(args...) = readchomp(Cmd(`git $args`; dir = REPO))
@@ -52,6 +30,7 @@ function provenance()
         "julia_version" => string(VERSION),
         "gustavo_version" => string(pkgversion(Gustavo)),
         "nthreads" => Threads.nthreads(),
+        "chain" => CHAIN_TEXT,
         "expected_changes" => EXPECTED_CHANGES,
     )
 end
@@ -72,10 +51,22 @@ storable(A::AbstractArray{<:Real}) = A
 storable(A::AbstractArray{<:Complex}) = A
 storable(A::AbstractArray) = string.(A)
 
+# A labeled array as a group: `value` with its dimensions' names, and each
+# dimension's lookup as an array of that name.
+function write_labeled!(g, key, A::AbstractDimArray; attrs = Dict{String, Any}())
+    lg = zgroup(g, String(key); attrs)
+    names = [string(dimname(d)) for d in dims(A)]
+    write_array!(lg, "value", parent(A), names)
+    for (d, n) in zip(dims(A), names)
+        write_array!(lg, n, collect(lookup(d)), [n])
+    end
+    return lg
+end
+
 # Scalars go into the group's attributes (anything else that is not an array
-# as its `repr`); arrays become arrays with generic dimension names; nested
-# NamedTuples become subgroups. Wall-clock timings are omitted: they are not
-# results.
+# as its `repr`); labeled arrays become labeled groups, other arrays arrays
+# with generic dimension names; nested NamedTuples become subgroups. Wall-clock
+# timings are omitted: they are not results.
 const UNTIMED = (:timing, :t_pass)
 
 function write_info!(parent, key, info)
@@ -88,31 +79,28 @@ function write_info!(parent, key, info)
     g = zgroup(parent, String(key); attrs = scalars)
     for (k, v) in pairs(info)
         k in UNTIMED && continue
-        v isa AbstractArray && write_array!(g, k, v, ["$(k)_dim_$i" for i in 1:ndims(v)])
-        v isa NamedTuple && write_info!(g, k, v)
+        if v isa AbstractDimArray
+            write_labeled!(g, k, v)
+        elseif v isa AbstractArray
+            isempty(v) || write_array!(g, k, v, ["$(k)_dim_$i" for i in 1:ndims(v)])
+        elseif v isa NamedTuple
+            write_info!(g, k, v)
+        end
     end
     return g
 end
 
-function write_parameters!(g, tree::NamedTuple)
-    for (k, v) in pairs(tree)
-        write_parameters!(v isa NamedTuple ? zgroup(g, String(k)) : g, v, k)
+# Each component's parameters under its path (`phase/bandpass/…`), with the
+# component it fits in the group's attributes.
+function write_components!(g, sol)
+    for c in sol.components
+        pg = foldl((h, k) -> haskey(h.groups, String(k)) ? h.groups[String(k)] : zgroup(h, String(k)), c.path[1:(end - 1)]; init = g)
+        write_labeled!(pg, last(c.path), c.params; attrs = Dict{String, Any}("component" => repr(c.component)))
     end
     return g
 end
-write_parameters!(g, tree::NamedTuple, _) = write_parameters!(g, tree)
 
-function write_parameters!(g, leaf::DimArray, key)
-    lg = zgroup(g, String(key))
-    names = [string(dimname(d)) for d in dims(leaf)]
-    write_array!(lg, "value", parent(leaf), names)
-    for (d, n) in zip(dims(leaf), names)
-        write_array!(lg, n, collect(lookup(d)), [n])
-    end
-    return lg
-end
-
-const GAIN_DIMS = ["frequency", "time", "station", "feed"]
+const GAIN_DIMS = ["frequency", "time", "antenna", "feed"]
 
 function write_geometry!(g, sol)
     geom = sol.geom
@@ -121,42 +109,40 @@ function write_geometry!(g, sol)
     write_array!(ag, "time", geom.times, ["time"]; attrs = Dict{String, Any}("units" => "s"))
     write_array!(ag, "scan_of_time", geom.scan_of_time, ["time"])
     write_array!(ag, "spw_of_chan", geom.spw_of_chan, ["frequency"])
-    write_array!(ag, "station", sol.info.ant_names, ["station"])
-    write_array!(ag, "feed", 1:2, ["feed"])
+    write_array!(ag, "antenna", geom.antennas, ["antenna"])
+    write_array!(ag, "feed", 1:geom.nfeed, ["feed"])
     isempty(geom.scan_names) || write_array!(ag, "scan_names", geom.scan_names, ["scan"])
     isempty(geom.spw_names) || write_array!(ag, "spw_names", geom.spw_names, ["spw"])
     return ag
 end
 
 """
-    write_solution(path, sol; attrs)
+    write_solutions(path, sols; attrs)
 
-Write `sol` as a Zarr store: the geometry under `axes`, the gains of every
-step composed under `gains`, and per step (in run order, `steps/<i>_<name>`)
-its own gains, its labeled parameters and its diagnostics. Gains are
-`V_corr = V / (g_a * conj(g_b))` in the MSv4 phase sense.
+Write the step solutions `sols` (a NamedTuple in run order) as a Zarr store:
+the shared geometry under `axes`, the gains of every step composed under
+`gains`, and per step (`steps/<i>_<name>`) its own gains, its components'
+parameters and its diagnostics. Gains are `V_corr = V / (g_a * conj(g_b))` in
+the MSv4 phase sense.
 """
-function write_solution(path, sol; attrs = Dict{String, Any}())
+function write_solutions(path, sols::NamedTuple; attrs = Dict{String, Any}())
     ispath(path) && rm(path; recursive = true)
     attrs = merge(
         provenance(), attrs, Dict{String, Any}(
             "format" => "Gustavo reference solution",
             "gain_convention" => "V_corr = V / (g_a * conj(g_b)), MSv4 phase sense",
-            "steps" => String.(keys(sol)),
+            "steps" => String.(keys(sols)),
         ),
     )
     root = zgroup(path; attrs)
-    write_geometry!(root, sol)
-    write_array!(root, "gains", parent(Calibration.gains(sol)), GAIN_DIMS)
-    write_info!(root, "info", sol.info)
+    write_geometry!(root, first(sols))
+    write_array!(root, "gains", parent(composed_gains(sols)), GAIN_DIMS)
     sg = zgroup(root, "steps")
-    for i in eachindex(sol)
-        step = sol[i]
-        g = zgroup(sg, "$(i)_$(only(keys(step)))")
-        write_array!(g, "gains", parent(Calibration.gains(step)), GAIN_DIMS)
-        write_array!(g, "theta", step.steps[1].θ, ["theta"])
-        write_parameters!(zgroup(g, "parameters"), Calibration.parameters(step))
-        write_info!(g, "info", step.steps[1].info)
+    for (i, (name, sol)) in enumerate(pairs(sols))
+        g = zgroup(sg, "$(i)_$(name)"; attrs = Dict{String, Any}("step" => sol.step))
+        write_array!(g, "gains", parent(gains(sol)), GAIN_DIMS)
+        write_components!(zgroup(g, "components"), sol)
+        write_info!(g, "info", sol.info)
     end
     return path
 end
@@ -171,67 +157,18 @@ function write_truth!(root, truth)
     return g
 end
 
-# Each case is a fixture from `synthetic_uvset.jl` and a pipeline taken from the
-# test suite. The fixture is written to FITS-IDI and read back, so the solve
-# runs on the same bytes a later reader will see.
-const SYNTHETIC_CASES = [
-    (
-        name = "chain_two_scans",
-        fixture = (; seed = 1234, nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 2, noise = 0.05),
-        pipeline = default_chain,
-        pipeline_text = "BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()",
-    ),
-    (
-        name = "phase_bandpass",
-        bandpass_seed = 0xBA9D,
-        fixture = (;
-            seed = 1234, nant = 4, nspw = 2, nchan = 8,
-            bandpass = let rng = StableRNG(0xBA9D), bp = zeros(4, 2, 16)
-                for a in 2:4, f in 1:2
-                    off = rand(rng) - 0.5
-                    for c in 1:16
-                        bp[a, f, c] = off + sin(2π * c / 16 + a + f)
-                    end
-                end
-                bp
-            end,
-        ),
-        pipeline = () -> BaselineFringeFit() |> Bandpass() |>
-            AdhocPhase(Fring.SavitzkyGolaySmoother(; window = 7, order = 2, options = Fring.AdhocOptions(; snr_floor = 0.0))),
-        pipeline_text = "BaselineFringeFit() |> Bandpass() |> " *
-            "AdhocPhase(SavitzkyGolaySmoother(; window = 7, order = 2, options = AdhocOptions(; snr_floor = 0.0)))",
-    ),
-    (
-        name = "dispersion",
-        fixture = (; seed = 1234, nant = 4, nspw = 4, nchan = 8, ntime = 12, noise = 0.02, dtec = [0.0, 0.3, -0.2, 0.5]),
-        pipeline = default_chain,
-        pipeline_text = "BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()",
-    ),
-    (
-        name = "four_scans_gapped",
-        fixture = (; seed = 1234, nant = 5, nspw = 2, nchan = 8, ntime = 10, nscans = 4, scan_gap = 600.0, noise = 0.05),
-        pipeline = default_chain,
-        pipeline_text = "BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()",
-    ),
-]
-
-function record_synthetic(dir = SYNTHETIC_DIR)
-    mkpath(dir)
+function record_synthetic()
+    mkpath(SYNTHETIC_DIR)
     for case in SYNTHETIC_CASES
         @info "Recording $(case.name)"
-        uvset, truth = _build_fringe_uvset(; case.fixture...)
-        input = joinpath(dir, "$(case.name).idifits")
-        write_fitsidi(input, uvset)
-        sol = fit(case.pipeline(), load_fitsidi(input; lazy = false); gauge = PinAntenna(1))
-        path = write_solution(
-            joinpath(dir, "$(case.name).zarr"), sol; attrs = Dict{String, Any}(
+        ps, truth = _build_fringe_ps(; case.fixture...)
+        input = synthetic_input(case.name)
+        write(input, ps; mode = "w")
+        path = write_solutions(
+            synthetic_output(case.name), replay(open(ProcessingSet, input)); attrs = Dict{String, Any}(
                 "input" => basename(input),
-                "reader" => "load_fitsidi(input; lazy = false)",
-                "pipeline" => case.pipeline_text,
                 "fixture" => repr(case.fixture),
-                "seed" => case.fixture.seed,
                 "rng" => "StableRNG",
-                "bandpass_seed" => get(case, :bandpass_seed, nothing),
             ),
         )
         write_truth!(zopen(path, "w"), truth)
@@ -239,24 +176,12 @@ function record_synthetic(dir = SYNTHETIC_DIR)
     return nothing
 end
 
-# One cycle of the schedule: 3C273, M87, 3C279, M87.
-const BT164A_SCANS = 1:4
-
-function record_bt164a(
-        path = BT164A_QBAND; scans = BT164A_SCANS,
-        ntasks = max(1, Sys.CPU_THREADS - 4),
-    )
-    isfile(path) || error("record_bt164a: $path does not exist")
-    uvset = load_fitsidi(path; lazy = true, scans)
-    exec = ExecutionConfig(inner_executor = DynamicScheduler(; ntasks))
-    sol = fit(default_chain(), uvset; exec, gauge = PinAntenna(1))
-    out = joinpath(dirname(path), "reference_Qband_scans_$(first(scans))-$(last(scans)).zarr")
-    return write_solution(
-        out, sol; attrs = Dict{String, Any}(
-            "input" => basename(path),
-            "reader" => "load_fitsidi(input; lazy = true, scans = $(scans))",
-            "inner_ntasks" => ntasks,
-            "pipeline" => "BaselineFringeFit() |> DispersionSBDFit() |> Bandpass() |> AdhocPhase()",
+function record_bt164a()
+    isdir(BT164A_STORE) || error("record_bt164a: $(BT164A_STORE) does not exist; `convert_bt164a()` writes it")
+    return write_solutions(
+        BT164A_REFERENCE, replay(bt164a_scans()); attrs = Dict{String, Any}(
+            "input" => basename(BT164A_STORE),
+            "scans" => BT164A_SCANS,
         ),
     )
 end

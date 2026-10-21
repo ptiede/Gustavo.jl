@@ -457,6 +457,46 @@ end
     @test φ .- φ[1] ≈ steep .- steep[1]
 end
 
+@testset "Bandpass: later branch moves lower the prior energy" begin
+    n = 128
+    pieces = [1:n]
+    x = collect(range(8.6e10, 8.6e10 + 6.4e7; length = n))
+    prior = CAL.RandomWalkPrior(; order = 2, σ = 0.01 * sqrt(3 / (2 * (x[2] - x[1])^3)))
+    known = trues(n)
+    fits = [(; phase = (; x, pieces, prior, level = nothing, nlevel = 0))]
+    t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:n, 1, 1, n, 1)], [(1, 1)], [[1]], 1, known))
+    tl = FP._track_layout(t)
+    energy(φ) = first(FP._track_energy(tl, prior, φ))
+
+    # A block a turn off a smooth track moves back as one.
+    track = collect(0.02 .* (1:n))
+    slipped = copy(track)
+    slipped[40:70] .+= 2π
+    φ = copy(slipped)
+    shift, kept_back = FP._wrap_differences!(φ, t, 2, known, energy)
+    @test isempty(kept_back)
+    @test φ ≈ track
+    @test shift[40:70] ≈ fill(-2π, 31)
+    @test energy(φ) < energy(slipped)
+
+    # A second pass moves nothing.
+    @test all(iszero, first(FP._wrap_differences!(φ, t, 2, known, energy)))
+
+    # Moves that would not lower the energy are not kept.
+    φ = copy(slipped)
+    shift, kept_back = FP._wrap_differences!(φ, t, 2, known, φ -> -energy(φ))
+    @test kept_back == [1]
+    @test φ == slipped
+    @test all(iszero, shift)
+
+    # A slot that is not free keeps its value.
+    free = copy(known)
+    free[50] = false
+    φ = copy(slipped)
+    FP._wrap_differences!(φ, t, 2, free, energy)
+    @test φ[50] == slipped[50]
+end
+
 @testset "Bandpass: per-piece outcome codes" begin
     nband, nchan = 4, 32
     pieces = [((b - 1) * nchan + 1):(b * nchan) for b in 1:nband]

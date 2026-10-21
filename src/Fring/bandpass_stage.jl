@@ -512,9 +512,13 @@ posterior is flat along the gains still moving), and warn if
 its starting point.
 
 A phase prior depends on each segment's 2π branch, which the data leave open, so
-every iteration chooses the branches of each phase piece as well, by a Gaussian-sum
-Kalman filter over branch histories, and fits the hyperparameters on those
-branches (see the [fitting-under-priors](@ref fitting-under-priors) page). A piece whose
+the first iteration chooses the branches of each phase piece as well, by a
+Gaussian-sum Kalman filter over branch histories, and the hyperparameters are fit
+on those branches (see the [fitting-under-priors](@ref fitting-under-priors) page).
+Later iterations move a piece by multiples of 2π only so that every difference
+along it lies in (−π, π], and only where that lowers the prior energy: the data
+are unchanged by 2π, so every iteration lowers the posterior. The solve warns
+when it keeps a piece's branches because such a move would not. A piece whose
 posterior probability of a 2π slip at the start exceeds `max_slip_probability`
 is declined: its data do not determine its branches, so it is left at unit
 gain, its correlations are left out of the solve, and the step reports it
