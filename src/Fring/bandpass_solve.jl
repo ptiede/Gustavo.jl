@@ -123,7 +123,7 @@ end
 """
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
-                          gauge, max_iterations = 50, tolerance = 0.01,
+                          gauge, max_iterations = 200, tolerance = 0.01,
                           flat_span = 0.01, eltype = nothing, tseg = nothing) -> (; phase, amp)
 
 Jointly solve the per-(station, feed, frequency segment) complex bandpass gain
@@ -228,7 +228,7 @@ type `eltype`; the steps are solved in `Float64`.
 function solve_joint_bandpass!(
         θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
         phase_level_blocks = NamedTuple[], amp_level_blocks = NamedTuple[],
-        gauge::AbstractGauge, max_iterations::Integer = 50, tolerance::Real = 0.01,
+        gauge::AbstractGauge, max_iterations::Integer = 200, tolerance::Real = 0.01,
         flat_span::Real = 0.01, eltype = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
     )

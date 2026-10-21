@@ -1213,7 +1213,6 @@ end
     bpc(prior) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
     step = Bandpass(;
         model = CAL.GainModel(; phase = (; bandpass = bpc(rw2(0.05))), logamp = (; bandpass = bpc(rw2(0.02)))), gauge = PinAntenna(1),
-        smoother = FP.JointSmoother(; max_iterations = 100),
     )
     sol = fit(step, ps)
 

@@ -437,7 +437,7 @@ function _joint_scan_groups(tseg)
 end
 
 """
-    JointSmoother(; max_iterations = 50, tolerance = 0.01, flat_span = 0.01,
+    JointSmoother(; max_iterations = 200, tolerance = 0.01, flat_span = 0.01,
                   warn_fraction = 0.25, eltype = nothing)
 
 Fit the station bandpass against the actual complex visibilities, with each
@@ -493,7 +493,7 @@ struct JointSmoother{E}
     eltype::E
 end
 JointSmoother(;
-    max_iterations::Integer = 50, tolerance::Real = 0.01, flat_span::Real = 0.01,
+    max_iterations::Integer = 200, tolerance::Real = 0.01, flat_span::Real = 0.01,
     warn_fraction::Real = 0.25, eltype::Union{Nothing, Type{<:AbstractFloat}} = nothing,
 ) = JointSmoother{_eltype_parameter(eltype)}(max_iterations, tolerance, flat_span, warn_fraction, eltype)
 
