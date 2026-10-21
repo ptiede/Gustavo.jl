@@ -195,8 +195,8 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
             fr.geom, fr.name, fr.components,
             (; fr.info..., flagged_ant = ["A2"], flagged_feed = [2], flagged_scan = [1]); step = fr.step,
         )
-        @test Gustavo._solution_flag_sets(sol).scans == Set([("A2", 2, 1)])
-        @test Gustavo._solution_flag_sets(sol[:phase, :mbd]).scans == Set([("A2", 2, 1)])
+        @test Gustavo._solution_flag_sets(sol) == Set([("A2", 2, 1)])
+        @test Gustavo._solution_flag_sets(sol[:phase, :mbd]) == Set([("A2", 2, 1)])
         @test Gustavo._solution_flag_sets(bp) === nothing
         flagged(out) = any(ms -> any(parent(ms[:flag])), values(out))
         @test flagged(calibrate(sol, ps)) && !flagged(calibrate(sol, ps; apply_flags = false))
@@ -244,8 +244,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
             back = CAL.load_solution(path)
             @test back.components == sol.components
             @test back.name == sol.name
-            # `isequal`: the bandpass record holds NaN where a piece has no slip probability.
-            @test isequal(back.info, sol.info)
+            @test back.info == sol.info
             @test back.step == sol.step
             @test back.geom.antennas == sol.geom.antennas && back.geom.times == sol.geom.times
             @test parent(gains(back)) == parent(gains(sol))

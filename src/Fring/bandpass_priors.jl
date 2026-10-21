@@ -826,9 +826,8 @@ end
 # the branch: a slot whose data barely constrain it can have an estimate π from
 # the track while its value lies on the track. A piece's branches are first moved
 # together by the multiple of 2π nearest its estimates, and the pieces sharing a
-# level group onto one branch. Writes each piece's `_slip_probability` into
-# `slip` and returns the per-slot shifts (radians).
-function _choose_branches!(φ, t, prior, y, wy, free; slip = nothing)
+# level group onto one branch. Returns the per-slot shifts (radians).
+function _choose_branches!(φ, t, prior, y, wy, free)
     groups = _level_groups(t, prior)
     level = !isnothing(groups)
     ys = [y[t.slots[p]] for p in t.pieces]
@@ -837,7 +836,6 @@ function _choose_branches!(φ, t, prior, y, wy, free; slip = nothing)
         model, θ, r, u = _filter_inputs(prior, ys[j], ws[j], float.(t.x[t.pieces[j]]))
         any(isfinite, θ) || return nothing
         bf = _branch_filter(model, θ, r, u; level)
-        isnothing(slip) || (slip[j] = _slip_probability(model, bf.histories, r, u; level))
         lift = first(bf.histories).lift
         return (; model, r, u, lift = lift .+ 2π * round(_weighted_mean_finite(θ .- lift, ws[j]) / 2π))
     end
@@ -898,22 +896,6 @@ function _fitted_track(model, y, r, x; level::Bool)
     level || return smooth_track(model, y, r, x)
     _, b, c = _level_sums(model, y, r, x)
     return b / c .+ smooth_track(model, y .- b / c, r, x)
-end
-
-# The slots of the phase pieces under a prior whose 2π branches the data do not
-# determine: those whose slip probability under the track's resolved prior
-# exceeds `max_slip`, with every piece sharing a level with one.
-function _undetermined_slots(tracks, acting, priors, y, wy, max_slip)
-    out = Set{Int}()
-    for (j, i) in pairs(acting)
-        t = tracks[i]
-        slip = fill(NaN, length(t.pieces))
-        _choose_branches!(zeros(length(y)), t, priors[j], y, wy, falses(length(y)); slip)
-        undetermined = [p for p in eachindex(slip) if t.active[p] && slip[p] > max_slip]
-        isnothing(t.level) || (undetermined = findall(in(t.level[undetermined]), t.level))
-        foreach(p -> union!(out, t.slots[t.pieces[p]]), undetermined)
-    end
-    return out
 end
 
 # Move each gauge row's right-hand side by the branch shifts of its slots, so

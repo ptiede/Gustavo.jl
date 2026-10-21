@@ -391,17 +391,6 @@ The bandpass solve uses this for the track alone to start its hyperparameters,
 then fits them on the chosen branches together with every other track's (see
 [The bandpass posterior](@ref bandpass-posterior)).
 
-### The probability of a slip
-
-The histories left at the end measure how well the data determine the branches.
-The slip probability of a track is the total weight of the histories whose fitted
-track differs from the most probable one's by more than ``\pi/2`` at some sample,
-once a common phase is removed (`_slip_probability`). The smoother is linear, so
-two histories' fits differ by the fit of the difference of their lifts, which is
-what is compared. A value near zero means one branch history dominates; a large
-one means the data at that signal-to-noise ratio do not determine the track, and
-the fitted track is one of several the posterior allows.
-
 ### Limits
 
 The wrapped normal is the likelihood when the phase noise is Gaussian. A phase
@@ -625,11 +614,12 @@ Association* 81(393), 82–86.
 **Bandpass, [`JointSmoother`](@ref).** Each (station, feed, time segment)
 has one track per spectral window along frequency, and the solve maximizes the
 posterior of every track at once, as described in
-[The bandpass posterior](@ref bandpass-posterior) below. Each iteration
-puts each phase window on its most probable branches; fits every track's
-hyperparameters together to the marginal likelihood of the linearized
-posterior; and takes one damped Gauss–Newton step of the posterior. The report's `phase_slip` holds each
-window's slip probability from the last iteration.
+[The bandpass posterior](@ref bandpass-posterior) below. The first iteration
+puts each phase window on its most probable branches, and later ones move a
+window by multiples of 2π only where that lowers the prior energy; each
+iteration fits every track's hyperparameters together to the marginal
+likelihood of the linearized posterior and takes one damped Gauss–Newton step
+of the posterior.
 
 **Adhoc phase, [`PerTrackAdhocSmoother`](@ref).** After the per-AP solve, each
 (station, feed node) track of a scan is fit on its own: hyperparameters per

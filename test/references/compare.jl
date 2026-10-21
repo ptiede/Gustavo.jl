@@ -145,7 +145,7 @@ function detection_difference(recorded, info)
     )
 end
 
-const BANDPASS_COUNTS = ("n_solved", "n_flat", "n_nodata", "n_declined")
+const BANDPASS_COUNTS = ("n_solved", "n_flat", "n_nodata")
 
 function compare_run(root, sols)
     ax = recorded_axes(root)

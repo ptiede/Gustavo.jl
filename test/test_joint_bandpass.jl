@@ -373,8 +373,8 @@ end
             θ, results, geom, phase_blocks, amp_blocks;
             gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13, tseg,
         )
-        FP._record_track_fits!(phase_status, nothing, nothing, fits.phase)
-        FP._record_track_fits!(amp_status, nothing, nothing, fits.amp)
+        FP._record_track_fits!(phase_status, nothing, fits.phase)
+        FP._record_track_fits!(amp_status, nothing, fits.amp)
 
         pleaf = CAL._component_leaf(phase_plan, θ)
         aleaf = CAL._component_leaf(amp_plan, θ)
@@ -458,8 +458,8 @@ end
             θ, results, geom, phase_blocks, amp_blocks;
             gauge = PinAntenna(2), max_iterations = 200, tolerance = 1.0e-13, tseg = tsg,
         )
-        FP._record_track_fits!(phase_status, nothing, nothing, fits.phase)
-        FP._record_track_fits!(amp_status, nothing, nothing, fits.amp)
+        FP._record_track_fits!(phase_status, nothing, fits.phase)
+        FP._record_track_fits!(amp_status, nothing, fits.amp)
 
         demean(v) = v .- sum(v) / length(v)
         cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
@@ -807,7 +807,7 @@ end
         amp_priors = [FP._block_prior_array(b, geom) for b in ab]
         @test all(p -> p === ou, only(amp_priors))
         fits = FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1))
-        FP._record_track_fits!(nothing, amp_priors, nothing, fits.amp)
+        FP._record_track_fits!(nothing, amp_priors, fits.amp)
         @test all(p -> CAL.is_fixed_hyper(p.scale) && CAL.is_fixed_hyper(p.σ), only(amp_priors))
         rep = FP._bandpass_track_report(nothing, nothing; amp_priors = only(amp_priors))
         @test rep.amp_priors === only(amp_priors)
@@ -1193,7 +1193,7 @@ end
     @test abs(lσ[1, 1] - median(lσ[2:end, :])) < 1.5
 end
 
-@testset "JointSmoother: a piece whose phase branches the data do not determine is declined" begin
+@testset "JointSmoother: a station whose baselines carry noise alone leaves the others as if it were flagged" begin
     nant, nspw, nchan, ntime, nscans = 4, 2, 16, 6, 3
     rng = MersenneTwister(0xDEC1)
     bp_true = cumsum(0.1 .* randn(rng, nant, 2, nspw * nchan); dims = 3)
@@ -1211,37 +1211,21 @@ end
     unit = sqrt(3 / (2 * 2.0e6^3))
     rw2(σ) = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(σ * unit), 1.0))
     bpc(prior) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
-    step = Bandpass(; model = CAL.GainModel(; phase = (; bandpass = bpc(rw2(0.05))), logamp = (; bandpass = bpc(rw2(0.02)))), gauge = PinAntenna(1))
-    sol = @test_logs (:warn, r"declined .* of A4") match_mode = :any fit(step, ps)
+    step = Bandpass(;
+        model = CAL.GainModel(; phase = (; bandpass = bpc(rw2(0.05))), logamp = (; bandpass = bpc(rw2(0.02)))), gauge = PinAntenna(1),
+        smoother = FP.JointSmoother(; max_iterations = 100),
+    )
+    sol = fit(step, ps)
 
-    st = sol.info.phase_status
-    a4 = findfirst(==("A4"), lookup(st, AntennaName))
-    @test all(==(FP.TrackDeclined), parent(st)[a4, :, :, :])
-    @test all(==(FP.TrackDeclined), parent(sol.info.amp_status)[a4, :, :, :])
-    @test !any(==(FP.TrackDeclined), parent(st)[setdiff(axes(st, 1), a4), :, :, :])
-    @test sol.info.n_declined == 2 * length(parent(st)[a4, :, :, :])
-    @test all(iszero, _jb_leaf(sol, :phase)[:, :, :, :, a4])
-    @test all(iszero, _jb_leaf(sol, :logamp)[:, :, :, :, a4])
-
-    # The other stations are solved as if A4's correlations were flagged.
     flagged = Gustavo.materialize(ps)
     for ms in values(flagged), (bi, pair) in pairs(XRadio.baselines(ms))
         "A4" in pair && (view(ms[:flag], BaselineID(bi)) .= true)
     end
-    ref = fit(step, flagged)
-    others = setdiff(axes(st, 1), a4)
+    ref = @test_logs (:warn, r"carry no measured frequency shape") match_mode = :any fit(step, flagged)
+    st = sol.info.phase_status
+    others = setdiff(axes(st, 1), findfirst(==("A4"), lookup(st, AntennaName)))
     for obs in (:phase, :logamp)
-        @test _jb_leaf(sol, obs)[:, :, :, :, others] ≈ _jb_leaf(ref, obs)[:, :, :, :, others] atol = 1.0e-4
-    end
-
-    # `apply_flags` flags A4's correlations in the declined pieces, and nothing else.
-    on, off = calibrate(sol, ps), calibrate(sol, ps; apply_flags = false)
-    for (m, n) in zip(values(on), values(off)), (bi, pair) in pairs(XRadio.baselines(m))
-        if "A4" in pair
-            @test all(view(m[:flag], BaselineID(bi)))
-        else
-            @test view(m[:flag], BaselineID(bi)) == view(n[:flag], BaselineID(bi))
-        end
+        @test maximum(abs, _jb_leaf(sol, obs)[:, :, :, :, others] .- _jb_leaf(ref, obs)[:, :, :, :, others]) < 1.0e-3
     end
 end
 

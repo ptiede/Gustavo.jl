@@ -412,8 +412,7 @@ function _fit_one_track(y, w, x, pieces, prior; level = nothing, nlevel = 0, pha
     yk, wk = ifelse.(known, y, NaN), ifelse.(known, w, 0.0)
     x0 = ifelse.(known, y, 0.0)
     priors = Any[any(t.active) ? FP._seed_prior(t, yk, wk; phase) : prior]
-    slip = fill(NaN, length(pieces))
-    phase && any(t.active) && FP._choose_branches!(x0, t, only(priors), yk, wk, known; slip)
+    phase && any(t.active) && FP._choose_branches!(x0, t, only(priors), yk, wk, known)
     free = copy(known)
     for (j, p) in pairs(pieces)
         t.active[j] && (free[p] .= true)
@@ -423,7 +422,7 @@ function _fit_one_track(y, w, x, pieces, prior; level = nothing, nlevel = 0, pha
     x1, levels, _ = FP._map_step(sys, any(t.active) ? priors : [])
     values = ifelse.(free, x1, NaN)
     status = [FP._band_track_status(values[p], flat_span) for p in pieces]
-    return (; values, status, prior = only(priors), levels = any(t.active) ? only(levels) : Dict{Int, Float64}(), slip)
+    return (; values, status, prior = only(priors), levels = any(t.active) ? only(levels) : Dict{Int, Float64}())
 end
 
 @testset "Bandpass: a slot takes the branch nearest the fitted track" begin
@@ -504,12 +503,11 @@ end
     prior = CAL.OUPrior(; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.3), 1.0))
     fit(y, w; kw...) = _fit_one_track(y, w, x, pieces, prior; phase = true, kw...)
 
-    # A clean, structured track: every piece solved, its branches certain.
+    # A clean, structured track: every piece solved.
     smooth = 0.3 .* sin.(range(0, 6π; length = nband * nchan))
     w = fill(1.0e4, nband * nchan)
     f = fit(smooth, w)
     @test all(==(FP.TrackSolved), f.status)
-    @test all(<(1.0e-6), f.slip)
     # The resolved prior: hyperpriors become the fitted values.
     @test CAL.is_fixed_hyper(f.prior.scale) && CAL.is_fixed_hyper(f.prior.σ)
 
@@ -521,7 +519,6 @@ end
     f = fit(gappy, wg)
     @test f.status[1] == FP.TrackNoData
     @test all(isnan, f.values[1:nchan])
-    @test isnan(f.slip[1])
 
     # A constant piece is fit, but carries no shape — reported as flat rather
     # than passed off as a measured response.
@@ -686,7 +683,6 @@ end
     @test rep.amp_status isa AbstractArray && isempty(rep.amp_status)
     @test rep.phase_status === phase_status
     @test rep.phase_priors isa AbstractArray && isempty(rep.phase_priors)
-    @test rep.phase_slip isa AbstractArray && isempty(rep.phase_slip)
     # Per-block arrays are counted together.
     blocks = FP._bandpass_track_report((g1 = phase_status, g2 = phase_status), nothing)
     @test (blocks.n_solved, blocks.n_flat, blocks.n_nodata) == (2, 2, 4)
@@ -694,10 +690,6 @@ end
     # whether that warns.
     @test_logs (:warn, r"75.0% of") FP._warn_degenerate_bandpass(rep, 0.5)
     @test_logs FP._warn_degenerate_bandpass(rep, 0.8)
-    # A phase piece whose slip probability reaches the smoother's threshold warns.
-    slipped = FP._bandpass_track_report(phase_status, nothing; phase_slip = reshape([0.01 0.2; NaN NaN], 2, 2, 1))
-    @test_logs (:warn, r"1 of 2 phase pieces") FP._warn_uncertain_branches(slipped, 0.05)
-    @test_logs FP._warn_uncertain_branches(slipped, 0.5)
 end
 
 @testset "Bandpass: the solve publishes its per-track record" begin
@@ -722,9 +714,6 @@ end
     # High-SNR synthetic data with real injected structure: the tracks are
     # measured, not placeholders.
     @test info.n_solved > total ÷ 2
-    # No phase prior, so no branch was chosen and no slip probability recorded.
-    @test dims(info.phase_slip) == dims(info.phase_status)
-    @test all(isnan, info.phase_slip)
     # No prior to resolve: every track records the component's own.
     @test size(info.phase_priors) == (nant, 2, 1)
     @test all(isnothing, info.phase_priors) && all(isnothing, info.amp_priors)

@@ -234,24 +234,3 @@ function _align_branches!(ys, ws, level)
     end
     return ys
 end
-
-# The posterior probability, among the histories `_branch_filter` carried, that
-# the fitted track differs from the most probable history's by more than π/2 at
-# some sample once a common phase is removed: that the fit carries a 2π slip.
-# The smoother is linear, so two histories' fits differ by the fit of their
-# difference (its own level removed, with `level`).
-function _slip_probability(model, histories, r, x; level::Bool)
-    best = first(histories).lift
-    p = zero(first(histories).weight)
-    for h in Iterators.drop(histories, 1)
-        Δ = h.lift .- best
-        if level
-            _, b, c = _level_sums(model, Δ, r, x)
-            Δ .-= b / c
-        end
-        d = smooth_track(model, Δ, r, x)
-        z = angle(sum(cis, d))
-        any(v -> abs(rem2pi(v - z, RoundNearest)) > π / 2, d) && (p += h.weight)
-    end
-    return p
-end

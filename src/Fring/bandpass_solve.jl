@@ -124,8 +124,7 @@ end
     solve_joint_bandpass!(θ, scans, geom::DataGeometry, phase_blocks, amp_blocks;
                           phase_level_blocks = [], amp_level_blocks = [],
                           gauge, max_iterations = 50, tolerance = 0.01,
-                          flat_span = 0.01, eltype = nothing, tseg = nothing,
-                          max_slip_probability = Inf) -> (; phase, amp)
+                          flat_span = 0.01, eltype = nothing, tseg = nothing) -> (; phase, amp)
 
 Jointly solve the per-(station, feed, frequency segment) complex bandpass gain
 and a per-scan, per-station-pair, per-feed-pair constant source coherence (see
@@ -203,13 +202,7 @@ profiled over that constant as well. Each iteration:
    the posterior with `S` re-solved is no lower.
 
 The solve starts from every slot's own estimate given unit gains elsewhere, and
-the hyperparameters from type-II MAP on each track alone. A phase piece whose
-posterior probability of a 2π slip there exceeds `max_slip_probability` is
-declined, with the pieces sharing its level: the data do not determine its
-branches. The solve is then repeated with the correlations of the declined
-slots flagged (`declined`), so they reach no gain, source term or gauge; both
-observables of a declined piece stay at unit gain and are reported
-`TrackDeclined`. Convergence is judged
+the hyperparameters from type-II MAP on each track alone. Convergence is judged
 on the largest change the undamped step makes to any (station, feed, segment)
 gain's log, in standard errors of that gain from the data, so a gain the data
 barely constrain counts for as little as its precision. The solve stops once
@@ -226,11 +219,9 @@ graph, so this is one criterion over one coupled problem: nodes that share no
 data are solved by separate calls rather than being averaged into a common
 tolerance.
 
-Returns, per observable, one `(; track, prior, status, slip)` per (station,
-feed, time segment) track: the track, the prior it was fit under with its
-hyperparameters resolved, the [`TrackStatus`](@ref) of each spectral window,
-and for a phase track each spectral window's posterior probability of a 2π slip
-from the last iteration (`nothing` for an amplitude track). The data are reduced
+Returns, per observable, one `(; track, prior, status)` per (station, feed, time
+segment) track: the track, the prior it was fit under with its hyperparameters
+resolved, and the [`TrackStatus`](@ref) of each spectral window. The data are reduced
 and the gains and source terms held in the accumulators' types, or in the real
 type `eltype`; the steps are solved in `Float64`.
 """
@@ -240,7 +231,6 @@ function solve_joint_bandpass!(
         gauge::AbstractGauge, max_iterations::Integer = 50, tolerance::Real = 0.01,
         flat_span::Real = 0.01, eltype = nothing,
         tseg::Union{Nothing, AbstractMatrix{<:Integer}} = nothing,
-        max_slip_probability::Real = Inf, declined::AbstractSet{<:Integer} = Set{Int}(),
     )
     isempty(scans) && return (; phase = [], amp = [])
     nant = length(geom.antennas)
@@ -266,12 +256,6 @@ function solve_joint_bandpass!(
     gains = [_block_gains(b, geom, Base.eltype(r)) for b in blocks]
     ids = _gain_slot_ids(gains)
     jl = _joint_gain_layout(data, layout, ids)
-    # The correlations of declined slots are flagged for this solve: they reach no
-    # gain, `S` or the gauge.
-    for I in CartesianIndices(jl.edge)
-        e = jl.edge[I]
-        !iszero(e) && any(in(declined), jl.slot_pairs[e]) && (w[I] = 0)
-    end
     # The gauge fixes phases; a solve that holds every phase at zero has none to fix.
     gauge_state = isempty(phase_blocks) ? nothing : _joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
     gauge_rows = isnothing(gauge_state) ? nothing : (; gauge_state.rows, d = Float64.(gauge_state.d))
@@ -318,7 +302,6 @@ function solve_joint_bandpass!(
     free = (; phase = movable(:phase) .& .!pinned, amp = movable(:amp))
     filled = map(obs -> movable(obs) .& .!hasdata, (; phase = :phase, amp = :amp))
     acting = map(ts -> findall(t -> any(t.active), ts), tracks)
-    slips = [fill(NaN, length(t.pieces)) for t in tracks.phase]
     track_layouts = map(ts -> map(_track_layout, ts), tracks)
 
     # Float64 whatever the data's type: CHOLMOD factors only Float64.
@@ -349,16 +332,6 @@ function solve_joint_bandpass!(
         y, wy = estimates[obs]
         return [_seed_prior(tracks[obs][i], y, wy; phase = obs === :phase) for i in acting[obs]]
     end
-    # Phase pieces whose branches the data do not determine are declined, and the
-    # solve is repeated without their correlations.
-    if fitted.phase && isempty(declined)
-        undetermined = _undetermined_slots(tracks.phase, acting.phase, priors.phase, estimates.phase..., max_slip_probability)
-        isempty(undetermined) || return solve_joint_bandpass!(
-            θ, scans, geom, phase_blocks, amp_blocks;
-            phase_level_blocks, amp_level_blocks, gauge, max_iterations, tolerance, flat_span, eltype, tseg,
-            max_slip_probability, declined = undetermined,
-        )
-    end
     energy(obs, x) = sum((first(_track_energy(track_layouts[obs][i], priors[obs][j], x)) for (j, i) in pairs(acting[obs])); init = 0.0)
     objective(ℓ, φ, S) = _chi2(gains_of(ℓ, φ), S, data, jl) / 2 + energy(:phase, φ) + energy(:amp, ℓ)
     key = zeros(nslots)
@@ -382,7 +355,7 @@ function solve_joint_bandpass!(
             y, wy = iteration == 1 ? _slot_estimates(φ, lin, :phase) : (nothing, nothing)
             for (j, i) in pairs(acting.phase)
                 shift = if iteration == 1
-                    _choose_branches!(φ, tracks.phase[i], priors.phase[j], y, wy, free.phase; slip = slips[i])
+                    _choose_branches!(φ, tracks.phase[i], priors.phase[j], y, wy, free.phase)
                 else
                     order = priors.phase[j] isa RandomWalkPrior ? priors.phase[j].order : 1
                     moved, pieces = _wrap_differences!(φ, tracks.phase[i], order, free.phase, phase_energy(i, j))
@@ -494,12 +467,6 @@ function solve_joint_bandpass!(
     end
     isempty(kept_back) || @warn "the joint bandpass solve kept the current 2π branches of $(length(kept_back)) phase " *
         "pieces where moving every difference to its nearest wrap would not have lowered the prior energy"
-    if fitted.phase
-        y, wy = _slot_estimates(φ, _linearize(gains_of(ℓ, φ), S, data, jl, nslots), :phase)
-        for (j, i) in pairs(acting.phase)
-            _choose_branches!(zeros(length(y)), tracks.phase[i], priors.phase[j], y, wy, falses(length(y)); slip = slips[i])
-        end
-    end
     free_amp = fitted.amp ? _split_free_amplitudes!(ℓ, jl.slot_pairs[measured], free.amp, tracks.amp) : NamedTuple[]
     if !isempty(free_amp)
         g = first(free_amp)
@@ -556,7 +523,6 @@ function solve_joint_bandpass!(
             t = tracks[obs][i]
             j = prior_of[i]
             status = map(t.pieces) do p
-                all(in(declined), t.slots[p]) && return TrackDeclined
                 all(pinned[t.slots[p]]) && obs === :phase && return TrackSolved
                 return _band_track_status([valid[n] ? x[n] : NaN for n in t.slots[p]], flat_span)
             end
@@ -566,7 +532,7 @@ function solve_joint_bandpass!(
                     levels[t.a][obs][t.feed, g, t.ts] = v
                 end
             end
-            return (; track = t, prior = iszero(j) ? t.prior : priors[obs][j], status, slip = obs === :phase ? slips[i] : nothing)
+            return (; track = t, prior = iszero(j) ? t.prior : priors[obs][j], status)
         end
     end
     level_writers = [
@@ -674,16 +640,14 @@ function _prior_projectors(t)
 end
 
 # Record a joint solve's track fits (`solve_joint_bandpass!`) into one array per
-# station block of their status (`_block_status_array`), prior
-# (`_block_prior_array`) and slip probability (`_block_slip_array`), each
-# `nothing` to skip. A solve over part of a track's time writes only its own
-# time segments.
-function _record_track_fits!(status, priors, slip, fits)
+# station block of their status (`_block_status_array`) and prior
+# (`_block_prior_array`), each `nothing` to skip. A solve over part of a track's
+# time writes only its own time segments.
+function _record_track_fits!(status, priors, fits)
     for f in fits
         t = f.track
         isnothing(status) || (status[t.k][t.ai, t.feed, :, t.ts] = f.status)
         isnothing(priors) || (priors[t.k][t.ai, t.feed, t.ts] = f.prior)
-        isnothing(slip) || isnothing(f.slip) || (slip[t.k][t.ai, t.feed, :, t.ts] = f.slip)
     end
     return nothing
 end
