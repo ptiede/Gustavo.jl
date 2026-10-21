@@ -76,7 +76,7 @@ robust_weight(::Cauchy, u::Real) = inv(1 + u)
 
 """
     Stationization(; eltype = Float64, pfa_max, weak_sys_scale, loss, loss_scale,
-                     irls_iters, systematic_delay, systematic_rate)
+                     irls_iters, systematic_delay, systematic_delay_rate)
     Stationization{T}(; kw...)
 
 Options for [`solve_antenna_systems!`](@ref).
@@ -108,11 +108,16 @@ Weights come from the noise model rather than the residual spread, so
 `loss_scale` cuts at the same effective threshold whatever the system size.
 `loss = LeastSquares()` disables downweighting.
 
-`systematic_delay`/`systematic_rate` (seconds / Hz) are floors added in
-quadrature to a row's CRB uncertainty: `w = 1/(σ_CRB² + systematic²)`; without
-one, data with no real systematics drives `z` to the numerical noise floor and
-the loss reweights rounding noise. `weak_sys_scale` multiplies the total σ of
-an above-threshold row, floor included.
+`systematic_delay` (seconds) and `systematic_delay_rate` (seconds per second)
+are floors added in quadrature to a row's CRB uncertainty:
+`w = 1/(σ_CRB² + systematic²)`. A rate row's floor is `systematic_delay_rate`
+times its scan's mean frequency (`freq_mean`), since a non-dispersive delay
+rate τ̇ moves the fringe rate by `ν·τ̇`. The default delay-rate floor, 2.3e-15,
+is the tropospheric floor measured at 43 GHz on the VLBA (a fringe-rate floor
+of 1e-4 Hz). Without a floor, data with no real systematics drives `z` to the
+numerical noise floor and the loss reweights rounding noise.
+`weak_sys_scale` multiplies the total σ of an above-threshold row, floor
+included.
 """
 struct Stationization{T <: AbstractFloat, L <: AbstractRobustLoss}
     pfa_max::T
@@ -121,7 +126,7 @@ struct Stationization{T <: AbstractFloat, L <: AbstractRobustLoss}
     loss_scale::T
     irls_iters::Int
     systematic_delay::T
-    systematic_rate::T
+    systematic_delay_rate::T
 end
 
 Stationization(; eltype::Type{<:AbstractFloat} = Float64, kw...) = Stationization{eltype}(; kw...)
@@ -129,10 +134,10 @@ Stationization(; eltype::Type{<:AbstractFloat} = Float64, kw...) = Stationizatio
 function Stationization{T}(;
         pfa_max = 1.0e-4, weak_sys_scale = 1.0e3,
         loss = SoftL1(), loss_scale = 8.0, irls_iters = 5,
-        systematic_delay = 0.0, systematic_rate = 0.0,
+        systematic_delay = 0.0, systematic_delay_rate = 2.3e-15,
     ) where {T}
     return Stationization{T, typeof(loss)}(
-        pfa_max, weak_sys_scale, loss, loss_scale, irls_iters, systematic_delay, systematic_rate,
+        pfa_max, weak_sys_scale, loss, loss_scale, irls_iters, systematic_delay, systematic_delay_rate,
     )
 end
 
@@ -208,6 +213,21 @@ function _require_spread(spread, kind::Symbol, loss::AbstractRobustLoss)
     )
 end
 
+# A rate row's systematic floor (Hz): the delay-rate floor at the scan's mean
+# frequency.
+function _rate_floor(delay_rate, freq_mean)
+    iszero(delay_rate) && return zero(delay_rate)
+    (!isnothing(freq_mean) && freq_mean > 0) || throw(
+        ArgumentError(
+            "`Stationization(; systematic_delay_rate = $delay_rate)` needs the scan's mean " *
+                "frequency to give a rate row its floor, but `freq_mean` is " *
+                "$(isnothing(freq_mean) ? "missing" : "$freq_mean"). Supply it (see " *
+                "`detection_stack`), or set `systematic_delay_rate = 0`.",
+        ),
+    )
+    return delay_rate * freq_mean
+end
+
 # ── Generic, model-driven station solve ─────────────────────────────────────
 #
 # `solve_antenna_systems!` has no node space of its own: the unknowns are the θ
@@ -235,13 +255,14 @@ end
 
 """
     detection_stack(D::AbstractMatrix{<:Detection}, antenna_pairs, feeds;
-                    ti, freq_rms, time_rms) -> DimStack
+                    ti, freq_mean, freq_rms, time_rms) -> DimStack
 
 Package a plain `[antenna pair, feed pair]` detection matrix as the
 `AntennaPair × FeedPair` DimStack shape `search_scan` returns, labeled by the
 antenna-name pairs `antenna_pairs` and the feed-index pairs `feeds` (see
-[`feed_pairs`](@ref)), carrying `ti` (the representative global time index) in
-metadata — so a scan built directly (the refine stage, or a
+[`feed_pairs`](@ref)), carrying `ti` (the representative global time index),
+the scan's mean frequency `freq_mean` (Hz) and its RMS frequency and time
+spreads in metadata — so a scan built directly (the refine stage, or a
 direct `solve_antenna_systems!` call) has the same shape as
 one that came from the search, and every consumer reads pairs/feeds/ti off the
 stack uniformly.
@@ -249,6 +270,7 @@ stack uniformly.
 function detection_stack(
         D::AbstractMatrix{<:Detection}, antenna_pairs, feeds;
         ti::Integer,
+        freq_mean::Union{Nothing, Real} = nothing,
         freq_rms::Union{Nothing, Real} = nothing,
         time_rms::Union{Nothing, Real} = nothing,
     )
@@ -263,21 +285,21 @@ function detection_stack(
         valid = DimArray(getfield.(D, :valid), gdims),
     )
     return DimensionalData.DimStack(
-        layers; metadata = _scan_meta(ti, freq_rms, time_rms),
+        layers; metadata = _scan_meta(ti, freq_mean, freq_rms, time_rms),
     )
 end
 
 # A detection stack's scan-level provenance: the representative global time
-# index and the RMS frequency/time spreads the weights need.
-_scan_meta(ti, freq_rms, time_rms) = (; ti = Int(ti), freq_rms, time_rms)
+# index, and the mean frequency and RMS frequency/time spreads the weights need.
+_scan_meta(ti, freq_mean, freq_rms, time_rms) = (; ti = Int(ti), freq_mean, freq_rms, time_rms)
 
 # Attach a representative global time index to an existing detection stack (the
 # search's own `search_scan` return, which carries no `:ti` — the caller knows
 # which window it searched).
 _with_ti(
-    stack::AbstractDimStack, ti::Integer;
+    stack::AbstractDimStack, ti::Integer; freq_mean::Union{Nothing, Real} = nothing,
     freq_rms::Union{Nothing, Real} = nothing, time_rms::Union{Nothing, Real} = nothing,
-) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, freq_rms, time_rms))
+) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, freq_mean, freq_rms, time_rms))
 
 _scan_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, AntennaPair))
 _scan_feeds(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, FeedPair))
@@ -360,7 +382,6 @@ function _solve_kind_cols!(
         ::Val{kind},
     ) where {T, kind}
     getval(d) = getfield(d, kind)
-    sys = kind === :delay ? opts.systematic_delay : opts.systematic_rate
     spread_key = kind === :delay ? :freq_rms : :time_rms
 
     colnode = Dict{Int, Int}()               # θ column → local node id
@@ -402,6 +423,7 @@ function _solve_kind_cols!(
         σ = T(_require_spread(getproperty(DimensionalData.metadata(sc), spread_key), kind, opts.loss))
         σν = kind === :delay ? σ : one(T)
         σt = kind === :rate ? σ : one(T)
+        sys = kind === :delay ? T(opts.systematic_delay) : T(_rate_floor(opts.systematic_delay_rate, DimensionalData.metadata(sc).freq_mean))
         for bi in eachindex(bl_pairs), p in eachindex(feeds)
             det = sc[AntennaPair(bi), FeedPair(p)]
             det.valid || continue                   # no data in this cell, no measurement

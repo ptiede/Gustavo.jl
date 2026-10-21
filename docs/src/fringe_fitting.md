@@ -414,7 +414,13 @@ expression overstates the lever arm.
 A systematic floor is added in quadrature,
 ``w = 1/(\sigma_\mathrm{CRB}^2 + \sigma_\mathrm{sys}^2)``. Without it, data free
 of systematics drives the normalized residuals to the numerical noise floor,
-and the robust loss below then reweights rounding error.
+and the robust loss below then reweights rounding error. The rate floor is a
+delay rate, ``\sigma_\mathrm{sys} = \bar\nu\,\sigma_{\dot\tau}`` with
+``\bar\nu`` the scan's mean frequency, because a non-dispersive delay rate
+``\dot\tau``, such as the troposphere's, moves the fringe rate by
+``\bar\nu\dot\tau``; a floor stated in hertz would hold at one observing
+frequency only. The default ``\sigma_{\dot\tau} = 2.3\times10^{-15}`` is the
+floor measured on the VLBA at 43 GHz, ``10^{-4}`` Hz in fringe rate.
 
 A weighted least-squares solution is invariant under scaling every weight of a
 system by a common constant, and ``\sigma_\nu``, ``\sigma_t`` are common to all

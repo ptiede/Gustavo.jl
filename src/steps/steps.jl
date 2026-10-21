@@ -347,9 +347,10 @@ function _solve_group(
     antenna_pairs = gc.antenna_pairs
     # The scan's frequency/time lever arms travel with its detections: they set
     # the CRB uncertainty of a delay and a rate, which is what puts the station
-    # solve's residuals in units of σ (see `Stationization`).
+    # solve's residuals in units of σ, and its mean frequency sets the rate floor
+    # (see `Stationization`).
     det = Fring._with_ti(
-        res, ti;
+        res, ti; freq_mean = sum(gc.freqs) / length(gc.freqs),
         freq_rms = Fring._rms_spread(gc.freqs), time_rms = Fring._rms_spread(gc.times),
     )
 

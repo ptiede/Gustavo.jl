@@ -45,12 +45,12 @@ end
 
 all_baselines(nant) = [(a, b) for a in 1:nant for b in (a + 1):nant]
 
-# A representative scan geometry for the row weights: a 2 GHz spanned band and a
-# 300 s scan, as RMS spreads (uniform coverage ⇒ width/√12). These set the CRB σ
-# of a delay and a rate, so they fix what `loss_scale` means; the weighted
-# least-squares solution itself is invariant to them, since every row of a scan
-# shares the same factor.
-const SCAN_SPREAD = (freq_rms = 2.0e9 / sqrt(12), time_rms = 300.0 / sqrt(12))
+# A representative scan geometry for the row weights: a 2 GHz spanned band at
+# 230 GHz and a 300 s scan, the spreads as RMS (uniform coverage ⇒ width/√12).
+# The spreads set the CRB σ of a delay and a rate, so they fix what `loss_scale`
+# means; the weighted least-squares solution itself is invariant to them, since
+# every row of a scan shares the same factor.
+const SCAN_SPREAD = (freq_mean = 230.0e9, freq_rms = 2.0e9 / sqrt(12), time_rms = 300.0 / sqrt(12))
 
 # CRB σ of one delay / rate detection at `snr` on that geometry.
 delay_sigma(snr) = inv(2π * SCAN_SPREAD.freq_rms * snr)
@@ -404,7 +404,10 @@ end
     mbd, rel, rate = layout.plans
     θ = zeros(layout.nθ)
     comps = ((mbd, :delay), (rel, :delay), (rate, :rate))
-    _, covered = solve_named!(θ, (detstack(D, bl, pols; ti = 1),), comps; gauge = PinAntenna(ref))
+    # Without a floor the rejected rows' weight is a 10⁻⁶ fraction of the
+    # accepted ones', so their wrong rate moves the lone feed's by < 1e-9.
+    opts = FR.Stationization(systematic_delay_rate = 0.0)
+    _, covered = solve_named!(θ, (detstack(D, bl, pols; ti = 1),), comps; gauge = PinAntenna(ref), opts)
 
     col(plan, a, f) = θ[plan_off1(plan)[a, f, 1, 1]]
     @test covered == Set((ANTENNAS[a], f, 1) for a in 1:nant for f in 1:2 if (a, f) != (lone, 2))
@@ -682,17 +685,18 @@ end
             s.D, s.bl, s.pols, 4; gauge = PinAntenna(1), spreads = (freq_rms = SCAN_SPREAD.freq_rms,),
             opts = FR.Stationization(loss = FR.SoftL1()),
         )
-        # `LeastSquares` needs no geometry: scaling every weight in a system by
-        # a common factor leaves the solution invariant (to rounding — the QR
-        # runs on differently scaled numbers, so this is not bit-identical).
-        bare = stationize(
+        # A delay-rate floor needs the scan's mean frequency.
+        @test_throws "needs the scan's mean frequency" stationize(
             s.D, s.bl, s.pols, 4; gauge = PinAntenna(1), spreads = (;),
             opts = FR.Stationization(loss = FR.LeastSquares()),
-        ).delay
-        scaled = stationize(
-            s.D, s.bl, s.pols, 4; gauge = PinAntenna(1),
-            opts = FR.Stationization(loss = FR.LeastSquares()),
-        ).delay
+        )
+        # `LeastSquares` without floors needs no geometry: scaling every weight
+        # in a system by a common factor leaves the solution invariant (to
+        # rounding — the QR runs on differently scaled numbers, so this is not
+        # bit-identical).
+        unfloored = FR.Stationization(loss = FR.LeastSquares(), systematic_delay_rate = 0.0)
+        bare = stationize(s.D, s.bl, s.pols, 4; gauge = PinAntenna(1), spreads = (;), opts = unfloored).delay
+        scaled = stationize(s.D, s.bl, s.pols, 4; gauge = PinAntenna(1), opts = unfloored).delay
         @test bare ≈ scaled atol = 1.0e-18
     end
 
@@ -794,10 +798,14 @@ end
 end
 
 @testset "Stationize: systematic floor constructor defaults" begin
-    o = FR.Stationization(systematic_delay = 3.0e-12, systematic_rate = 2.0e-3)
+    o = FR.Stationization(systematic_delay = 3.0e-12, systematic_delay_rate = 1.0e-14)
     @test o.systematic_delay == 3.0e-12
-    @test o.systematic_rate == 2.0e-3
-    @test FR.Stationization().systematic_delay == FR.Stationization().systematic_rate == 0
+    @test o.systematic_delay_rate == 1.0e-14
+    @test FR.Stationization().systematic_delay == 0
+    @test FR.Stationization().systematic_delay_rate == 2.3e-15
+    @test FR._rate_floor(2.0e-15, 86.0e9) ≈ 1.72e-4
+    @test FR._rate_floor(0.0, nothing) == 0
+    @test_throws "needs the scan's mean frequency" FR._rate_floor(2.0e-15, nothing)
     @test FR.Stationization() == FR.Stationization()
 end
 
