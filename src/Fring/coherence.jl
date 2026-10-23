@@ -131,17 +131,16 @@ end
 # intervals: a single walk fans every cell into all nT (or nF) running
 # accumulators. The denominator Σ w·|V| and `npts` are interval-independent, summed
 # once. Intervals are used as given.
-# `Fl` is the flag layer over `V`, or `nothing` for an already-collapsed cube:
-# `_collapse_axis` has excluded the flagged samples, so the reduced cells carry
-# no flag of their own.
+# A sample counts where its weight is positive and finite and its visibility
+# finite; a flagged sample carries zero weight.
 function _coherence_accumulate!(
         numT::Matrix{Float64}, numF::Matrix{Float64}, den::Vector{Float64}, dvar::Vector{Float64},
         npts::Vector{Int},
-        V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, Fl, blmap::Vector{Int}, plist::Vector{Int},
+        V::AbstractArray{Tv, 4}, W::AbstractArray{Tw, 4}, blmap::Vector{Int}, plist::Vector{Int},
         times_sec::Vector{Float64}, freqs::Vector{Float64}, dts::Vector{Float64}, dnus::Vector{Float64},
         debias::Bool,
     ) where {Tv, Tw}
-    Fl === nothing || check_layer_axes(V, W, Fl)
+    check_layer_axes(V, W)
     nchan, nti, nbl, npol = size(V)
     nT = length(dts); nF = length(dnus)
     tperm = sortperm(times_sec)
@@ -186,7 +185,7 @@ function _coherence_accumulate!(
     # so η ≡ 1 there — an identity both estimators preserve.
     binval(s::ComplexF64, sw::Float64) = debias ? (abs2(s) - 2 * sw) / sw : abs(s)
 
-    # Spanning the cube's own axes drops the checks on the `V`/`W`/`Fl` reads;
+    # Spanning the cube's own axes drops the checks on the `V`/`W` reads;
     # the annotation stays for `blmap`, `den`/`npts` and the per-bin
     # accumulators, which are indexed through values rather than loop ranges.
     @inbounds for bli in axes(V, 3)
@@ -204,7 +203,6 @@ function _coherence_accumulate!(
             # noise-inflated above the true signal for weak cells, holding η
             # below 1 even after the numerator's bins reach high SNR).
             for ti in axes(V, 2), c in axes(V, 1)
-                _flagged(Fl, c, ti, bli, p) && continue
                 w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                 (w > 0 && isfinite(w) && isfinite(v)) || continue
                 a2 = abs2(ComplexF64(v))
@@ -224,7 +222,6 @@ function _coherence_accumulate!(
                     accT[k] = zero(ComplexF64); swT[k] = 0.0; haveT[k] = false
                 end
                 for ti in tperm
-                    _flagged(Fl, c, ti, bli, p) && continue
                     w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                     (w > 0 && isfinite(w) && isfinite(v)) || continue
                     wv = w * ComplexF64(v)
@@ -251,7 +248,6 @@ function _coherence_accumulate!(
                     accF[k] = zero(ComplexF64); swF[k] = 0.0; haveF[k] = false
                 end
                 for c in cperm
-                    _flagged(Fl, c, ti, bli, p) && continue
                     w = W[c, ti, bli, p]; v = V[c, ti, bli, p]
                     (w > 0 && isfinite(w) && isfinite(v)) || continue
                     wv = w * ComplexF64(v)
@@ -376,17 +372,18 @@ function coherence_report(
             Vf, Wf = _collapse_axis(V, W, F, 2)
             for p in axes(V, 4)
                 _coherence_accumulate!(
-                    numT, zeros(1, length(cell)), denT, dvarT, npts, Vt, Wt, nothing, blmap(p), [p],
+                    numT, zeros(1, length(cell)), denT, dvarT, npts, Vt, Wt, blmap(p), [p],
                     ts, [sum(fs) / length(fs)], dts, [1.0], debias,
                 )
                 _coherence_accumulate!(
-                    zeros(1, length(cell)), numF, denF, dvarF, zeros(Int, length(cell)), Vf, Wf, nothing,
+                    zeros(1, length(cell)), numF, denF, dvarF, zeros(Int, length(cell)), Vf, Wf,
                     blmap(p), [p], [sum(ts) / length(ts)], fs, [1.0], dnus, debias,
                 )
             end
         else
+            Wu = ifelse.(F, zero(eltype(W)), W)
             for p in axes(V, 4)
-                _coherence_accumulate!(numT, numF, denT, dvarT, npts, V, W, F, blmap(p), [p], ts, fs, dts, dnus, debias)
+                _coherence_accumulate!(numT, numF, denT, dvarT, npts, V, Wu, blmap(p), [p], ts, fs, dts, dnus, debias)
             end
         end
     end

@@ -50,7 +50,7 @@
 """
     AbstractAdhocSmoother
 
-How the [`AdhocPhase`](@ref Gustavo.AdhocPhase) step fits the per-AP station
+How the [`AdhocPhase`](@ref Gustavo.AdhocPhase) solver fits the per-AP station
 phase tracks the adhoc solve produces (`solve_adhoc_phasing`) under the adhoc
 component's prior: [`PerTrackAdhocSmoother`](@ref) (the default) or
 [`JointKalmanSmoother`](@ref).
@@ -64,7 +64,7 @@ Define a struct and:
 the single dispatch point; mutates `phase` in place. `phase` and `track_w` are
 `DimArray`s over `(AntennaName, FeedNode, Ti)`: each (station, feed node) phase track and
 its per-AP coherent weight, `Ti` carrying the AP epochs in seconds. Each AP of
-`phase` is centered on the cells covered throughout the scan; the step's gauge
+`phase` is centered on the cells covered throughout the scan; the solver's gauge
 is applied after smoothing. `obs` holds the
 SNR-gated, source-corrected observations: `obs.val`, `obs.w` and the gate
 `obs.mask` over `(AntennaPair, FeedPair, Ti)`, and `obs.nodes`, each cell's
@@ -210,7 +210,7 @@ _requires_single_node(::JointKalmanSmoother) = true
 """
     default_adhoc_model(; feed = SharedFeeds(), prior = default_adhoc_prior()) -> GainModel
 
-The default [`AdhocPhase`](@ref Gustavo.AdhocPhase) step model: one per-AP constant phase
+The default [`AdhocPhase`](@ref Gustavo.AdhocPhase) model: one per-AP constant phase
 over the global band — a `phase.adhoc` component with `Ti = PerIntegration()`.
 `feed` is its feed tying: `SharedFeeds()` (the default) solves one track per
 station — residual atmospheric phase is non-birefringent, and a feed-common
@@ -238,7 +238,7 @@ with median 0.3 rad, each with log-standard deviation 1.
 default_adhoc_prior() = OUPrior(; scale = LogNormal(log(10.0), 1.0), σ = LogNormal(log(0.3), 1.0))
 
 # Capability declarations for the compile-time `can_fit`/`validate_model` seam
-# (capability.jl; the step drives the checks in
+# (capability.jl; the solver drives the checks in
 # `model_components(::AdhocPhase, spec)`).
 #
 # What the solve machinery addresses: one constant per (feed node, AP) —
@@ -249,7 +249,7 @@ default_adhoc_prior() = OUPrior(; scale = LogNormal(log(10.0), 1.0), σ = LogNor
 _fits_adhoc_track(tc) =
     tc.term isa ConstantTerm && tc.Ti isa PerIntegration &&
     tc.Frequency isa GlobalFrequency && (tc.Feed isa PerFeed || tc.Feed isa SharedFeeds) &&
-    _is_prior_along(resolve_prior(tc), :Ti)
+    _is_prior_along(resolve_prior(tc), :Ti) && !(_prior_along(resolve_prior(tc), :Ti) isa CARMAPrior)
 
 can_fit(::AbstractAdhocSmoother, tc, geom) = _fits_adhoc_track(tc)
 # The joint solve needs one phase node per station (`_requires_single_node`) and
@@ -325,12 +325,12 @@ smooth_track!(::PerTrackAdhocSmoother, track, w, ::Nothing) = nothing
 function smooth_track!(::PerTrackAdhocSmoother, track, w, prior::Union{OUPrior, RandomWalkPrior})
     x = parent(lookup(track, Ti))
     if !_proper_prior(prior)
-        resolved = _estimate_hypers(prior, [track], [w], [x])
+        resolved = _estimate_hypers(prior, (track,), (w,), (x,))
         _estimate_map!(track, resolved, track, w, x)
         return resolved
     end
-    resolved = _estimate_hypers(prior, [track], [w], [x]; level = [1])
-    level = only(_estimate_levels(resolved, [track], [w], [x], [1], 1))
+    resolved = _estimate_hypers(prior, (track,), (w,), (x,); mean = (1,))
+    level = _estimate_level(resolved, track, w, x)
     track .-= level
     _estimate_map!(track, resolved, track, w, x)
     track .+= level
@@ -692,7 +692,7 @@ function _solve_gp_joint!(phase, track_w, obs, sm::JointKalmanSmoother, priors, 
     for i in eachindex(welldet, priors)
         welldet[i] || continue
         y, w = track(i)
-        fitted[i] = _estimate_hypers(priors[i], [y], [w], [times]; level = [1])
+        fitted[i] = _estimate_hypers(priors[i], (y,), (w,), (times,); mean = (1,))
     end
     peers = [fitted[i] for i in eachindex(welldet) if welldet[i]]
     for i in eachindex(welldet, priors)
@@ -708,7 +708,7 @@ function _solve_gp_joint!(phase, track_w, obs, sm::JointKalmanSmoother, priors, 
     for i in eachindex(seen)
         seen[i] || continue
         y, w = track(i)
-        L = only(_estimate_levels(fitted[i], [y], [w], [times], [1], 1))
+        L = _estimate_level(fitted[i], y, w, times)
         isfinite(L) && (mθ[i] = L)
     end
 
@@ -1353,8 +1353,8 @@ end
 # Remove the weighted mean of a track: the gauge between a station's track and
 # the source terms, which a per-station constant trades against. With
 # `source_iters = 1` there are no source terms and the constant is measured;
-# it is removed all the same and left to the fringe step's per-scan `atmos`.
-# The slope is kept: it is the residual rate the fringe step's `Rate` left.
+# it is removed all the same and left to the fringe fit's per-scan `atmos`.
+# The slope is kept: it is the residual rate the fringe fit's `Rate` left.
 # Returns the mean removed, zero for a track without finite values.
 function _detrend_track!(track::AbstractVector, w::AbstractVector)
     T = eltype(track)

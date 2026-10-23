@@ -2,14 +2,13 @@
 #
 # Layout of a store written by `save_solution`:
 #
-#   /                 attrs: format, pipeline, component labels, step names
+#   /                 attrs: format, name, spec, component labels
 #   geometry/         times, scan_of_time, channel_freqs, spw_of_chan and, when
 #                     stated, channel_widths; t0, f0 and the name vectors as
 #                     attributes
 #   components/<label>/  one per ComponentFit: `data` over the params dims plus
-#                     their coordinates; step, path and component as attributes
-#   steps/<step>/     that step's diagnostics
-#   info/             run-wide diagnostics
+#                     their coordinates; path and component as attributes
+#   info/             the solution's diagnostics
 #
 # A collection of solutions stores its keys in the root's attributes and each
 # solution, laid out as above, in a group named by its position (`1/`, `2/`, …).
@@ -349,8 +348,8 @@ end
 
 Write `sol` to a new Zarr store at `path`: its geometry, each component's
 parameters as a labeled array (with the component's term, segmentation, feed
-tying and prior as attributes), its name, its diagnostics `info` and the step
-text. [`load_solution`](@ref) rebuilds it.
+tying and prior as attributes), its name, its diagnostics `info` and the
+specification text `spec`. [`load_solution`](@ref) rebuilds it.
 
 The second form writes a collection of solutions, such as the per-unit fits
 [`mapsets`](@ref Gustavo.mapsets) returns, one group per entry in order, each key stored with
@@ -391,7 +390,7 @@ end
 
 function _solution_attrs(sol::CalibrationSolution, toplevel::Bool)
     attrs = Dict{String, Any}(
-        "name" => String(sol.name), "step" => sol.step,
+        "name" => String(sol.name), "spec" => sol.spec,
         "components" => _strings(map(_label, sol.components)),
     )
     toplevel && (attrs["gustavo_solution_format"] = _STORE_FORMAT)
@@ -445,6 +444,6 @@ function _read_solution(root)
     end
     return CalibrationSolution(
         _read_geometry(root.groups["geometry"]), Symbol(root.attrs["name"]), components,
-        _read_node(root.groups["info"]); step = root.attrs["step"],
+        _read_node(root.groups["info"]); spec = root.attrs["spec"],
     )
 end

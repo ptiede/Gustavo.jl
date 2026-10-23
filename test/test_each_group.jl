@@ -1,20 +1,20 @@
-# ── Scan groups: what `each_group` hands a step ──────────────────────────────
+# ── Scan groups: what `each_group` hands a solver ────────────────────────────
 #
 # Grouping by scan, reading into memory, scheduling and progress, and `fit`'s
 # entry points.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
-# A solve step that records what each group looks like and solves nothing.
-struct GroupProbe{F} <: Gustavo.SolveStep
+# A solver that records what each group looks like and solves nothing.
+struct GroupProbe{F} <: Gustavo.AbstractSolver
     f::F
 end
 GroupProbe() = GroupProbe(group -> group)
-Gustavo.provides(::GroupProbe) = :probe
+Gustavo.solution_name(::GroupProbe) = :probe
 Gustavo.solve(s::GroupProbe, ctx) = (; seen = each_group(s.f, ctx))
 
-_probe(step, data; kw...) =
-    fit(step, data; kw...).info.seen
+_probe(solver, data; kw...) =
+    fit(solver, data; kw...).info.seen
 
 @testset "each_group" begin
     ps, _ = _build_fringe_ps(; nscans = 3, nspw = 2)
@@ -88,7 +88,7 @@ _probe(step, data; kw...) =
         @test Gustavo.max_tasks(DynamicScheduler(; chunksize = 2)) == Threads.nthreads()
     end
 
-    @testset "fit takes one solve step" begin
+    @testset "fit takes one solver" begin
         @test_throws MethodError fit((GroupProbe(), GroupProbe()), ps)
     end
 end

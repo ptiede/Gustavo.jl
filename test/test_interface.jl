@@ -1,53 +1,53 @@
-# Solve-step interface tests (protocol, step record, solutions of a chain of
-# steps, and the fit/calibrate verbs), on ProcessingSets from `_build_fringe_ps`. Uses
+# Solver interface tests (protocol, specification record, solutions of a chain
+# of fits, and the fit/calibrate verbs), on ProcessingSets from `_build_fringe_ps`. Uses
 # the CAL/FP aliases from test_pipeline.jl (included earlier in runtests.jl).
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 using Distributions: LogNormal, Gamma, MvNormal
 
-# A throwaway solve step proving the protocol defaults exist.
-struct _ProtoProbe <: Gustavo.SolveStep end
+# A throwaway solver proving the protocol defaults exist.
+struct _ProtoProbe <: Gustavo.AbstractSolver end
 
-# A third-party step that reads the data twice and reports each group's first
+# A third-party solver that reads the data twice and reports each group's first
 # time.
-struct _TwoPassStep <: Gustavo.SolveStep end
-Gustavo.provides(::_TwoPassStep) = :twopass
+struct _TwoPassSolver <: Gustavo.AbstractSolver end
+Gustavo.solution_name(::_TwoPassSolver) = :twopass
 _first_time(group) = minimum(ms -> minimum(XRadio.times(ms)), values(group))
-function Gustavo.solve(::_TwoPassStep, ctx)
+function Gustavo.solve(::_TwoPassSolver, ctx)
     first_t = Gustavo.each_group(_first_time, ctx)
     again = Gustavo.each_group(_first_time, ctx)
     return (; first_t, again)
 end
 
-# A step whose `solve` returns something other than its diagnostics.
-struct _BadInfoStep <: Gustavo.SolveStep end
-Gustavo.solve(::_BadInfoStep, ctx) = 1.0
+# A solver whose `solve` returns something other than its diagnostics.
+struct _BadInfoSolver <: Gustavo.AbstractSolver end
+Gustavo.solve(::_BadInfoSolver, ctx) = 1.0
 
 # A model value that is not a `GainComponent`.
 struct _OpaqueTerm end
 
-# The three production steps at defaults.
-_full_chain(; gauge = PinAntenna(1)) = (BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge))
+# The fringe closure, bandpass and adhoc fits at defaults.
+_full_chain(; gauge = PinAntenna(1)) = (FringeClosure(; gauge), Bandpass(; gauge), AdhocPhase(; gauge))
 
 # Every parameter of a solution, in component order.
 _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
-@testset "Solve-step interface" begin
+@testset "Solver interface" begin
     gauge = PinAntenna(1)
-    @testset "step protocol defaults" begin
+    @testset "solver protocol defaults" begin
         s = _ProtoProbe()
         @test Gustavo.model_components(s, nothing) == GainModel()
-        @test Gustavo.provides(s) == :nothing
+        @test Gustavo.solution_name(s) == :nothing
         ps, _ = _build_fringe_ps()
         @test_throws "does not define `Gustavo.solve(::_ProtoProbe, ctx)`" fit(
             _ProtoProbe(), ps,
         )
-        @test_throws "must return a NamedTuple" fit(_BadInfoStep(), ps)
+        @test_throws "must return a NamedTuple" fit(_BadInfoSolver(), ps)
     end
 
-    @testset "a step drives its own passes with each_group" begin
+    @testset "a solver drives its own passes with each_group" begin
         ps, _ = _build_fringe_ps(; nscans = 3)
-        sol = fit(_TwoPassStep(), ps)
+        sol = fit(_TwoPassSolver(), ps)
         info = sol.info
         # One result per scan group, in the same group order on every pass.
         @test length(info.first_t) == sol.info.nscan == 3
@@ -58,46 +58,38 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test length(info.timing.work) == 3 && all(>(0), info.timing.decode)
     end
 
-    @testset "built-in step declarations" begin
-        @test Gustavo.provides(BaselineFringeFit(; gauge)) == :fringe
-        @test Gustavo.provides(Bandpass(; gauge)) == :bandpass
-        @test Gustavo.provides(AdhocPhase(; gauge)) == :adhoc
-        # The default fringe fit (one round, every term per-scan) solves each
-        # scan's station systems as the scan is searched.
-        @test Gustavo._scan_local_solve(BaselineFringeFit(; gauge))
-        # Any cross-scan coupling pools every scan's detections into one solve:
-        # a residual re-search round, or a track-global inter-feed column (in
-        # the base model or in one station's entry).
-        @test !Gustavo._scan_local_solve(BaselineFringeFit(; rounds = 2, gauge))
-        @test !Gustavo._scan_local_solve(
-            BaselineFringeFit(; model = default_fringe_model(rel_time = CAL.GlobalTime()), gauge),
-        )
-        @test !Gustavo._scan_local_solve(
-            BaselineFringeFit(;
-                model = with_antenna(
-                    default_fringe_model(), "AA";
-                    phase = default_fringe_model(rel_time = CAL.GlobalTime()).phase,
-                ),
-                gauge,
+    @testset "built-in solver declarations" begin
+        @test Gustavo.solution_name(Bandpass(; gauge)) == :bandpass
+        @test Gustavo.solution_name(AdhocPhase(; gauge)) == :adhoc
+        # The default fringe model (every term per-scan) closes each scan on
+        # its own.
+        @test Gustavo._closes_per_scan(default_fringe_model())
+        # A track-global inter-feed column couples the scans, in the base model
+        # or in one station's entry.
+        @test !Gustavo._closes_per_scan(default_fringe_model(rel_time = CAL.GlobalTime()))
+        @test !Gustavo._closes_per_scan(
+            with_antenna(
+                default_fringe_model(), "AA";
+                phase = default_fringe_model(rel_time = CAL.GlobalTime()).phase,
             ),
         )
         @test_throws "must be a `GainComponent`" merge(default_fringe_model(); phase = (; x = _OpaqueTerm()))
-        # A step's model is a GainModel, never a bare NamedTuple.
-        @test_throws MethodError BaselineFringeFit(; model = (; phase = default_fringe_model().phase), gauge)
+        # A fit's model is a GainModel, never a bare NamedTuple.
+        @test_throws MethodError FringeClosure(; model = (; phase = default_fringe_model().phase), gauge)
     end
 
-    @testset "a step fit on a scan subset, carried into the full fit" begin
+    @testset "a fit on a scan subset, carried into the full fit" begin
         nant, nspw, nchan = 4, 2, 8
         bp = [a == 1 ? 0.0 : 0.3 * sin(0.4 * c + a + f) for a in 1:nant, f in 1:2, c in 1:(nspw * nchan)]
         # ComplexF64: a Float32 search's delays leave ~3e-5 rad of bandpass
         # difference, above the tolerance below.
         ps, _ = _build_fringe_ps(; nant, nspw, nchan, nscans = 3, bandpass = bp, eltype = ComplexF64)
         sub = XRadio.query(ps; scan_name = "3")
-        fr = fit(BaselineFringeFit(; gauge), ps)
+        fr = _fringe_fit(ps, FringeClosure(; gauge))
         # The scans' fringe phases differ, so the full-set solution corrects the
         # subset exactly as a fit on the subset alone does only if each of its
         # scans' gains lands on that scan.
-        fr3 = fit(BaselineFringeFit(; gauge), sub)
+        fr3 = _fringe_fit(sub, FringeClosure(; gauge))
         bp_sub = fit(Bandpass(; gauge), _precal(fr, sub))
         @test _all_params(bp_sub) ≈ _all_params(fit(Bandpass(; gauge), _precal(fr3, sub))) atol = 1.0e-10
         # Noise-free and time-constant: one scan determines the bandpass all three do.
@@ -109,13 +101,13 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
-    @testset "every step defaults to ZeroSumPhase; an unknown antenna is named" begin
+    @testset "every fit defaults to ZeroSumPhase; an unknown antenna is named" begin
         ps, _ = _build_fringe_ps()
-        @test all(st -> st.gauge === ZeroSumPhase(), (BaselineFringeFit(), Bandpass(), AdhocPhase(), AdhocPhase(FP.PerTrackAdhocSmoother())))
-        @test_throws "antenna code \"ZZ\" not in antenna table" fit(BaselineFringeFit(; gauge = PinAntenna("ZZ")), ps)
+        @test all(s -> s.gauge === ZeroSumPhase(), (FringeClosure(), Bandpass(), AdhocPhase(), AdhocPhase(FP.PerTrackAdhocSmoother())))
+        @test_throws "none of the references [\"ZZ\"] is in antenna table" _fringe_fit(ps, FringeClosure(; gauge = PinAntenna("ZZ")))
     end
 
-    @testset "a chain of steps: one solution per step" begin
+    @testset "a chain of fits: one solution per fit" begin
         ps, _ = _build_fringe_ps()
         sols = _fit_chain(_full_chain(), ps)
         fr, bp, ad = sols
@@ -124,14 +116,12 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test [s.name for s in sols] == [:fringe, :bandpass, :adhoc]
         @test all(s -> all(c -> c isa CAL.ComponentFit, s.components), sols)
         @test all(s -> s.info isa NamedTuple, sols)
-        @test all(s -> occursin("PinAntenna{Int64}(1)", s.step), sols)
+        @test all(s -> occursin("PinAntenna{Int64}(1)", s.spec), sols)
         @test_throws "holds no component under bogus" fr[:bogus]
 
-        # The fringe step's unconstrained stations and search settings are its
-        # own diagnostics.
+        # The fringe closure's unconstrained stations are its own diagnostics.
         @test haskey(fr.info, :flagged_ant)
-        @test fr.info.search isa Gustavo.Fring.FringeSearch
-        @test all(s -> !haskey(s.info, :flagged_ant) && !haskey(s.info, :search), (bp, ad))
+        @test all(s -> !haskey(s.info, :flagged_ant), (bp, ad))
 
         # Gains factor multiplicatively over components.
         for sol in sols
@@ -162,7 +152,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
     @testset "selections and gains selectors" begin
         ps, _ = _build_fringe_ps()
-        sol = fit(first(_full_chain()), ps)
+        sol = _fit_one(first(_full_chain()), ps)
 
         # A path prefix selects the components under it; their gains multiply.
         ph = sol[:phase]
@@ -188,12 +178,12 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         @test_throws "unknown dimension keyword" gains(sol; Polarization = 1)
     end
 
-    @testset "flags come from the solution's step" begin
+    @testset "flags come from the solution" begin
         ps, _ = _build_fringe_ps()
         fr, bp, _ = _fit_chain(_full_chain(), ps)
         sol = CAL.CalibrationSolution(
             fr.geom, fr.name, fr.components,
-            (; fr.info..., flagged_ant = ["A2"], flagged_feed = [2], flagged_scan = [1]); step = fr.step,
+            (; fr.info..., flagged_ant = ["A2"], flagged_feed = [2], flagged_scan = [1]); spec = fr.spec,
         )
         @test Gustavo._solution_flag_sets(sol) == Set([("A2", 2, 1)])
         @test Gustavo._solution_flag_sets(sol[:phase, :mbd]) == Set([("A2", 2, 1)])
@@ -245,7 +235,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
             @test back.components == sol.components
             @test back.name == sol.name
             @test back.info == sol.info
-            @test back.step == sol.step
+            @test back.spec == sol.spec
             @test back.geom.antennas == sol.geom.antennas && back.geom.times == sol.geom.times
             @test parent(gains(back)) == parent(gains(sol))
         end

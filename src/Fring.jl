@@ -14,6 +14,8 @@ using ..Gustavo: Frequency, BaselineID, Feed, FeedNode, Polarization, Scan, Ante
     feed_pairs, check_layer_axes, _cell_plane
 using ..Calibration
 import XRadio
+import LinearSolve
+import SelectedInversion
 using OrderedCollections: OrderedDict
 using DensityInterface: logdensityof
 using Distributions: LogNormal
@@ -24,15 +26,14 @@ using ..Calibration: ComponentPlan, GeometryWindow,
 # Numeric kernels the model layer keeps off its public surface.
 using ..Calibration: weighted_regularized_least_squares, ConstrainedWLS, FactoredWLS,
     unwrap_phase_track, connected_components
-using FFTW: fft, fftfreq, plan_fft, ESTIMATE
+using FFTW: fft, fftfreq, plan_fft, MEASURE
 import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack
 using Statistics: median, mean
 using LinearAlgebra
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nnz, nzrange, nonzeros, rowvals, CHOLMOD
-import ForwardDiff
 import Graphs
-using StaticArrays: SMatrix, SVector
+using StaticArrays: SMatrix, SVector, StaticVector
 
 include("Fring/search.jl")
 include("Fring/stationize.jl")
@@ -45,7 +46,7 @@ include("Fring/weighted_sums.jl")
 include("Fring/adhoc.jl")
 # The composable-pipeline engine: the solver capability checks, the
 # search over one streamed scan group, the model/plan routers, and the three
-# carved-out stage implementations the steps call into.
+# carved-out stage implementations the fits call into.
 include("Fring/capability.jl")
 include("Fring/scan_search.jl")
 include("Fring/search_stage.jl")
@@ -53,6 +54,7 @@ include("Fring/model_plans.jl")
 include("Fring/bandpass_stage.jl")
 include("Fring/bandpass_data.jl")
 include("Fring/bandpass_priors.jl")
+include("Fring/bandpass_map.jl")
 include("Fring/bandpass_solve.jl")
 include("Fring/coherence.jl")
 include("Fring/diagnostics.jl")
@@ -98,7 +100,7 @@ export FringeSearch, baseline_fringe_search, fringe_plane
 export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, FringeDelay, FringeRate, baseline_fringe_map, fringe_search_map, fringe_pfa, fringe_snr_cut
 export Stationization, antenna_closure_residuals
-export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy
+export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy, OutlierMixture
 export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointKalmanSmoother
 export solve_adhoc_phasing, default_adhoc_model, default_adhoc_prior
 export default_bandpass_model
@@ -111,7 +113,6 @@ export fringe_antenna_flags
 export baseline_delays, delay_closure
 export can_fit, validate_model
 export BandGroups, default_fringe_model
-export search_scan
 export plot_fringe_search, plot_coherence
 export coherence_report, AveragingTime, AveragingBandwidth
 

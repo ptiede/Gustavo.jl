@@ -23,7 +23,7 @@ import StatsAPI
 using StatsAPI: fit
 
 using DimensionalData: AbstractDimArray, hasdim, branches, metadata, @d
-using Statistics: mean, median!
+using Statistics: mean, median, median!
 using AstroLib: ct2lst
 
 include("data/dimensions.jl")
@@ -36,13 +36,13 @@ include("data/autocorrelations.jl")
 
 include("Calibration.jl")
 using .Calibration
-# Solve steps add methods to `model_components`.
+# Solvers add methods to `model_components`.
 import .Calibration: model_components
 
 include("Fring.jl")
 using .Fring
 
-include("steps.jl")
+include("fitting.jl")
 
 export Calibration, Fring
 # Axis names for every array Gustavo stores or returns, so scripts can index
@@ -55,13 +55,13 @@ export GUSTAVO_VISIBILITY_SCHEMA, feed_pairs
 export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate, calibrate!
-export BaselineFringeFit, default_fringe_model, Bandpass, default_bandpass_model, AdhocPhase,
-    default_adhoc_model, JointSmoother
-# The gain-model vocabulary: everything a step's `model =` argument is written
+export FringeSearch, FringeClosure, Stationization, OutlierMixture, default_fringe_model, Bandpass,
+    default_bandpass_model, AdhocPhase, default_adhoc_model, JointSmoother
+# The gain-model vocabulary: everything a `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare
 # `using Gustavo`.
 export GainComponent, GainModel, with_antenna
-export AbstractPrior, IIDPrior, RandomWalkPrior, OUPrior
+export AbstractPrior, IIDPrior, RandomWalkPrior, OUPrior, CARMAPrior, RealRoot, ComplexRoots
 export antenna_components, component_label
 export AbstractGainTerm, ConstantTerm, Delay, Dispersion, Rate, Polynomial,
     PolynomialFreq, PolynomialTime
@@ -70,21 +70,20 @@ export AbstractTimeSegmentation, GlobalTime, PerScan, PerIntegration, TimeBlocks
     InstrumentScans
 export AbstractFrequencySegmentation, GlobalFrequency, PerSpectralWindow,
     ChannelBlocks, FreqGroups, BandGroups
-# Verbs, step protocol, execution config.
+# Verbs, solver protocol, execution config.
 export fit
-export SolveStep, ExecutionConfig, ProgressLogger, mapsets, write!
+export AbstractSolver, ExecutionConfig, ProgressLogger, mapsets, write!
 export outer_executor, inner_executor
-export each_group, model_components, provides, step_gauge
+export each_group, model_components, solution_name, solver_gauge
 export supports_antenna_heterogeneity
 export scale_weights!, weight_scales, normalize_by_autocorrelations!
 export apriori_calibrate!, TsysPlacement, ScanMean, LinearInTime, NearestInTime
-export search_scan
 # The solution surface: the container, its components, and serialization.
 export CalibrationSolution, ComponentFit
 export gains, plot_gain_phases
 export save_solution, load_solution
 
-# Unexported because the names are common: a step author extends `solve`.
+# Unexported because the names are common: a solver author extends `solve`.
 @static if VERSION >= v"1.11"
     eval(Meta.parse("public solve, SolveContext"))
 end

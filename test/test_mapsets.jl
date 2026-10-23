@@ -48,15 +48,15 @@
     end
 
     @testset "a fit inside the body equals a fit on the group" begin
-        step = BaselineFringeFit(; gauge = PinAntenna(1))
+        closure = FringeClosure(; gauge = PinAntenna(1))
         θ(sol) = [collect(c.params) for c in sol.components]
-        inside = mapsets(g -> θ(fit(step, g)), by_scan)
-        @test all(inside[k] == θ(fit(step, g)) for (k, g) in pairs(by_scan))
+        inside = mapsets(g -> θ(_fringe_fit(g, closure)), by_scan)
+        @test all(inside[k] == θ(_fringe_fit(g, closure)) for (k, g) in pairs(by_scan))
     end
 
     @testset "per-unit solutions save and load as a collection" begin
-        step = BaselineFringeFit(; gauge = PinAntenna(1))
-        sols = mapsets(g -> fit(step, g), by_scan)
+        closure = FringeClosure(; gauge = PinAntenna(1))
+        sols = mapsets(g -> _fringe_fit(g, closure), by_scan)
         path = tempname()
         try
             @test save_solution(path, sols) == path
@@ -68,7 +68,7 @@
                 @test all(f -> getfield(back[k].geom, f) == getfield(sol.geom, f), fieldnames(typeof(sol.geom)))
                 @test back[k].name == sol.name
                 @test back[k].info.flagged_scan == sol.info.flagged_scan
-                @test back[k].step == sol.step
+                @test back[k].spec == sol.spec
             end
             @test_throws "exists" save_solution(path, sols)
         finally
@@ -99,7 +99,7 @@ end
 
 @testset "calibrate! into a store from parallel tasks" begin
     ps, _ = _build_fringe_ps(; nscans = 2, nspw = 2)
-    sol = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
+    sol = _fringe_fit(ps, FringeClosure(; gauge = PinAntenna(1)))
     expected = calibrate(sol, ps)
     schemas = [GUSTAVO_VISIBILITY_SCHEMA]
     exec = ExecutionConfig(; outer_executor = GreedyScheduler(; ntasks = 4), inner_executor = DynamicScheduler())

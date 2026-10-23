@@ -1,6 +1,6 @@
-# ── Bandpass step ─────────────────────────────────────────────────────────────
+# ── Bandpass ──────────────────────────────────────────────────────────────────
 #
-# - The bandpass step fit after BaselineFringeFit solves only its own
+# - The bandpass fit after the fringe fit solves only its own
 #   per-channel blocks, and θ is bit-deterministic across group concurrency (the
 #   per-scan accumulator contributions fold in group-index order).
 # - A bandpass solution is portable: `calibrate!` applies it same-set
@@ -18,7 +18,7 @@ _bpmodel(; phase = nothing, amp = nothing, freq = CAL.ChannelBlocks(1)) = GainMo
 # The parameters of the one component of `sol` under `path` (`:phase, :bandpass`).
 _bp_params(sol, path...) = only(sol[path...].components).params
 
-# The bandpass step's own components, reached by the names its model gives them.
+# The bandpass solution's own components, reached by the names its model gives them.
 _bp_phase(sol) = _bp_params(sol, :phase, :bandpass)
 _bp_amp(sol) = _bp_params(sol, :logamp, :bandpass)
 
@@ -33,7 +33,7 @@ _bp_antenna_blocks(sol, path...) = [
 # axis dropped.
 _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
-@testset "Bandpass step" begin
+@testset "Bandpass" begin
     nant, nspw, nchan = 4, 2, 8
     rng = MersenneTwister(11)
     nglob = nspw * nchan
@@ -46,11 +46,11 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     fm = default_fringe_model()
 
     fr_n, bp_n = _fit_chain(
-        (BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))),
+        (FringeClosure(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))),
         ps; exec = ExecutionConfig(),
     )
 
-    @testset "the bandpass step solves only its own components" begin
+    @testset "the bandpass solver solves only its own components" begin
         @test length(fr_n.components) == 3
         @test any(!=(0), _bp_phase(bp_n))
         @test any(!=(0), _bp_amp(bp_n))
@@ -62,21 +62,21 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
 
     @testset "the fold is deterministic across ntasks" begin
         sols4 = _fit_chain(
-            (BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))),
+            (FringeClosure(; model = fm, gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))),
             ps; exec = ExecutionConfig(),
         )
         @test [c for s in sols4 for c in s.components] == vcat(fr_n.components, bp_n.components)
     end
 
-    @testset "steps run in any order" begin
+    @testset "fits run in any order" begin
         # AdhocPhase solves for a fringe-corrected residual, but that is an
         # assumption of its own solve kernel, not a checked precondition: fit
-        # before BaselineFringeFit, it fits the UNCORRECTED residual instead and
+        # before the fringe fit, it fits the UNCORRECTED residual instead and
         # completes without error — a quietly worse fit, not a rejection.
-        solts = _fit_chain((AdhocPhase(; gauge = PinAntenna(1)), BaselineFringeFit(; model = fm, gauge = PinAntenna(1))), ps)
+        solts = _fit_chain((AdhocPhase(; gauge = PinAntenna(1)), FringeClosure(; model = fm, gauge = PinAntenna(1))), ps)
         @test all(s -> s isa CAL.CalibrationSolution, solts)
         # Bandpass's model is self-contained, so bandpass-before-fringe is legal.
-        solbf = _fit_chain((Bandpass(; gauge = PinAntenna(1)), BaselineFringeFit(; model = fm, gauge = PinAntenna(1))), ps)
+        solbf = _fit_chain((Bandpass(; gauge = PinAntenna(1)), FringeClosure(; model = fm, gauge = PinAntenna(1))), ps)
         @test all(s -> s isa CAL.CalibrationSolution, solbf)
     end
 
@@ -92,7 +92,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
         @test _bp_phase(bpp) == _bp_phase(bp_n)
         @test bpp.geom.antennas == bp_n.geom.antennas
         # A solution with no bandpass component refuses the selection.
-        sol_f = fit(BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), ps)
+        sol_f = _fringe_fit(ps, FringeClosure(; model = fm, gauge = PinAntenna(1)))
         @test_throws ArgumentError sol_f[:phase, :bandpass]
         @test_throws "holds no component under phase.bandpass" sol_f[:phase, :bandpass]
     end
@@ -178,7 +178,7 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
                 CAL.ComponentFit(c.path, c.component, DimArray(parent(c.params), (dims(c.params)[1:4]..., AntennaName(others))))
                     for c in bps.components
             ],
-            bps.info; step = bps.step,
+            bps.info; spec = bps.spec,
         )
         @test_throws "shares no antenna with this data" correct(strangers, uvsub)
     end
@@ -239,7 +239,7 @@ end
     end
 end
 
-@testset "Bandpass step: model vetting" begin
+@testset "Bandpass: model vetting" begin
     nant, nspw, nchan = 4, 2, 8
     rng = MersenneTwister(11)
     nglob = nspw * nchan
@@ -251,7 +251,7 @@ end
 
     @testset "compile-time model vetting (can_fit / validate_model)" begin
         phase_only = GainModel(; phase = default_bandpass_model().phase)
-        # An empty tree compiles no component at all, so the step would
+        # An empty tree compiles no component at all, so the solver would
         # accumulate every scan and write nowhere — rejected at compile time,
         # before any data is read.
         @test_throws ArgumentError fit(Bandpass(; model = GainModel(), gauge = PinAntenna(1)), ps)
@@ -287,7 +287,20 @@ end
         level = _bpc(CAL.PerSpectralWindow())
         pair(; kw...) = model_components(Bandpass(; model = GainModel(; phase = (; kw...)), gauge = PinAntenna(1)), nothing)
         @test pair(; level, shape) isa CAL.GainModel
-        @test_throws "a shape and at most one level" pair(; shape, level, whole = _bpc(CAL.GlobalFrequency()))
+        @test_throws "holds more than one ConstantTerm beside its shape" pair(; shape, level, whole = _bpc(CAL.GlobalFrequency()))
+        # The phase's mean may add one delay over whole spectral windows.
+        delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = CAL.PerFeed())
+        @test pair(; level, delay, shape) isa CAL.GainModel
+        @test pair(; delay, shape) isa CAL.GainModel
+        @test_throws "a delay is part of the mean beside a shape" pair(; delay)
+        @test_throws "the delay GainComponent(Delay()" pair(;
+            shape, delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), Feed = CAL.PerFeed(), prior = ou),
+        )
+        @test_throws "holds more than one Delay" pair(; shape, delay, again = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), Feed = CAL.PerFeed()))
+        @test_throws "that of a log-amplitude is a level" model_components(
+            Bandpass(; model = GainModel(; logamp = (; delay, shape)), gauge = PinAntenna(1)), nothing,
+        )
+        @test_throws "needs a zero-mean OUPrior" pair(; delay, shape = _bpc(CAL.ChannelBlocks(1)))
         @test_throws "one is the shape" pair(; a = shape, b = _bpc(CAL.ChannelBlocks(2)))
         @test_throws "one is the shape" pair(; a = level, b = _bpc(CAL.GlobalFrequency()))
         @test_throws "the level GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectralWindow()" *
@@ -346,7 +359,7 @@ end
         )
 
         lu = CAL.plan_parameters(default_bandpass_model(), anames, geom)
-        @test FP._bandpass_paths(lu.plantree, :phase) == (; shape = (:phase, :bandpass), level = nothing)
+        @test FP._bandpass_paths(lu.plantree, :phase) == (; shape = (:phase, :bandpass), level = nothing, delay = nothing)
         @test only(FP._bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).antennas == 1:3
         @test isempty(FP._bandpass_level_blocks(_setup(lu), zeros(lu.nθ), :phase))
 
@@ -365,7 +378,12 @@ end
             phase = (; spw = _bpc(CAL.PerSpectralWindow()), chan = (; c = _bpc(CAL.ChannelBlocks(1); prior = ou))),
         )
         ll = CAL.plan_parameters(leveled, anames, geom)
-        @test FP._bandpass_paths(ll.plantree, :phase) == (; shape = (:phase, :chan, :c), level = (:phase, :spw))
+        @test FP._bandpass_paths(ll.plantree, :phase) == (; shape = (:phase, :chan, :c), level = (:phase, :spw), delay = nothing)
+        delayed = CAL.GainModel(
+            phase = (; τ = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = CAL.PerFeed()), chan = (; c = _bpc(CAL.ChannelBlocks(1); prior = ou))),
+        )
+        @test FP._bandpass_paths(CAL.plan_parameters(delayed, anames, geom).plantree, :phase) ==
+            (; shape = (:phase, :chan, :c), level = nothing, delay = (:phase, :τ))
         @test only(FP._bandpass_level_blocks(_setup(ll), zeros(ll.nθ), :phase)).plan.fseg isa CAL.PerSpectralWindow
 
         # A model differing across stations puts one plan per signature group on
@@ -387,7 +405,7 @@ end
         lp = CAL.plan_parameters(
             CAL.GainModel(; phase = default_bandpass_model().phase), anames, geom,
         )
-        @test FP._bandpass_paths(lp.plantree, :logamp) == (; shape = nothing, level = nothing)
+        @test FP._bandpass_paths(lp.plantree, :logamp) == (; shape = nothing, level = nothing, delay = nothing)
         @test isempty(FP._bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
     end
 
@@ -400,14 +418,14 @@ end
 # cover the record that makes the difference visible, and the choice of a phase
 # track's 2π branches under a prior.
 
-# One track fit the way the joint solve fits each of its tracks: the prior
-# seeded from the observations `y` (weights `w`), for a phase the branches
-# chosen, the hyperparameters fit to the marginal likelihood, and the MAP step,
-# which for this quadratic likelihood is the MAP.
+# One track fit the way the joint solve fits each of its tracks: the prior's
+# hyperparameters by type-II MAP on the observations `y` (weights `w`), for a
+# phase the branches chosen, and the MAP of the track's posterior system, which
+# for this quadratic likelihood is one solve.
 function _fit_one_track(y, w, x, pieces, prior; level = nothing, nlevel = 0, phase = false, flat_span = 0.01)
     n = length(y)
     known = isfinite.(y) .& (w .> 0)
-    fits = [(; phase = (; x, pieces, prior, level, nlevel))]
+    fits = [(; phase = (; x, pieces, prior, level, nlevel, delay = nothing, dx = nothing))]
     t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:n, 1, 1, n, 1)], [(1, 1)], [[1]], 1, known))
     yk, wk = ifelse.(known, y, NaN), ifelse.(known, w, 0.0)
     x0 = ifelse.(known, y, 0.0)
@@ -418,11 +436,13 @@ function _fit_one_track(y, w, x, pieces, prior; level = nothing, nlevel = 0, pha
         t.active[j] && (free[p] .= true)
     end
     sys = FP._posterior_system(FP.spdiagm(wk), zeros(n), x0, free, any(t.active) ? [t] : [], x)
-    any(t.active) && FP._fit_hypers!(priors, Any[nothing], sys, [t], 0.0; tolerance = 1.0e-6, max_iterations = 100)
-    x1, levels, _ = FP._map_step(sys, any(t.active) ? priors : [])
-    values = ifelse.(free, x1, NaN)
+    K, h, _ = FP._reduce!(sys, FP._assemble!(sys.layout, any(t.active) ? priors : []), 0.0)
+    z = FP._factor(K, sys.key) \ h
+    values = fill(NaN, n)
+    values[free] .= z[1:count(free)]
     status = [FP._band_track_status(values[p], flat_span) for p in pieces]
-    return (; values, status, prior = only(priors), levels = any(t.active) ? only(levels) : Dict{Int, Float64}())
+    levels = any(t.active) ? FP._mean_values(only(sys.means), z).levels : Dict{Int, Float64}()
+    return (; values, status, prior = only(priors), levels)
 end
 
 @testset "Bandpass: a slot takes the branch nearest the fitted track" begin
@@ -431,7 +451,7 @@ end
     x = collect(range(8.6e10, 8.6e10 + 6.4e7; length = n))
     prior = CAL.RandomWalkPrior(; order = 2, σ = 0.01 * sqrt(3 / (2 * (x[2] - x[1])^3)))
     known = trues(n)
-    fits = [(; phase = (; x, pieces, prior, level = nothing, nlevel = 0))]
+    fits = [(; phase = (; x, pieces, prior, level = nothing, nlevel = 0, delay = nothing, dx = nothing))]
     t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:n, 1, 1, n, 1)], [(1, 1)], [[1]], 1, known))
 
     # A stiff track; slot k barely measured, its value 0.2 off the track and its
@@ -454,46 +474,6 @@ end
     φ = copy(wrapped)
     FP._choose_branches!(φ, t, prior, wrapped, fill(1.0e4, n), known)
     @test φ .- φ[1] ≈ steep .- steep[1]
-end
-
-@testset "Bandpass: later branch moves lower the prior energy" begin
-    n = 128
-    pieces = [1:n]
-    x = collect(range(8.6e10, 8.6e10 + 6.4e7; length = n))
-    prior = CAL.RandomWalkPrior(; order = 2, σ = 0.01 * sqrt(3 / (2 * (x[2] - x[1])^3)))
-    known = trues(n)
-    fits = [(; phase = (; x, pieces, prior, level = nothing, nlevel = 0))]
-    t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:n, 1, 1, n, 1)], [(1, 1)], [[1]], 1, known))
-    tl = FP._track_layout(t)
-    energy(φ) = first(FP._track_energy(tl, prior, φ))
-
-    # A block a turn off a smooth track moves back as one.
-    track = collect(0.02 .* (1:n))
-    slipped = copy(track)
-    slipped[40:70] .+= 2π
-    φ = copy(slipped)
-    shift, kept_back = FP._wrap_differences!(φ, t, 2, known, energy)
-    @test isempty(kept_back)
-    @test φ ≈ track
-    @test shift[40:70] ≈ fill(-2π, 31)
-    @test energy(φ) < energy(slipped)
-
-    # A second pass moves nothing.
-    @test all(iszero, first(FP._wrap_differences!(φ, t, 2, known, energy)))
-
-    # Moves that would not lower the energy are not kept.
-    φ = copy(slipped)
-    shift, kept_back = FP._wrap_differences!(φ, t, 2, known, φ -> -energy(φ))
-    @test kept_back == [1]
-    @test φ == slipped
-    @test all(iszero, shift)
-
-    # A slot that is not free keeps its value.
-    free = copy(known)
-    free[50] = false
-    φ = copy(slipped)
-    FP._wrap_differences!(φ, t, 2, free, energy)
-    @test φ[50] == slipped[50]
 end
 
 @testset "Bandpass: per-piece outcome codes" begin
@@ -595,81 +575,63 @@ end
         FP._estimate_hypers(hyper, [only(bf.histories).lift], [wclean], [x]).σ rtol = 1.0e-6
 end
 
-@testset "Bandpass: hyperparameters from the Laplace marginal" begin
+@testset "Bandpass: EM's fixed point is the type-II MAP" begin
     rng = MersenneTwister(2022)
 
-    # The selected inverse is the inverse on the factor's pattern.
-    A = FP.sparse(randn(rng, 40, 40) .* (rand(rng, 40, 40) .< 0.1))
-    A = A * A' + 5I
-    F = FP._factor(A, rand(rng, 40))
-    Σ = FP._selected_inverse(F)
-    L = FP.sparse(F.L)
-    pattern = [(F.p[i], F.p[j]) for j in axes(L, 2) for i in FP.rowvals(L)[FP.nzrange(L, j)]]
-    @test maximum(((a, b),) -> abs(Σ(a, b) - inv(Matrix(A))[a, b]), pattern) < 1.0e-12
-    outside = first((a, b) for a in 1:40, b in 1:40 if !((a, b) in pattern || (b, a) in pattern))
-    @test_throws "not on the factor's sparsity pattern" Σ(outside...)
+    # The selected inverse is the inverse on the system's pattern, from a
+    # simplicial factor and from a supernodal one.
+    for n in (40, 400)
+        A = FP.sparse(randn(rng, n, n) .* (rand(rng, n, n) .< 4 / n))
+        A = A * A' + 5I
+        F = FP._factor(A, rand(rng, n))
+        Σ = FP._selected_inverse(F, A)
+        pattern = [(i, j) for j in 1:n for i in FP.rowvals(A)[FP.nzrange(A, j)]]
+        @test maximum(((a, b),) -> abs(Σ(a, b) - inv(Matrix(A))[a, b]), pattern) < 1.0e-12
+        outside = first((a, b) for a in 1:n, b in 1:n if !((a, b) in pattern))
+        @test_throws "not on the system's sparsity pattern" Σ(outside...)
+    end
 
-    # A gauge row solved for one slot is the constrained minimum.
-    n = 6
-    M = randn(rng, n, n)
-    H = FP.sparse(M * M' + I)
-    b = randn(rng, n)
-    x = randn(rng, n)
-    free = trues(n)
-    free[2] = false
-    gauge = (; rows = [[(1, 0.5), (2, 1.0), (4, 2.0), (6, -1.0)]], d = [0.3])
-    sys = FP._posterior_system(H, b, x, free, [], collect(1.0:n); gauge)
-    x1, _, _ = FP._map_step(sys, [])
-    f = findall(free)
-    C = [0.5 0 2.0 0 -1.0]
-    K = [Matrix(H[f, f]) C'; C 0]
-    ref = (K \ [b[f] .+ H[f, f] * x[f]; 0.3 - x[2]])[1:length(f)]
-    @test x1[f] ≈ ref rtol = 1.0e-10
-    @test x1[2] == x[2]
-    @test dot([0.5, 1.0, 2.0, -1.0], x1[[1, 2, 4, 6]]) ≈ 0.3
-
-    # One track whose slots are measured independently: the Laplace marginal is
-    # the Kalman one, and its maximum is type-II MAP on the track.
+    # One track whose slots are measured independently: its posterior is
+    # Gaussian, so one EM map from the type-II MAP of the Kalman marginal
+    # (`_estimate_hypers`) returns it.
     m = 64
     xf = collect(range(1.0e9, 1.0e9 + 63.0e6; length = m))
     y = 0.3 .* sin.(range(0, 3π; length = m)) .+ randn(rng, m) ./ 20
     w = fill(400.0, m)
-    function marginal(prior, resolved)
-        fits = [(; phase = (; x = xf, pieces = [1:m], prior, level = nothing, nlevel = 0))]
+    function em_map(spec, resolved)
+        fits = [(; phase = (; x = xf, pieces = [1:m], prior = spec, level = nothing, nlevel = 0, delay = nothing, dx = nothing))]
         t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:m, 1, 1, m, 1)], [(1, 1)], [[1]], 1, trues(m)))
         sys = FP._posterior_system(FP.spdiagm(w), w .* y, zeros(m), trues(m), [t], xf)
-        K, h, c = FP._reduce!(sys, FP._assemble!(sys.layout, [resolved]), 0.0)
+        K, h, _ = FP._reduce!(sys, FP._assemble!(sys.layout, [resolved]), 0.0)
         G = FP._factor(K, sys.key)
-        lp = dot(h, G \ h) / 2 - c - logdet(G) / 2 + FP._expected_log_prior(resolved, only(sys.chains), nothing, Float64)
-        return lp, t, sys
+        chains = only(sys.chains)
+        mom = FP._chain_moments(chains, G \ h, FP._selected_inverse(G, K), first(chains).dim)
+        return first(FP._m_step(spec, resolved, chains, mom))
     end
     rw = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(1.0e-12), 2.0))
-    walk(σ) = CAL.RandomWalkPrior(; order = 2, σ)
-    kalman(σ) = FP._random_walk_loglik(y, w, xf, 2, σ)
-    @test first(marginal(rw, walk(2.0e-11))) - first(marginal(rw, walk(1.0e-11))) ≈ kalman(2.0e-11) - kalman(1.0e-11) rtol = 1.0e-8
-    _, t, sys = marginal(rw, walk(1.0e-11))
-    priors = Any[walk(1.0e-11)]
-    @test FP._fit_hypers!(priors, Any[nothing], sys, [t], 0.0; tolerance = 1.0e-4, max_iterations = 50).converged
-    @test only(priors).σ ≈ FP._estimate_hypers(rw, [y], [w], [xf]).σ rtol = 1.0e-3
-
-    # A carried-over curvature far too flat for a start 10⁻⁴ below the maximum:
-    # the line search's sufficient increase keeps the first step from overshooting,
-    # and the fit reaches the same maximum.
-    σ̂ = only(priors).σ
-    priors = Any[walk(1.0e-4 * σ̂)]
-    stale = Any[(; inverse = fill(1.0e6, 1, 1), measured = true)]
-    fit = FP._fit_hypers!(priors, stale, sys, [t], 0.0; tolerance = 1.0e-4, max_iterations = 50)
-    @test fit.converged
-    @test only(priors).σ ≈ σ̂ rtol = 1.0e-3
+    σ̂ = FP._estimate_hypers(rw, [y], [w], [xf]).σ
+    @test em_map(rw, CAL.RandomWalkPrior(; order = 2, σ = σ̂)).σ ≈ σ̂ rtol = 1.0e-3
 
     # An OU prior, both hyperparameters, its band constant integrated out.
     ou = CAL.OUPrior(; scale = LogNormal(log(1.0e7), 1.0), σ = LogNormal(log(0.3), 1.0))
-    _, t, sys = marginal(ou, CAL.OUPrior(; scale = 1.0e7, σ = 0.3))
-    priors = Any[CAL.OUPrior(; scale = 1.0e7, σ = 0.3)]
-    @test FP._fit_hypers!(priors, Any[nothing], sys, [t], 0.0; tolerance = 1.0e-4, max_iterations = 50).converged
-    ref = FP._estimate_hypers(ou, [y], [w], [xf]; level = [1])
-    @test only(priors).scale ≈ ref.scale rtol = 1.0e-2
-    @test only(priors).σ ≈ ref.σ rtol = 1.0e-2
+    ref = FP._estimate_hypers(ou, [y], [w], [xf]; mean = [1])
+    next = em_map(ou, ref)
+    @test next.scale ≈ ref.scale rtol = 1.0e-3
+    @test next.σ ≈ ref.σ rtol = 1.0e-3
+    # Away from it, the map moves toward it.
+    start = CAL.OUPrior(; scale = 3 * ref.scale, σ = ref.σ / 2)
+    next = em_map(ou, start)
+    @test abs(log(next.scale / ref.scale)) < abs(log(start.scale / ref.scale))
+    @test abs(log(next.σ / ref.σ)) < abs(log(start.σ / ref.σ))
+
+    # A CARMA prior with a moving-average root, whose latent states change with
+    # the hyperparameters: EM's fixed point is still the type-II MAP.
+    carma = CAL.CARMAPrior(;
+        ar = (CAL.ComplexRoots(; period = LogNormal(log(2.0e7), 1.0), scale = 3.0e7),),
+        ma = (CAL.RealRoot(; scale = LogNormal(log(5.0e5), 1.0)),), σ = LogNormal(log(0.3), 1.0),
+    )
+    ref = FP._estimate_hypers(carma, [y], [w], [xf]; mean = [1])
+    @test FP._log_hypers(carma, em_map(carma, ref)) ≈ FP._log_hypers(carma, ref) atol = 1.0e-3
 end
 
 @testset "_bandpass_track_report: counts and the unfitted observable" begin
@@ -702,7 +664,7 @@ end
         amp_bandpass = 0.1 .* randn(rng, nant, 2, nglob),
         seed = 5,
     )
-    _, sol = _fit_chain((BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps)
+    _, sol = _fit_chain((FringeClosure(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps)
     info = sol.info
     # (AntennaName, Feed, frequency segment, time segment): the default model's segments
     # are the spectral windows, and a time-stable bandpass is one time segment.

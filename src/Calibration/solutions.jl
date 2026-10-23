@@ -1,8 +1,8 @@
-# ── CalibrationSolution: one step's solved components ───────────────────────
+# ── CalibrationSolution: one fit's solved components ────────────────────────
 #
-# A solution is what one solve step fit: a flat list of `ComponentFit`s,
+# A solution is what one fit solved: a flat list of `ComponentFit`s,
 # each holding one gain component's fitted parameters as a labeled array, and
-# the step's diagnostics. Gains are separable over components
+# the fit's diagnostics. Gains are separable over components
 # (`exp(Σ logamp)·cis(Σ phase)`), so any subset of the list is a solution in its
 # own right. Applying one re-plans the components it holds against the
 # solution's geometry, one layout per station set, and runs the forward map on
@@ -24,7 +24,7 @@ segment is labeled by the midpoint of the channels or samples it covers, with
 intervals so `Contains(x)` selects the segment covering `x`; `AntennaName` names the
 stations that carry the component.
 
-`path` is its place in the step's model, starting at `:phase` or `:logamp`
+`path` is its place in the fitted model, starting at `:phase` or `:logamp`
 (`(:phase, :mbd)`; `(:phase, :bandpass, :g1)` for one signature group of a
 component whose specification differs across stations).
 """
@@ -52,23 +52,23 @@ Base.show(io::IO, c::ComponentFit) = print(
 )
 
 """
-    CalibrationSolution(geom, name, components, info = (;); step = "")
-    CalibrationSolution(model, layout, geom, θ, info = (;); name = :solution, step = "")
+    CalibrationSolution(geom, name, components, info = (;); spec = "")
+    CalibrationSolution(model, layout, geom, θ, info = (;); name = :solution, spec = "")
 
-What one solve step fit: the list `components` of [`ComponentFit`](@ref)s
+What one fit solved: the list `components` of [`ComponentFit`](@ref)s
 over the geometry `geom`, whose `antennas` name every station a component may
 carry. Gains compose multiplicatively across components.
 
-- `name` names the step's solution (`:fringe`, `:bandpass`, `:adhoc`).
-- `info` holds the step's diagnostics (detections, per-scan SNR, timing, the
-  fringe step's unconstrained `flagged_ant` / `flagged_feed` / `flagged_scan`,
+- `name` names the solution (`:fringe`, `:bandpass`, `:adhoc`).
+- `info` holds the fit's diagnostics (detections, per-scan SNR, timing, the
+  fringe fit's unconstrained `flagged_ant` / `flagged_feed` / `flagged_scan`,
   …) and the run's (`nscan`, task counts).
-- `step` is the solve step that was fit, its gauge included, as text for the
-  record.
+- `spec` is the specification that was fit, its gauge included, as text for
+  the record.
 
 Any subset of the components is a solution: `filter(pred, sol)`,
 `sol[:phase, :mbd]` (the components under a path). The fields are the
-interface: iterate `sol.components`, read `c.params`. Steps compose by applying
+interface: iterate `sol.components`, read `c.params`. Fits compose by applying
 one solution to the data ([`calibrate!`](@ref Gustavo.calibrate!)) before
 fitting the next.
 
@@ -80,8 +80,8 @@ struct CalibrationSolution{G <: DataGeometry}
     name::Symbol
     components::Vector{ComponentFit}
     info::NamedTuple
-    step::String
-    function CalibrationSolution{G}(geom, name, components, info, step) where {G}
+    spec::String
+    function CalibrationSolution{G}(geom, name, components, info, spec) where {G}
         isempty(geom.antennas) && throw(
             ArgumentError(
                 "a solution's geometry must name its antennas; build it with `DataGeometry(ps)` " *
@@ -92,23 +92,23 @@ struct CalibrationSolution{G <: DataGeometry}
         allunique(labels) || throw(
             ArgumentError("CalibrationSolution: components repeat: $(join(unique(filter(l -> count(==(l), labels) > 1, labels)), ", "))")
         )
-        return new{G}(geom, name, components, info, step)
+        return new{G}(geom, name, components, info, spec)
     end
 end
 
 function CalibrationSolution(
         geom::DataGeometry, name::Symbol, components::AbstractVector{<:ComponentFit},
-        info::NamedTuple = NamedTuple(); step::AbstractString = "",
+        info::NamedTuple = NamedTuple(); spec::AbstractString = "",
     )
-    return CalibrationSolution{typeof(geom)}(geom, name, collect(ComponentFit, components), info, String(step))
+    return CalibrationSolution{typeof(geom)}(geom, name, collect(ComponentFit, components), info, String(spec))
 end
 
 function CalibrationSolution(
         model::GainModel, layout::ParameterLayout, geom::DataGeometry,
         θ::AbstractVector, info::NamedTuple = NamedTuple();
-        name::Symbol = :solution, step::AbstractString = "",
+        name::Symbol = :solution, spec::AbstractString = "",
     )
-    return CalibrationSolution(geom, name, _solved_components(model, layout, θ, geom), info; step)
+    return CalibrationSolution(geom, name, _solved_components(model, layout, θ, geom), info; spec)
 end
 
 Base.:(==)(a::ComponentFit, b::ComponentFit) =
@@ -118,9 +118,9 @@ Base.hash(c::ComponentFit, h::UInt) =
 
 # ── Selection ────────────────────────────────────────────────────────────────
 
-# The solution holding `components`, with the step's diagnostics.
+# The solution holding `components`, with `sol`'s diagnostics.
 _with_components(sol::CalibrationSolution, components) =
-    CalibrationSolution{typeof(sol.geom)}(sol.geom, sol.name, collect(ComponentFit, components), sol.info, sol.step)
+    CalibrationSolution{typeof(sol.geom)}(sol.geom, sol.name, collect(ComponentFit, components), sol.info, sol.spec)
 
 """
     filter(pred, sol::CalibrationSolution) -> CalibrationSolution
@@ -156,7 +156,7 @@ Base.eltype(::Type{<:CalibrationSolution}) = ComponentFit
 
 function Base.show(io::IO, ::MIME"text/plain", sol::CalibrationSolution)
     println(io, "CalibrationSolution")
-    println(io, "  Step      : ", sol.name)
+    println(io, "  Name      : ", sol.name)
     println(io, "  Grid      : ", length(sol.geom.antennas), " antennas × ", nchannels(sol.geom), " channels × ", ntimes(sol.geom), " times")
     print(io, "  Components:")
     for c in sol.components
@@ -168,9 +168,9 @@ end
 Base.show(io::IO, sol::CalibrationSolution) =
     print(io, "CalibrationSolution(", length(sol.components), " components)")
 
-# ── From a solved step ───────────────────────────────────────────────────────
+# ── From a solved parameter vector ───────────────────────────────────────────
 
-# The components of one solved step: `layout` laid out `model` over the
+# The components of one fit: `layout` laid out `model` over the
 # geometry's stations, and `θ` holds its parameters.
 function _solved_components(model::GainModel, layout::ParameterLayout, θ::AbstractVector, geom::DataGeometry)
     Base.require_one_based_indexing(θ)
@@ -506,6 +506,41 @@ function DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing)
         String(name) in antennas || push!(antennas, String(name))
     end
     return _span_geometry(pieces, antennas, _feed_count(ps); f0, t0)
+end
+
+"""
+    DataGeometry(geoms::AbstractVector{<:DataGeometry}; f0 = nothing, t0 = nothing) -> DataGeometry
+
+The geometry of the data `geoms` describe together, as `DataGeometry(ps)`
+builds it over a processing set: their channels and times, each time's scan
+and each channel's spectral window, and their antennas in the order first
+seen. Throws as `DataGeometry(ps)` does on conflicting channels or scans, and
+when the feed counts differ.
+"""
+function DataGeometry(geoms::AbstractVector{<:DataGeometry}; f0 = nothing, t0 = nothing)
+    isempty(geoms) && throw(ArgumentError("there are no geometries to join"))
+    nfeeds = unique(g.nfeed for g in geoms)
+    length(nfeeds) == 1 || throw(
+        ArgumentError("the geometries hold different feed counts, $(join(nfeeds, ", ")); a solve runs on one feed count")
+    )
+    antennas = String[]
+    for g in geoms, name in g.antennas
+        name in antennas || push!(antennas, name)
+    end
+    pieces = [piece for g in geoms for piece in _geometry_pieces(g)]
+    return _span_geometry(pieces, antennas, only(nfeeds); f0, t0)
+end
+
+# A geometry as `_span_geometry` pieces: one per spectral window and channel width.
+function _geometry_pieces(g::DataGeometry)
+    widths = isempty(g.channel_widths) ? zeros(length(g.channel_freqs)) : g.channel_widths
+    spw(s) = isempty(g.spw_names) ? string(s) : g.spw_names[s]
+    scans = g.scan_names[g.scan_of_time]
+    active = Set(g.antennas)
+    return map(unique(zip(g.spw_of_chan, widths))) do (s, w)
+        chans = [c for c in eachindex(g.channel_freqs, g.spw_of_chan, widths) if g.spw_of_chan[c] == s && widths[c] == w]
+        (; freqs = g.channel_freqs[chans], spw = spw(s), width = w, times = g.times, scans, active)
+    end
 end
 
 function _feed_count(ps::XRadio.ProcessingSet)

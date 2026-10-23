@@ -1,7 +1,7 @@
-# ── A scan group's sums, and the steps that read it ──────────────────────────
+# ── A scan group's sums, and the solvers that read it ────────────────────────
 #
 # The bandpass and adhoc kernels sum each member of a scan group by label; each
-# step fits once per group.
+# solver fits once per group.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 @isdefined(CAL) || const CAL = Gustavo.Calibration
@@ -85,7 +85,7 @@ end
     )
 end
 
-@testset "per-group steps on a ProcessingSet" begin
+@testset "per-group solvers on a ProcessingSet" begin
     rng = MersenneTwister(5)
     nant, nspw, nchan = 4, 2, 8
     bp = 0.3 .* randn(rng, nant, 2, nspw * nchan)
@@ -93,15 +93,15 @@ end
     serial = ExecutionConfig(inner_executor = SerialScheduler())
     wide = ExecutionConfig(outer_executor = DynamicScheduler(), inner_executor = DynamicScheduler(; nchunks = 4))
     gauge = PinAntenna(1)
-    for st in (Bandpass(; gauge), AdhocPhase(; gauge))
-        a = fit(st, ps; exec = serial)
-        b = fit(st, ps; exec = wide)
+    for solver in (Bandpass(; gauge), AdhocPhase(; gauge))
+        a = fit(solver, ps; exec = serial)
+        b = fit(solver, ps; exec = wide)
         @test a.components == b.components
         @test a.info.nscans == 3
     end
     @test fit(Bandpass(; gauge), ps).info.sources == ["SRC1"]
 
-    # The adhoc step reports each track's resolved prior, one `Ti` per scan.
+    # The adhoc solver reports each track's resolved prior, one `Ti` per scan.
     info = fit(AdhocPhase(; gauge), ps).info
     pr = info.priors
     @test DimensionalData.name(dims(pr)) == (:AntennaName, :Feed, :Ti)
@@ -139,10 +139,10 @@ end
         nant = 4, nspw = 2, nchan = 8, ntime = 6, nscans = 3,
         bandpass = 0.3 .* randn(rng, 4, 2, 16), seed = 3,
     )
-    st = Bandpass(; gauge = PinAntenna(1))
+    solver = Bandpass(; gauge = PinAntenna(1))
     solved_θ(sol) = vcat((vec(parent(c.params)) for c in sol.components)...)
-    θ = solved_θ(fit(st, ps))
-    θoff = solved_θ(fit(st, _offset_scans(ps, 4)))
+    θ = solved_θ(fit(solver, ps))
+    θoff = solved_θ(fit(solver, _offset_scans(ps, 4)))
     @test maximum(abs, θoff .- θ) < 1.0e-6
 end
 

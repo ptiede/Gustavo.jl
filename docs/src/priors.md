@@ -31,9 +31,10 @@ data. The spacing ``x_{k+1} - x_k`` need not be uniform.
 
 For the bandpass, a track is one spectral window of one (station, feed, time
 segment), sampled at the frequency segments' mean channel frequencies, and
-``L`` is the level component's value for that window. For the adhoc phase, a
+``L`` is the level component's value for that window; a phase may also carry a
+delay, which adds ``2\pi\tau(x_k - f_0)`` to ``L`` (see [The mean](@ref prior-level)). For the adhoc phase, a
 track is one (station, feed node) over the accumulation periods (APs) of one
-scan, and ``L`` is the per-scan constant, a gauge that the adhoc step removes
+scan, and ``L`` is the per-scan constant, a gauge that the adhoc solver removes
 afterwards (see [`solve_adhoc_phasing`](@ref)).
 
 ## The OU prior and its MAP values
@@ -135,32 +136,37 @@ of the data with ``f`` integrated out:
 
 This is what the hyperparameters are estimated from.
 
-### [The level](@id prior-level)
+### [The mean](@id prior-level)
 
-The filter is linear in its observations, so the innovations of ``y - L`` are
-``v^y_k - L\, v^1_k``, where ``v^y`` are the innovations of ``y`` and ``v^1``
-those of a track of ones, both run with the same gains (`_level_sums`).
-With
-
-```math
-b = \sum_k \frac{v^y_k v^1_k}{S_k}, \qquad c = \sum_k \frac{(v^1_k)^2}{S_k},
-```
-
-the likelihood is quadratic in ``L`` and maximized at the generalized least
-squares level ``\hat L = b/c``. Tracks that share one level (the spectral
-windows of one level segment) sum their ``b`` and ``c``.
-
-``L`` is not known when the hyperparameters are estimated, and plugging in
-``\hat L`` would bias ``\sigma`` low on short tracks, since the level absorbs
-part of the structure. Instead ``L`` is integrated out under a flat prior (the
-restricted likelihood), which adds, per level,
+The level is the simplest case of a mean that is linear in unknown
+coefficients, ``L_k = h_k^\top \beta``: a level is one coefficient with
+``h_k = 1``, and a level plus a delay two, with ``h_k = (1,\, 2\pi(x_k - f_0))``
+and ``\beta = (L, \tau)``. The filter is linear in its observations, so the
+innovations of ``y - H\beta`` are ``v^y_k - (v^H_k)^\top \beta``, where ``v^y``
+are the innovations of ``y`` and ``v^H`` those of each regressor, all run with
+the same gains (`_mean_sums`). With
 
 ```math
-\frac{b^2}{2c} - \frac12 \log c
+b = \sum_k \frac{v^y_k\, v^H_k}{S_k}, \qquad C = \sum_k \frac{v^H_k (v^H_k)^\top}{S_k},
 ```
 
-to the log likelihood of the zero-mean tracks, up to a constant. Given the
-hyperparameters, the fit is then ``\hat L`` plus the MAP of ``y - \hat L``.
+the likelihood is quadratic in ``\beta`` and maximized at the generalized least
+squares mean ``\hat\beta = C^{-1} b``. Tracks that share a coefficient (the
+spectral windows of one level segment, or every window a delay spans) sum their
+``b`` and ``C`` into it.
+
+``\beta`` is not known when the hyperparameters are estimated, and plugging in
+``\hat\beta`` would bias ``\sigma`` low on short tracks, since the mean absorbs
+part of the structure. Instead ``\beta`` is integrated out under a flat prior
+(the restricted likelihood), which adds
+
+```math
+\tfrac12 b^\top C^{-1} b - \tfrac12 \log\det C
+```
+
+to the log likelihood of the zero-mean tracks, up to a constant; for a level
+alone this is ``b^2/2c - \tfrac12\log c`` per level. Given the hyperparameters,
+the fit is then ``H\hat\beta`` plus the MAP of ``y - H\hat\beta``.
 
 ## Type-II MAP of the hyperparameters
 
@@ -177,7 +183,7 @@ searched over ``(\log\tau, \log\sigma)``:
 ```
 
 where ``p(y \mid \tau, \sigma)`` is the restricted likelihood above when the
-track has a level, the zero-mean one otherwise, summed over every track the
+track has a mean, the zero-mean one otherwise, summed over every track the
 solver pools, and ``\log\tau + \log\sigma`` is the Jacobian of the change to
 logarithmic coordinates. This is type-II MAP (also called empirical Bayes with
 a hyperprior): the values are integrated out, the hyperparameters are
@@ -284,6 +290,63 @@ as a polynomial. The solvers pool tracks as they do for an OU prior. A walk
 with a flat start has no separate level, so no levels are integrated out; with
 an `init` they are, as for OU (`_estimate_hypers`).
 
+## The CARMA prior
+
+A [`CARMAPrior`](@ref Gustavo.Calibration.CARMAPrior)`(; ar, ma, σ)` is the
+stationary continuous-time autoregressive moving-average process of
+Kelly et al. (2014), CARMA(``p, q``), along the coordinate:
+
+```math
+a(D)\, x = b(D)\, \varepsilon, \qquad
+a(s) = \prod_{k=1}^{p} (s - r_k), \qquad
+b(s) = \prod_{k=1}^{q} \Big(1 - \frac{s}{\rho_k}\Big),
+```
+
+with ``D`` the derivative along the coordinate and ``\varepsilon`` white noise.
+Each root is given as a factor: a [`RealRoot`](@ref
+Gustavo.Calibration.RealRoot)`(; scale)` is ``-1/\text{scale}``, and a
+[`ComplexRoots`](@ref Gustavo.Calibration.ComplexRoots)`(; period, scale)` the
+pair ``-1/\text{scale} \pm 2\pi i/\text{period}``, so every root has a negative
+real part and the process is stationary for any positive values. ``\sigma`` is
+its stationary standard deviation. The power spectrum is
+``\propto |b(2\pi i\varphi)|^2 / |a(2\pi i\varphi)|^2`` at frequency ``\varphi``
+along the coordinate. A real autoregressive root adds an exponential decay to
+the autocovariance, and a complex pair a term
+``\propto e^{-|\Delta|/\text{scale}} \cos(2\pi\Delta/\text{period} + \vartheta)``,
+a ripple whose phase stays coherent over about `scale`; as `scale` grows it
+tends to a sinusoid of fixed period with Gaussian amplitudes. Moving-average
+roots raise the spectrum's tail: the process is ``p - q - 1`` times
+differentiable, so ``q = p - 1`` keeps the channel-to-channel roughness of an OU
+process beside the autoregressive structure. With distinct roots the
+autocovariance is
+``\sum_k b(r_k)\, b(-r_k)\, e^{r_k |\Delta|} / \big(a'(r_k)\, a(-r_k)\big)``, up
+to scale.
+
+The state is the observer canonical one (`CARMAModel`), whose first entry is
+``x``: ``s' = F s + g \varepsilon`` with ``-a_1, \dots, -a_p`` down the first
+column of ``F`` and ones above its diagonal, ``a(s) = s^p + a_1 s^{p-1} + \dots
++ a_p``, and ``g_k`` the coefficient of ``s^{p-k}`` in ``b``. Over a step
+``\Delta``, ``A = e^{F\Delta}`` and ``Q = \int_0^\Delta e^{Ft} g g^\top
+e^{F^\top t}\, dt`` come from one matrix exponential (Van Loan 1978), computed
+once per distinct step. The start is the stationary covariance, from the
+Lyapunov equation ``F P + P F^\top + g g^\top = 0``, solved after rescaling the
+coordinate by the roots' geometric mean magnitude, where ``F`` is of order one.
+As for a random walk, the coordinate is first rescaled by its median spacing,
+so a step's ``Q`` is well conditioned however slow the roots are. The prior is
+proper, so a level beside it is estimated, and integrated out for the
+hyperparameters, as for OU, and every hyperparameter given as a density is
+estimated by the same type-II MAP over the logs. The search starts from the
+scales and periods spread evenly in log between one sample spacing and ten
+times the span, and has no bounds: the hyperprior must be proper.
+
+**References.**
+B. C. Kelly, A. C. Becker, M. Sobolewska, A. Siemiginowska, and P. Uttley
+(2014), Flexible and scalable methods for quantifying stochastic variability in
+the era of massive time-domain astronomical data sets, *The Astrophysical
+Journal* 788(1), 33.
+C. F. Van Loan (1978), Computing integrals involving the matrix exponential,
+*IEEE Transactions on Automatic Control* 23(3), 395–404.
+
 ## [Phase tracks and their 2π branches](@id phase-branches)
 
 A phase is measured from a complex gain, so each sample's value ``\theta_k`` is
@@ -361,15 +424,21 @@ multiples of ``2\pi``, which leaves every sample's phase unchanged and which the
 flat start absorbs. A track whose first samples have gaps between them is
 restricted to that one choice.
 
-**A level.** With a level beside the prior, the level is integrated out under a
-flat prior as in [The level](@ref prior-level) above. Each history carries its own running
-``b``, and ``c`` is shared, so a history's prediction of sample ``k`` with the
-level integrated out is ``(\mu^-_{h,k})_1 + (b_h/c)\, v^1_k`` with variance
-``S_k + (v^1_k)^2/c``, and its weight is
-``\log w_h = \ell_h + b_h^2/2c - \tfrac12\log c``. Before any sample has data the
-level is unknown, so the first sample takes its nearest branch, which the level
-absorbs. Tracks that share a level are then put on one branch, the one bringing
-each track's weighted mean nearest the first's.
+**A mean.** With a mean beside the prior, its coefficients are integrated out
+under a flat prior as in [The mean](@ref prior-level) above. Each history carries
+its own running ``b``, and ``C`` is shared, so a history's prediction of sample
+``k`` with the mean integrated out is
+``(\mu^-_{h,k})_1 + (v^H_k)^\top C^{-1} b_h`` with variance
+``S_k + (v^H_k)^\top C^{-1} v^H_k``, and its weight is
+``\log w_h = \ell_h + \tfrac12 b_h^\top C^{-1} b_h - \tfrac12\log\det C``.
+Until the samples determine every coefficient the prediction is flat along the
+ones they leave free, so each sample takes its nearest branch, which the mean
+absorbs: one sample for a level, two for a level and a delay. Each track is
+filtered with its own coefficients. Tracks that share a coefficient are then
+aligned in turn: each is moved by the multiple of ``2\pi`` that brings its
+weighted mean nearest the mean predicted there by a weighted least-squares fit
+of the tracks before it, so a delay shared across spectral windows carries the
+phase from one window to the next.
 
 A track whose level is free, under a flat start or beside a level, is finally
 moved by the multiple of ``2\pi`` that keeps it nearest its input, so an
@@ -379,17 +448,17 @@ iterative solve does not see it jump by whole turns between iterations.
 
 A phase track's hyperparameters can be estimated by the type-II MAP above with the likelihood
 summed over the branch histories, ``\log \sum_h w_h``, in place of the
-likelihood of one lifted track. Where several tracks share a level, the pooled
+likelihood of one lifted track. Where several tracks share a mean, the pooled
 restricted likelihood of their most probable lifts is used, plus, for each track,
 the log of its histories' total weight relative to its most probable one's
-(`_branch_pooled_loglik`); without shared levels that is exactly the summed
+(`_branch_pooled_loglik`); without a shared mean that is exactly the summed
 likelihood. Each evaluation of the objective runs the filter again at the trial
 hyperparameters, so the branches and the hyperparameters are estimated together.
 The random walk's search starts from the ``m``-th differences reduced modulo
 ``2\pi``, which their integer coefficients make well defined.
 The bandpass solve uses this for the track alone to start its hyperparameters,
-then fits them on the chosen branches together with every other track's (see
-[The bandpass posterior](@ref bandpass-posterior)).
+then fits them by EM on the chosen branches together with every other track's
+(see [The bandpass posterior](@ref bandpass-posterior)).
 
 ### Limits
 
@@ -431,15 +500,20 @@ optimum decoding algorithm, *IEEE Transactions on Information Theory* 13(2),
 [`solve_joint_bandpass!`](@ref) fits the complex visibilities against
 ``V_{ab}(\nu) \approx g_a(\nu)\, S\, \overline{g_b(\nu)}``, with one complex
 gain ``g = e^{\ell + i\phi}`` per (station, feed, frequency segment, time
-segment) slot and one frequency-flat source term ``S`` per (scan, station pair,
-feed pair). Its objective is the negative log posterior
+segment) slot and one frequency-flat source term ``S_J`` per
+``J`` = (scan, station pair, feed pair). Its objective is the negative log posterior
 
 ```math
 O(\ell, \phi) = \tfrac12 \chi^2\big(g, \hat S(g)\big) + \sum_{\text{tracks}} E(\ell_{\text{track}}) + \sum_{\text{tracks}} E(\phi_{\text{track}}),
 ```
 
 with ``\hat S(g)`` the closed-form least-squares source term for the gains and
-``E`` each track's prior energy, its levels profiled out.
+``E`` each track's prior energy. With ``u_c = g_a \bar g_b`` over the cells
+``c`` of ``J`` and ``r_c`` their weighted sums, profiling ``S`` gives
+
+```math
+\chi^2_J(g) = \sum_c \frac{|r_c|^2}{w_c} - \frac{\big|\sum_c \bar u_c r_c\big|^2}{\sum_c w_c |u_c|^2}.
+```
 
 ### The prior as a sparse quadratic
 
@@ -447,179 +521,182 @@ A state-space prior's energy over a track, written over its states rather than
 through the filter, is a sum of small quadratic terms: for each step between
 samples, ``\tfrac12 (s_k - A_k s_{k-1})^\top Q_k^{-1} (s_k - A_k s_{k-1})``, and
 for a proper start ``\tfrac12 (s_1 - \mu_0)^\top P_0^{-1} (s_1 - \mu_0)``, where
-the first entry of ``s_k`` is the track's value less its level. Minimized over
+the first entry of ``s_k`` is the track's value less its mean. Minimized over
 the latent entries of the states (the derivatives of a random walk) and the
-levels, this is the energy the Kalman filter gives with the values observed
+mean's coefficients, this is the energy the Kalman filter gives with the values observed
 exactly, and a flat start is exact: no start term at all, rather than a large
 starting variance (`_track_energy`). The unknowns of one track are its values,
-its latent states and its levels, and the terms couple only neighboring
+its latent states and its mean's coefficients, and the terms couple only neighboring
 samples, so the energy of every track is one sparse quadratic. This is the
 smoothing problem written as least squares, which the RTS smoother solves by
 elimination along the chain (Bell 1994).
 
 The source term is frequency-flat, so it absorbs any constant added to a track:
-the data cannot measure a track's band constant. The posterior of everything
-else is the same as under each prior profiled over that constant, so a proper
-prior (an OU prior, or a random walk with an `init`) acts on its track less a
-free constant, exactly as beside a level; a flat-start walk is unchanged by a
-constant.
+``\chi^2_J`` is unchanged by it, and the data cannot measure a track's band
+constant. Where a proper prior (an OU prior, or a random walk with an `init`)
+acts on the track, the solve holds the track's first level at zero and lets the
+prior set the constant: the slots are free to move together, so the MAP of
+everything else is that under the prior profiled over the constant. On a track
+no such prior acts on, one slot of the track is held.
 
 ### The step
 
-The χ² to second order in each slot's log-gain about the current gains, with
-``S`` held, has curvature ``q = w|m|^2`` per correlation between the two slots it
-joins (``m = g_a S \bar g_b``) and decouples into a log-amplitude part, which
-measures ``\delta\ell_a + \delta\ell_b``, and a phase part, which measures
-``\delta\phi_a - \delta\phi_b``. Each part, plus the exact prior quadratic of its
-tracks, is one sparse system over the slots, the latent states and the levels,
-solved by a sparse Cholesky factorization (`_map_step`). A gauge other than a
-pin is imposed exactly by solving each of its constraints for one slot, which
-leaves the system positive definite. The unknowns are ordered by frequency for
-the factorization: the data couple stations only at one frequency and a prior
-couples frequencies only along a track, so the matrix is banded. Where the
-linearization is poor, a step can lower the χ² in a direction the full
-objective does not support (shrinking a gain whose phase is far off, rather than
-turning it), so the step is damped by Levenberg–Marquardt: ``\lambda/2\,
-\lVert x' - x \rVert^2`` over the slots' log-gains, a trust region in the units in
-which the linearization's error is measured, with ``\lambda`` a multiple ``\mu``
-of the largest data curvature and ``\mu`` updated from the ratio of the
-objective's actual decrease to the quadratic model's predicted one (Madsen,
-Nielsen & Tingleff 2004). A step is accepted when it does not raise the
-objective, with ``S`` re-solved.
+The objective's gradient is the held-``S`` gradient at ``\hat S``, since
+``\hat S`` is stationary. In one observable's slot values ``x`` (``\phi``, or
+``\ell``), each cell sees ``x_a + \sigma x_b`` with ``\sigma = -1`` for the
+phase and ``+1`` for the log-amplitude, and the two observables decouple. With
+``z_c = \bar u_c r_c``, ``p_c = w_c |u_c|^2``, ``D = \sum_c p_c`` and
+``S = \sum_c z_c / D``, the Hessian of ``\chi^2_J/2`` over the cells is, for the
+phase,
 
-The iteration starts from each slot's own gain estimate given unit gains
-elsewhere and stops when the undamped step would move no gain by more than
-`tolerance` of its standard error from the data, or on a plateau: when an
-accepted step lowers the negative log posterior by less than
-``\mathrm{tolerance}^2/2``, what a step of `tolerance` standard errors would.
-``S`` absorbs a band-constant change of a station's gains, so at low SNR the
-gains can keep moving along such directions while the posterior barely
-changes. Where a slot's phase is held
-more than ``\pi/2`` from its own data, by a phase prior or the gauge, the
-amplitude that fits it best is zero; without an amplitude prior the posterior
-then has no mode, and the solve warns.
+```math
+\operatorname{diag}\big(\operatorname{Re}(\bar S z_c)\big) - \operatorname{Re}(z z^{\mathsf H})/D,
+```
+
+and for the log-amplitude
+
+```math
+\operatorname{diag}\big(2|S|^2 p_c - \operatorname{Re}(\bar S z_c)\big) - \operatorname{Re}(z z^{\mathsf H})/D
+  + 2\,(t p^\top + p t^\top)/D - 4 |S|^2 p p^\top / D,
+\qquad t = \operatorname{Re}(\bar S z).
+```
+
+Where the model fits the data, ``z = S p``, and both reduce to the Gauss–Newton
+curvature with ``S`` profiled: the held-``S`` curvature ``q_c = |S|^2 p_c`` less
+its Schur complement in ``S``, ``q q^\top / \sum_c q_c``. Where the data are
+weak, ``|\hat S|^2`` holds the noise as well as the signal, and the Gauss–Newton
+form overstates the curvature of a profiled χ² that is nearly flat: along the
+array-wide R–L spectrum, which only the cross-hands measure, by an order of
+magnitude on real data, so Gauss–Newton steps there crawl. The solve takes
+Gauss–Newton steps while they are large, which keeps them in the basin they
+start in, and the exact Hessian once a step moves no gain by more than one
+standard error, or by fewer than ten while the objective falls by more than 1.5
+times what the Gauss–Newton model predicts (`_profile_product!`,
+`_gauss_newton_product!`).
+
+Either curvature is dense across frequency, since each ``J`` couples every cell
+of its two tracks, but a product with it is one pass over the cells: the
+held-``S`` part is sparse and the rest has rank at most three per ``J``. Each
+step solves the system of the Hessian, the exact prior quadratic and a damping
+``\lambda/2\,\lVert x' - x \rVert^2`` over the slots, over the slots, latent
+states and means, by preconditioned conjugate gradients (LinearSolve.jl's
+`KrylovJL_CG`, stopping at nonpositive curvature). The preconditioner
+(`ProfilePreconditioner`) is the sparse Cholesky factor of the held-``S``
+system, ordered by frequency so that it is banded, balanced on the coarse space
+of the track constants (Mandel 1993): the held-``S`` curvature sees a track's
+constant through every correlation of the track, the profiled one only through
+its prior, and on that space the preconditioner takes the profiled curvature,
+which there is the prior's alone. A step is accepted when it does not raise the
+objective, with ``S`` re-solved, and ``\lambda``, a multiple ``\mu`` of the
+largest data curvature, follows the ratio of the objective's actual decrease
+to the model's predicted one (Madsen, Nielsen & Tingleff 2004).
+
+The solve starts each slot at its own gain estimate given every other gain and
+``S``, repeated with ``S`` re-solved (Salvini & Wijnholds 2014). The MAP stops
+when the undamped step would move no gain by more than `tolerance` of its
+standard error from the data, or on a plateau: when an accepted step lowers the
+negative log posterior by less than ``\mathrm{tolerance}^2/2``, what a step of
+`tolerance` standard errors would. Where a slot's phase is held more than
+``\pi/2`` from its own data, by a phase prior or the gauge, the amplitude that
+fits it best is zero; without an amplitude prior the posterior then has no
+mode, and the solve warns.
 
 ### Hyperparameters
 
-A hyperparameter ``\theta`` given as a density is estimated by type-II MAP:
-the maximum of the hyperprior density times the marginal likelihood of the
-data, the gains integrated out. Every iteration this is done for the quadratic
-the step solves, the χ² to second order about the current gains with ``S``
-held. That quadratic is Gaussian in its unknowns ``u`` (the slots, latent
-states and levels), so for it the Laplace approximation (Tierney & Kadane
-1986) is exact:
+A hyperparameter ``\psi`` given as a density is estimated by MAP-EM: the
+maximum of the hyperprior density times the marginal likelihood of the data,
+the gains integrated out, by the EM algorithm (Dempster, Laird & Rubin 1977) with
+the posterior of the gains at given ``\psi`` approximated by a Gaussian at its
+mode (Laplace; Tierney & Kadane 1986). Each EM map
+
+1. finds the MAP of the gains under the current ``\psi`` (the step above);
+2. takes, for each track, the posterior means and second moments of its state
+   chain, ``v_k = (s_k, s_{k-1})``, under the Gaussian whose precision is the
+   preconditioner's curvature: held-``S``, except on the track constants, which
+   keep their prior variance;
+3. maximizes, for each track, its expected log prior density plus its
+   hyperprior over the log hyperparameters,
 
 ```math
-\log p(\text{data} \mid \theta) = -\min_u f_\theta(u) - \tfrac12 \log\det \nabla^2 f_\theta
-  - \log \int e^{-E_\theta(u)}\, du + \text{const},
+\psi' = \arg\max_\psi\; \log p(\psi) + \sum_k \Big(-\tfrac12 \log\det(2\pi Q_k)
+  - \tfrac12 \operatorname{tr}\big(Q_k^{-1} G_k\, \mathrm{E}[v_k v_k^\top]\, G_k^\top\big)\Big),
+\qquad G_k = [I, -A_k],
 ```
 
-with ``f_\theta`` the step's objective, ``E_\theta`` its prior part (the
-energy of the prior terms of the previous section), and the levels and flat
-starts integrated under their flat priors. The unknowns ``u`` are those the
-step leaves free: the gauge's constraints are solved for one slot each, and
-slots without data curvature are held at their values. The prior is therefore
-conditioned on those values, and the last term normalizes it there; where
-nothing is held, it equals the prior terms' own normalization,
-``\tfrac12 \sum_k \log\det(2\pi Q_k) + \tfrac12 \log\det(2\pi P_0)``.
-Without it the marginal likelihood would carry the prior density of the held
-values, the gauge's among them, which grows without bound as the priors
-stiffen: under a pin it drives the pinned track's prior to zero width. The
-prior is flat along the directions the flat starts and levels leave free, so
-the integral is taken over the others, which a rank-revealing QR of the prior's
-state equations picks once per step. Two sparse factorizations, of
-``\nabla^2 f_\theta`` and of the prior part alone, give the minima and the
-determinants. For a single track whose slots are measured independently, this
-is the restricted Kalman marginal of [The marginal likelihood](@ref).
+a two-parameter search for an OU prior. A CARMA prior's latent states depend
+on its roots, so the moments are taken in the basis of the current ``\psi``
+and the expected log prior evaluated in that of ``\psi'``. EM holds all the
+same: for any family of joint densities ``f_\psi(y, s)`` over the same ``s``
+that integrate to the marginal likelihood, Jensen's inequality gives
+``\log \int f_{\psi'} \ge \mathrm{E}_\psi[\log f_{\psi'} - \log f_\psi] +
+\log \int f_\psi``, and the data enter only through the first entry, which is
+the same in every basis. The second moments need only the
+covariances of unknowns that share a term, which lie on the sparsity pattern of
+the system and so of its Cholesky factor; the recursion of Takahashi, Fagan &
+Chen (1973), in its supernodal form (SelectedInversion.jl), gives those entries
+of the inverse without forming the rest. The expected log prior is linear in
+the moments, so they are summed once per distinct step before the search, and
+each evaluation in it costs one transition per distinct step, not one per
+sample.
 
-All tracks' hyperparameters are fit together, because the data couple the
-stations. The gradient in one track's hyperparameters is that of its prior's
-log density in expectation over the posterior of its states, less the same
-expectation under the conditioned prior (Louis 1982):
+The E-step's expectation carries the posterior's spread, so EM does not
+collapse a prior onto its mode as a joint MAP over the gains and ``\psi``
+would, where ``-\tfrac12 \log\det Q_k`` grows without bound as ``\sigma \to 0``.
+EM converges linearly, slowly where the data barely determine a direction, as
+for the array-wide R–L spectrum, so the maps are accelerated by SQUAREM
+(Varadhan & Roland 2008, scheme S3) over the log hyperparameters. EM stops once
+a SQUAREM cycle moves no log hyperparameter by more than `tolerance`. The
+hyperparameters start from type-II MAP on each track alone, taking each slot's
+own estimate given every other gain and ``S`` as an independent measurement;
+for a phase track that start is summed over the branch histories.
 
-```math
-\partial_\theta \log p(\text{data} \mid \theta) = \mathrm{E}\big[\partial_\theta \log p(u \mid \theta)\big]
-  - \mathrm{E}_0\big[\partial_\theta \log p(u \mid \theta)\big],
-\qquad
-\partial_\theta \log p(u \mid \theta) = \partial_\theta \sum_k \Big(-\tfrac12 \log\det(2\pi Q_k)
-  - \tfrac12 \operatorname{tr}\big(Q_k^{-1} G_k\, v_k v_k^\top\, G_k^\top\big)\Big),
-```
-
-where ``v_k = (s_k, s_{k-1})``, ``G_k = [I, -A_k]``, and ``\mathrm{E}_0`` is
-over the prior conditioned as above (the normalization terms cancel between the
-two). The second moments need only the covariances of unknowns that share a
-term. Those lie on the
-sparsity pattern of the Cholesky factor, whose entries of the inverse the
-recursion of Takahashi, Fagan & Chen (1973) gives without forming the rest. The
-search is quasi-Newton (BFGS; Nocedal & Wright 2006) with one block per track,
-started from the curvature of the expected log density and kept between
-iterations, with each step backtracked until the log posterior is no lower. It
-stops once the Newton step is within a tolerance of its standard error, its
-curvature measured along a step of its own.
-
-That optimum moves with the linearization, so it is sought only as closely as
-the last step moved the gains, in their standard errors, and to `tolerance`
-once the gains have converged: an inexact inner solve in the sense of
-Eisenstat & Walker (1996). At convergence the gains are the MAP under the
-hyperparameters, and the hyperparameters are the type-II MAP for the posterior
-linearized at those gains. This is the linearize-then-estimate scheme of
-penalized quasi-likelihood (Breslow & Clayton 1993), here with a Gaussian
-likelihood in the visibilities. ``S`` is held at its estimate, not
-integrated: integrating it would couple every pair of slots on a baseline. It
-absorbs only band constants, along which the priors are flat.
-
-The solve starts the hyperparameters from type-II MAP on each track alone,
-taking each slot's own estimate given every other gain and ``S`` as an
-independent measurement: the gain ``\hat g`` that minimizes the χ² of its own
-correlations, with weight ``\sum w |S\, g_{\text{other}}|^2 \cdot |\hat g|^2``
-in the log-gain. For a phase track, that start is summed over the branch
-histories.
+A pin holds the reference's track at zero in every cell of the gauge: the
+reference's bandpass is zero by definition, the other tracks' priors act on
+their bandpasses relative to it, and the held track takes no part in the
+hyperparameter fit. Any other gauge leaves the common phase to the priors, which
+set all of it but the part the tracks' means take up; along those shifts neither
+the data nor any prior changes, so holding one slot per shift is exact, and the
+gauge is reached afterwards by a shift along them (`_joint_bandpass_gauge!`).
 
 ### Branches
 
-The first iteration chooses the phase branches from the slot estimates under
+The phase branches are chosen once, from the slot estimates at the start under
 the starting hyperparameters (see
-[Phase tracks and their 2π branches](@ref phase-branches)). A branch change
-moves a phase by a multiple of ``2\pi``, which leaves its gain unchanged, so it
-changes the posterior only through the prior energy. Later iterations move a
-piece's slots only so that every difference along it lies in ``(-\pi, \pi]``,
-and keep the move only where it lowers that energy. Each iteration then lowers
-the posterior, and a branch change is never undone by the next. The branch
-choice and the Levenberg–Marquardt step otherwise answer different questions,
-the most probable branches of each track alone against the posterior of all
-gains together, and alternating them can cycle.
+[Phase tracks and their 2π branches](@ref phase-branches)). The data are
+fringe-corrected before the bandpass, so phase steps along frequency are small,
+and the MAP and EM then move the phases continuously on those branches.
 
 **References.**
 B. M. Bell (1994), The iterated Kalman smoother as a Gauss–Newton method,
 *SIAM Journal on Optimization* 4(3), 626–636.
-N. E. Breslow and D. G. Clayton (1993), Approximate inference in generalized
-linear mixed models, *Journal of the American Statistical Association* 88(421),
-9–25.
-S. C. Eisenstat and H. F. Walker (1996), Choosing the forcing terms in an
-inexact Newton method, *SIAM Journal on Scientific Computing* 17(1), 16–32.
-T. A. Louis (1982), Finding the observed information matrix when using the EM
-algorithm, *Journal of the Royal Statistical Society B* 44(2), 226–233.
+A. P. Dempster, N. M. Laird, and D. B. Rubin (1977), Maximum likelihood from
+incomplete data via the EM algorithm, *Journal of the Royal Statistical Society
+B* 39(1), 1–38.
 K. Madsen, H. B. Nielsen, and O. Tingleff (2004), *Methods for Non-Linear Least
 Squares Problems*, 2nd ed., Technical University of Denmark.
-J. Nocedal and S. J. Wright (2006), *Numerical Optimization*, 2nd ed., Springer.
+J. Mandel (1993), Balancing domain decomposition, *Communications in Numerical
+Methods in Engineering* 9(3), 233–241.
+S. Salvini and S. J. Wijnholds (2014), Fast gain calibration in radio astronomy
+using alternating direction implicit methods: analysis and applications,
+*Astronomy & Astrophysics* 571, A97.
 K. Takahashi, J. Fagan, and M.-S. Chen (1973), Formation of a sparse bus
 impedance matrix and its application to short circuit study, *Proceedings of
 the 8th Power Industry Computer Applications (PICA) Conference*.
 L. Tierney and J. B. Kadane (1986), Accurate approximations for posterior
 moments and marginal densities, *Journal of the American Statistical
 Association* 81(393), 82–86.
+R. Varadhan and C. Roland (2008), Simple and globally convergent methods for
+accelerating the convergence of any EM algorithm, *Scandinavian Journal of
+Statistics* 35(2), 335–353.
 
 ## Where the solvers use this
 
 **Bandpass, [`JointSmoother`](@ref).** Each (station, feed, time segment)
 has one track per spectral window along frequency, and the solve maximizes the
-posterior of every track at once, as described in
-[The bandpass posterior](@ref bandpass-posterior) below. The first iteration
-puts each phase window on its most probable branches, and later ones move a
-window by multiples of 2π only where that lowers the prior energy; each
-iteration fits every track's hyperparameters together to the marginal
-likelihood of the linearized posterior and takes one damped Gauss–Newton step
-of the posterior.
+posterior of every track at once, with the per-scan source term profiled out,
+as described in [The bandpass posterior](@ref bandpass-posterior) above. Each
+phase window is put on its most probable branches once, at the start, and the
+hyperparameters are fit by MAP-EM around the MAP solve.
 
 **Adhoc phase, [`PerTrackAdhocSmoother`](@ref).** After the per-AP solve, each
 (station, feed node) track of a scan is fit on its own: hyperparameters per

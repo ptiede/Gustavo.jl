@@ -4,20 +4,6 @@
 # axis) and its `DataGeometry`, run the per-baseline kernels in `search.jl` over
 # every (antenna pair, feed pair) cell.
 
-# One recorded search row: the antenna names, feed pair, SNR, the
-# family-wise false-alarm probability, and whether that PFA accepted it as a real
-# fringe. Every measured cell gets a row, so `detected`, not the row's presence,
-# is what marks a detection.
-#
-# `phase` (rad) is the measured phase at the epoch the search referenced, the
-# scan's mean time. No station solve uses it.
-const DetectionRow = @NamedTuple{
-    a::String, b::String, feeds::Tuple{Int, Int}, snr::Float64, pfa::Float64,
-    delay::Float64, rate::Float64, phase::Float64, detected::Bool,
-    snr_steer::Float64, pfa_steer::Float64,
-    delay_steer::Float64, rate_steer::Float64, steered::Bool,
-}
-
 # A scan group indexed by cell: each member's layers and, for every cross
 # antenna pair `j` (antenna names) and feed pair `q` of the group, where that cell is stored in
 # member `m` (`loc[m, j, q] = (bi, p)`, or `(0, 0)` when the member lacks it). A
@@ -79,31 +65,29 @@ function _family_cells(gc::_GroupCells, params::FringeSearch)
     return _search_cells(gc.freqs, gc.times, params) * nsearch
 end
 
-# Cell `(j, q)`'s layers copied into `ws` frequency-fastest, one member's
-# channels after another. A member that does not store the cell contributes
-# flagged rows.
+# Cell `(j, q)`'s weighted plane (`_weigh_plane!`) in `ws`, frequency-fastest,
+# one member's channels after another. A member that does not store the cell
+# contributes rows of zero weight.
 function _gather_cell!(ws::FringeWorkspace, gc::_GroupCells, j::Integer, q::Integer)
-    bufs = _plane_buffers!(ws, first(gc.layers), (length(gc.freqs), length(gc.times)))
+    X, Wm = _plane_buffers!(ws, (length(gc.freqs), length(gc.times)))
     offset = 0
     for m in eachindex(gc.layers, gc.nchan)
         rows = (offset + 1):(offset + gc.nchan[m])
         offset = last(rows)
-        _copy_cell_rows!(bufs, gc.layers[m], gc.loc[m, j, q], rows)
+        _weigh_cell_rows!(view(X, rows, :), view(Wm, rows, :), gc.layers[m], gc.loc[m, j, q])
     end
-    return bufs
+    return X, Wm
 end
 
-function _copy_cell_rows!(bufs, layers, (bi, p), rows)
-    V, W, F = bufs
+# One member's rows of a cell's weighted plane: zero where the member lacks the
+# cell (`bi == 0`).
+function _weigh_cell_rows!(X, Wm, layers, (bi, p))
     if bi == 0
-        V[rows, :] .= zero(eltype(V))
-        W[rows, :] .= zero(eltype(W))
-        F[rows, :] .= true
+        fill!(X, zero(eltype(X)))
+        fill!(Wm, zero(eltype(Wm)))
         return nothing
     end
-    foreach(bufs, layers) do buf, L
-        buf[rows, :] .= _cell_plane(L, bi, p)
-    end
+    _weigh_plane!(X, Wm, map(L -> _cell_plane(L, bi, p), layers)...)
     return nothing
 end
 
@@ -116,8 +100,7 @@ group, one Measurement Set per spectral window sharing one time axis. Each
 cell's plane is gathered across the members in frequency order, so the delay
 search spans every window. Autocorrelations are skipped. `geom` supplies the
 reference frequency `f0`, the default phase epoch, and the order of the
-antenna pairs. To search a residual, pass the group [`residual_group`](@ref)
-returns.
+antenna pairs.
 
 Each cell's `pfa` is computed over the scan's family of `ncross×npol`
 searches, which share one budget (Bonferroni), so a recorded `pfa` is directly
@@ -162,14 +145,14 @@ function search_scan(
     family_cells = _family_cells(gc, params)
     ax = _search_axes(gc.freqs, gc.times, params, C)
 
-    workspace = TaskLocalValue{FringeWorkspace{C}}(() -> FringeWorkspace(C))
+    workspace = TaskLocalValue{FringeWorkspace{C, T}}(() -> FringeWorkspace(C))
     cells = vec(CartesianIndices(valid))
     tforeach(cells; scheduler = executor) do I
         j, q = Tuple(I)
         ws = workspace[]
-        V, W, F = _gather_cell!(ws, gc, j, q)
+        X, Wm = _gather_cell!(ws, gc, j, q)
         scube[AntennaPair(j), FeedPair(q)] = _baseline_fringe_search(
-            V, W, F, gc.freqs, gc.times, geom.f0, Float64(t0), ax, ws, params, family_cells,
+            X, Wm, gc.freqs, gc.times, geom.f0, Float64(t0), ax, ws, params, family_cells,
         )
     end
     _warn_edge_peaks(scube, params, ax)

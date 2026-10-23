@@ -144,7 +144,7 @@ _block_feeds(t::AbstractFeedTying, nfeed::Integer) = filter(f -> _feed_node(t, f
 """
     GainModel(; phase = (;), logamp = (;), antennas = (;))
 
-The gain model a solve step fits: a `NamedTuple` of named phase
+The gain model a solver fits: a `NamedTuple` of named phase
 [`GainComponent`](@ref)s and a `NamedTuple` of named log-amplitude
 `GainComponent`s, with `gain = exp(Σ logamp) · cis(Σ phase)` per station. The
 keys are the component names, unique within each group; a value may itself be

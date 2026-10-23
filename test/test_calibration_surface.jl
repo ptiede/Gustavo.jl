@@ -1,5 +1,5 @@
 # The calibration surface: `fit`, `calibrate` and its `post`, gauges, the
-# step record, defaults.
+# specification record, defaults.
 # Reuses `_build_fringe_ps` and the CAL/FP aliases from test_pipeline.jl
 # (included earlier in runtests.jl).
 
@@ -7,11 +7,11 @@
     @testset "fit, then calibrate" begin
         ps, _ = _build_fringe_ps()
         gauge = PinAntenna(1)
-        sols = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
+        sols = _fit_chain((FringeClosure(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
         @test all(s -> s isa CAL.CalibrationSolution, sols)
         @test all(s -> length(s.geom.antennas) == 4, sols)
         @test [s.name for s in sols] == [:fringe, :bandpass, :adhoc]
-        @test startswith(first(sols).step, "BaselineFringeFit")
+        @test startswith(first(sols).spec, "FringeClosure")
         out = _calibrate_chain(sols, ps)
         @test out isa XRadio.ProcessingSet
         @test collect(keys(out)) == collect(keys(ps))
@@ -20,7 +20,7 @@
     @testset "calibrate's post runs on each corrected Measurement Set" begin
         ps, _ = _build_fringe_ps(nspw = 3, nchan = 4)
         gauge = PinAntenna(1)
-        sol = fit(BaselineFringeFit(; gauge), ps)
+        sol = _fringe_fit(ps, FringeClosure(; gauge))
         seen = Threads.Atomic{Int}(0)
         calibrate(sol, ps; post = ms -> (Threads.atomic_add!(seen, 1); ms))
         @test seen[] == length(ps)
@@ -36,15 +36,15 @@
         @test resolve_gauge(PinAntenna(["A4", 1]), names).refs == [4, 1]
         @test_throws ErrorException resolve_gauge(PinAntenna("ZZ"), names)
         # End-to-end (new engine): code "A1" resolves to index 1 → identical solve.
-        by_code = fit(BaselineFringeFit(; gauge = PinAntenna("A1")), ps)
-        by_idx = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
+        by_code = _fringe_fit(ps, FringeClosure(; gauge = PinAntenna("A1")))
+        by_idx = _fringe_fit(ps, FringeClosure(; gauge = PinAntenna(1)))
         @test parent(gains(by_code)) ≈ parent(gains(by_idx))
     end
 
-    @testset "Bandpass without BaselineFringeFit" begin
+    @testset "Bandpass without a fringe fit" begin
         ps, _ = _build_fringe_ps()
-        # A standalone Bandpass fit needs no BaselineFringeFit step, no anchor
-        # check, and no fringe-estimator diagnostics.
+        # A standalone Bandpass fit needs no fringe fit, no anchor check, and
+        # no fringe-estimator diagnostics.
         sol = fit(Bandpass(; gauge = PinAntenna(2)), ps)
         @test sol.name === :bandpass
         @test !haskey(sol.info, :search)
@@ -53,7 +53,7 @@
     end
 
     @testset "defaults" begin
-        f = BaselineFringeFit(; gauge = PinAntenna(1))
+        f = FringeClosure(; gauge = PinAntenna(1))
         @test f.model == default_fringe_model()
         # The default model: delay, inter-feed delay and rate, and no constant
         # phase — see `default_fringe_model`.
@@ -66,10 +66,8 @@
                 t.Feed isa CAL.SingleFeed,
             f.model.phase,
         )
-        @test f.search == FP.FringeSearch()
         @test f.closure == FP.Stationization()
-        @test f.rounds == 1
-        @test f.steer_cells == 9.0
+        @test FringeSearch().steer_cells == 9.0
 
         b = Bandpass(; gauge = PinAntenna(1))
         @test b.model == default_bandpass_model()
@@ -91,12 +89,12 @@ end
     ps, _ = _build_fringe_ps()
 
     @testset "SolveContext" begin
-        ff = BaselineFringeFit(; gauge = PinAntenna(1))
+        ff = Bandpass(; gauge = PinAntenna(1))
         geom = CAL.DataGeometry(ps)
         groups = XRadio.groupby(ps, XRadio.ByScan())
         sizes = [Gustavo._group_bytes(g) for g in values(groups)]
         gauge = resolve_gauge(PinAntenna(1), geom.antennas)
-        ctx = Gustavo._step_context(ff, (; geom), gauge, groups, sizes, ExecutionConfig())
+        ctx = Gustavo._solver_context(ff, (; geom), gauge, groups, sizes, ExecutionConfig())
         @test isconcretetype(typeof(ctx))
         for f in (:model, :layout, :geom, :θ, :gauge, :groups, :exec, :passes)
             @test isconcretetype(fieldtype(typeof(ctx), f))
@@ -152,10 +150,10 @@ end
         @test occursin("fringe", lines3[1]) && occursin("fringe", lines3[2])
         @test occursin("bandpass", lines3[3]) && occursin("bandpass", lines3[4])
 
-        # Wired through real fits: each step's stage is named in the log.
+        # Wired through real fits: each fit's stage is named in the log.
         buf4 = IOBuffer()
         sols = _fit_chain(
-            (BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps;
+            (FringeClosure(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps;
             exec = ExecutionConfig(progress = ProgressLogger(min_interval = 0, io = buf4)),
         )
         @test all(s -> s isa CAL.CalibrationSolution, sols)
@@ -163,18 +161,18 @@ end
         @test occursin("fringe", out) && occursin("bandpass", out)
     end
 
-    @testset "the solution records its step, gauge included" begin
-        ff = BaselineFringeFit(; gauge = PinAntenna("A1"))
-        sol = fit(ff, ps)
-        @test sol.step == sprint(show, ff; context = :limit => true)
+    @testset "the solution records its specification, gauge included" begin
+        ff = FringeClosure(; gauge = PinAntenna("A1"))
+        sol = _fringe_fit(ps, ff)
+        @test sol.spec == sprint(show, ff; context = :limit => true)
         # The gauge as given, not as resolved against the stations.
-        @test occursin(sprint(show, PinAntenna("A1")), sol.step)
+        @test occursin(sprint(show, PinAntenna("A1")), sol.spec)
         # A selection carries it along.
-        @test sol[:phase].step == sol.step
+        @test sol[:phase].spec == sol.spec
 
         # A bare index is not a gauge, so it is rejected rather than silently
         # treated as one.
-        @test_throws "`gauge` must be an AbstractGauge, got 2" BaselineFringeFit(; gauge = 2)
+        @test_throws "`gauge` must be an AbstractGauge, got 2" FringeClosure(; gauge = 2)
     end
 end
 
@@ -182,7 +180,7 @@ end
 # rewrap them — e.g. over a view — and the whole apply path must be indifferent to that.
 @testset "rewrapped parameters correct data identically" begin
     ps, _ = _build_fringe_ps()
-    sol = last(_fit_chain((BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps))
+    sol = last(_fit_chain((FringeClosure(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps))
     rewrapped = [
         CAL.ComponentFit(
             c.path, c.component,
@@ -190,7 +188,7 @@ end
         )
             for c in sol.components
     ]
-    sold = CAL.CalibrationSolution(sol.geom, sol.name, rewrapped, sol.info; step = sol.step)
+    sold = CAL.CalibrationSolution(sol.geom, sol.name, rewrapped, sol.info; spec = sol.spec)
     @test all(parent(c.params) isa SubArray for c in sold.components)
 
     a = calibrate(sol, ps)

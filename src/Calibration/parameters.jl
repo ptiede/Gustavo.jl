@@ -358,8 +358,8 @@ ragged leaf per group (`θ.phase.<name>.g1`, `.g2`, …). Iterate the groups wit
 `require_nonempty` runs `validate_gain_model` first, rejecting
 a `model` with neither phase nor log-amplitude components — the right default
 for a model meant to be solved. Pass `require_nonempty = false` when an empty
-model is a legitimate, expected state (e.g. one pipeline step's own model,
-which may legitimately compile no components while a sibling step's does);
+model is a legitimate, expected state (e.g. one solver's own model, which
+may legitimately compile no components while another solver's does);
 the returned layout then simply has `nθ == 0`.
 """
 function plan_parameters(model::GainModel, nant::Integer, geom::DataGeometry; require_nonempty::Bool = true)
@@ -502,7 +502,7 @@ _hetero_leaves!(out, g::_ComponentGroups, path) = push!(out, (path, g))
 Assert that the resolved `model` assigns every station the same component
 signatures, throwing otherwise with the differing components, their
 signatures, and the stations carrying each. `who` names the consumer in the
-error — the framework calls this for a solve step that has not opted into
+error — the framework calls this for a solver that has not opted into
 heterogeneity (`supports_antenna_heterogeneity`).
 """
 function require_antenna_uniform(model::GainModel, antennas, who::AbstractString)

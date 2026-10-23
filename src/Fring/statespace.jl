@@ -11,15 +11,18 @@
 #   started from its stationary distribution.
 # - `RandomWalkModel{M}`: the (M−1)-times integrated Brownian motion; states
 #   `(f, f′, …, f^(M−1))`, started flat or from a stated Gaussian.
+# - `CARMAModel`: a stationary CARMA(p, q) process, in observer canonical form,
+#   started from its stationary distribution.
 #
 # Särkkä & Solin, Applied Stochastic Differential Equations (2019).
 
 # Exact discrete OU transition over a gap Δt for K(Δt)=σ²·exp(-|Δt|/τ): the
 # state contracts by a=exp(-|Δt|/τ) toward the (zero) mean, with process
-# variance q=σ²(1-a²) injected so the stationary variance stays σ².
+# variance q=σ²(1-a²) injected so the stationary variance stays σ². `expm1`
+# keeps q accurate, and nonzero, for gaps far shorter than τ.
 @inline function ou_step(τ::Real, σ2::Real, Δt::Real)
-    a = exp(-abs(Δt) / τ)
-    return a, σ2 * (1 - a * a)
+    x = abs(Δt) / τ
+    return exp(-x), -σ2 * expm1(-2x)
 end
 
 """
@@ -53,11 +56,66 @@ function RandomWalkModel{M}(σ2, μ0, P0) where {M}
     return RandomWalkModel{M, T, typeof(init)}(σ2, init)
 end
 
+"""
+    CARMAModel{P}(ar, ma, σ2)
+
+The stationary CARMA process `a(D)x = b(D)ε` along a coordinate, with
+`a(s) = Π(s − r)` over the `P` complex roots `ar` and `b(s) = Π(1 − s/r)` over
+the fewer roots `ma` (conjugate pairs together, every real part negative), and
+stationary variance `σ2`. Its state is the observer canonical one, whose first
+entry is `x`: `s′ = F·s + g·ε` with `F` the companion matrix of `a` down its
+first column and `g` the coefficients of `b`. It starts from its stationary
+distribution.
+"""
+struct CARMAModel{P, T, L}
+    F::SMatrix{P, P, T, L}
+    G::SMatrix{P, P, T, L}
+    P0::SMatrix{P, P, T, L}
+end
+
+function CARMAModel{P}(ar, ma, σ2) where {P}
+    length(ar) == P || throw(ArgumentError("a CARMAModel{$P} needs $P autoregressive roots, got $(length(ar))"))
+    T = float(promote_type(real(eltype(ar)), real(eltype(ma)), typeof(σ2)))
+    # The roots' geometric mean magnitude `ω` rescales the coordinate to `v = ω·u`,
+    # where the companion matrix is of order one and the stationary covariance
+    # well conditioned; the state is scaled back by `D = diag(ω^(k−1))`.
+    ω = exp(sum(r -> log(abs(r)), ar) / P)
+    a = _poly_coefficients([r / ω for r in ar])
+    b = reverse(_poly_coefficients([r / ω for r in ma]) ./ prod(r -> -r / ω, ma; init = one(eltype(ar))))
+    F̂ = zeros(T, P, P)
+    F̂[:, 1] .= -real.(a[2:end])
+    foreach(k -> F̂[k, k + 1] = 1, 1:(P - 1))
+    ĝ = zeros(T, P)
+    for (j, bj) in pairs(real.(b))
+        ĝ[P - j + 1] = bj
+    end
+    n = P * P
+    In = Matrix{T}(I, P, P)
+    P̂ = reshape((kron(In, F̂) + kron(F̂, In)) \ -vec(ĝ * ĝ'), P, P)
+    d = [ω^(k - 1) for k in 1:P]
+    c = T(σ2) / P̂[1, 1]
+    F = ω .* d .* F̂ ./ d'
+    g = sqrt(ω) .* d .* ĝ
+    P0 = c .* d .* P̂ .* d'
+    return CARMAModel{P, T, n}(SMatrix{P, P, T}(F), SMatrix{P, P, T}(c .* g .* g'), SMatrix{P, P, T}((P0 + P0') / 2))
+end
+
+# The coefficients of `Π(s − r)` over the roots `rs`, highest power first.
+function _poly_coefficients(rs)
+    c = [one(complex(float(eltype(rs))))]
+    for r in rs
+        c = [c; 0] .- r .* [0; c]
+    end
+    return c
+end
+
 statedim(::OUModel) = 1
 statedim(::RandomWalkModel{M}) where {M} = M
+statedim(::CARMAModel{P}) where {P} = P
 
 _model_eltype(::OUModel{T}) where {T} = T
 _model_eltype(::RandomWalkModel{M, T}) where {M, T} = T
+_model_eltype(::CARMAModel{P, T}) where {P, T} = T
 
 # `(A, Q)` over a step `Δ` in the coordinate, in element type `T`.
 function transition(m::OUModel, Δ, ::Type{T}) where {T}
@@ -80,9 +138,42 @@ function transition(m::RandomWalkModel{M}, Δ, ::Type{T}) where {M, T}
     return A, Q
 end
 
+# Van Loan (1978): over a step `d`, `E = exp([−F G; 0 Fᵀ]·d)` holds `A = exp(F·d)`
+# as the transpose of its lower right block, and `Q` is `A` times its upper right
+# block. Its `−F` block grows as `exp(‖F‖·d)`, which loses `Q` to cancellation
+# once a root decays within the step, so `E` is taken over `d/2ᵏ` with
+# `‖F‖·d/2ᵏ ≤ 1` and the step built by doubling, `Q ← Q + A·Q·Aᵀ`, `A ← A²`,
+# which adds positive semidefinite terms.
+function transition(m::CARMAModel{P}, Δ, ::Type{T}) where {P, T}
+    F, G = T.(m.F), T.(m.G)
+    stiffness = opnorm(F, Inf) * abs(T(Δ))
+    k = stiffness > 1 ? ceil(Int, log2(stiffness)) : 0
+    d = abs(T(Δ)) / 2^k
+    E = exp([-F G; zero(F) F'] .* d)
+    A = SMatrix{P, P, T}(ntuple(l -> E[P + 1 + (l - 1) ÷ P, P + 1 + (l - 1) % P], Val(P * P)))
+    E12 = SMatrix{P, P, T}(ntuple(l -> E[1 + (l - 1) % P, P + 1 + (l - 1) ÷ P], Val(P * P)))
+    Q = A * E12
+    Q = (Q + Q') / 2
+    for _ in 1:k
+        Q = Q + A * Q * A'
+        A = A * A
+    end
+    return A, (Q + Q') / 2
+end
+
+# The transition into a step `Δ`, reusing `last`, a previous step's `(Δ, A, Q)`,
+# when its step is the same (`_same_step`).
+_transition(model, Δ, ::Type{T}, last) where {T} =
+    !isnothing(last) && _same_step(last[1], Δ) ? last : (Δ, transition(model, Δ, T)...)
+
+# Steps that agree to 1e-9 are one step: channel frequencies near 10¹⁰ Hz carry
+# rounding of about 1e-11 of a channel spacing.
+_same_step(a, b) = abs(a - b) <= 1.0e-9 * max(abs(a), abs(b))
+
 # The starting mean and covariance, or `nothing` for a flat start.
 initial(m::OUModel, ::Type{T}) where {T} = SVector{1, T}(0), SMatrix{1, 1, T}(m.σ2)
 initial(m::RandomWalkModel, ::Type{T}) where {T} = _initial(m.init, T)
+initial(m::CARMAModel{P}, ::Type{T}) where {P, T} = zero(SVector{P, T}), T.(m.P0)
 _initial(::Nothing, ::Type) = nothing
 _initial((μ0, P0)::Tuple, ::Type{T}) where {T} = T.(μ0), T.(P0)
 
@@ -125,34 +216,45 @@ function kalman_filter(model, y, r, x)
         μp = fill(nanvec, n), Pp = fill(nanmat, n), A = fill(nanmat, n), Q = fill(nanmat, n),
         v = fill(T(NaN), n), S = zeros(T, n),
     )
-    loglik, ndiffuse, _, _ = _kalman_forward(model, y, r, x, Val(D), T, Val(false), rec)
+    loglik, ndiffuse, _, _ = _kalman_forward(model, y, r, x, Val(D), T, nothing, rec)
     return (; rec..., ndiffuse, loglik)
 end
 
 _filter_eltype(model, y, r, x) = float(promote_type(eltype(y), eltype(r), eltype(x), _model_eltype(model)))
 
 # The forward recursion of `kalman_filter`, storing each step into `rec` unless
-# it is `nothing`. With `Val(true)` it also filters a track of ones, missing
-# where `y` is, under the same gains (proper start only), and accumulates
-# `b = Σ vʸ·v¹/S` and `c = Σ (v¹)²/S`. Returns `(loglik, ndiffuse, b, c)`.
-function _kalman_forward(model, y, r, x, ::Val{D}, ::Type{T}, ::Val{L}, rec) where {D, T, L}
+# it is `nothing`. With a design `H`, one row of `NH` regressors per sample
+# (`nothing` for none), it also filters each column of `H`, missing where `y`
+# is, under the same gains (proper start only), and accumulates `b = Σ vʸ·vᴴ/S`
+# and `C = Σ vᴴ·vᴴᵀ/S`, `vᴴ` the columns' innovations. Returns
+# `(loglik, ndiffuse, b, C)`.
+_kalman_forward(model, y, r, x, d::Val, ::Type{T}, ::Nothing, rec) where {T} =
+    _kalman_forward(model, y, r, x, d, T, Val(0), nothing, rec)
+_kalman_forward(model, y, r, x, d::Val, ::Type{T}, H::AbstractVector{<:StaticVector{NH}}, rec) where {T, NH} =
+    _kalman_forward(model, y, r, x, d, T, Val(NH), H, rec)
+
+function _kalman_forward(model, y, r, x, ::Val{D}, ::Type{T}, ::Val{NH}, H, rec) where {D, T, NH}
     Vec = SVector{D, T}
     Mat = SMatrix{D, D, T, D * D}
     e1 = Vec(ntuple(i -> i == 1 ? one(T) : zero(T), Val(D)))
     start = initial(model, T)
     diffuse = isnothing(start)
-    L && diffuse &&
-        throw(ArgumentError("a level cannot be separated from a flat-start $(nameof(typeof(model)))"))
+    NH > 0 && diffuse &&
+        throw(ArgumentError("a mean cannot be separated from a flat-start $(nameof(typeof(model)))"))
     ndiffuse = 0
     nobs = 0
-    loglik = b = c1 = zero(T)
+    loglik = zero(T)
     μ, P = diffuse ? (zero(Vec), zero(Mat)) : start
-    μ1 = zero(Vec)
+    μH = zero(SMatrix{D, NH, T})
+    bH = zero(SVector{NH, T})
+    CH = zero(SMatrix{NH, NH, T})
     # Flat start: the running density of (y_1:k, s_k) is exp(c + ηᵀs − sᵀΛs/2).
     η, Λ, c = zero(Vec), zero(Mat), zero(T)
+    step = nothing
     for k in eachindex(y, r, x)
         if k > 1
-            A, Q = transition(model, x[k] - x[k - 1], T)
+            step = _transition(model, x[k] - x[k - 1], T, step)
+            _, A, Q = step
             isnothing(rec) || (rec.A[k] = A; rec.Q[k] = Q)
             if diffuse
                 # Predict in information form without Q⁻¹, so Q may be singular.
@@ -167,7 +269,7 @@ function _kalman_forward(model, y, r, x, ::Val{D}, ::Type{T}, ::Val{L}, rec) whe
                 η = F' \ η̃
             else
                 μ = A * μ
-                L && (μ1 = A * μ1)
+                NH > 0 && (μH = A * μH)
                 P = _symmetric(A * P * A' + Q)
             end
         end
@@ -185,11 +287,11 @@ function _kalman_forward(model, y, r, x, ::Val{D}, ::Type{T}, ::Val{L}, rec) whe
                 vk = yk - μ[1]
                 K = P[:, 1] / Sk
                 μ += K * vk
-                if L
-                    v1 = one(T) - μ1[1]
-                    μ1 += K * v1
-                    b += vk * v1 / Sk
-                    c1 += v1 * v1 / Sk
+                if NH > 0
+                    vH = SVector{NH, T}(H[k]) - μH[1, :]
+                    μH += K * vH'
+                    bH += vk * vH / Sk
+                    CH += vH * vH' / Sk
                 end
                 IK = I - K * e1'
                 P = _symmetric(IK * P * IK' + K * rk * K')
@@ -219,7 +321,7 @@ function _kalman_forward(model, y, r, x, ::Val{D}, ::Type{T}, ::Val{L}, rec) whe
                 "($nobs usable samples, state dimension $D)",
         ),
     )
-    return loglik, ndiffuse, b, c1
+    return loglik, ndiffuse, bH, CH
 end
 
 @noinline function _throw_precision_loss(model, what, value, k)
@@ -239,7 +341,7 @@ end
 function _kalman_loglik(model, y, r, x)
     Base.require_one_based_indexing(y, r, x)
     T = _filter_eltype(model, y, r, x)
-    return first(_kalman_forward(model, y, r, x, Val(statedim(model)), T, Val(false), nothing))
+    return first(_kalman_forward(model, y, r, x, Val(statedim(model)), T, nothing, nothing))
 end
 
 """
@@ -399,59 +501,93 @@ function _init_track_var(y, w)
     return max(var_y - r_bar, T(1.0e-4))
 end
 
+# A track's mean is a linear model `Hβ` with a flat prior on `β`: per track
+# `(; cols, rows)`, the indices into the pooled `β` of its `NH` coefficients and
+# their regressors at each of its samples (`rows[k]`, an `SVector{NH}`). A level
+# shared by a group of tracks is one coefficient whose regressor is one.
+_level_design(levels, ys) = [(; cols = SVector(l), rows = fill(SVector(one(eltype(y))), length(y))) for (y, l) in zip(ys, levels)]
+
+_mean_count(design) = maximum(d -> maximum(d.cols), design)
+
 # The Kalman filter of a proper-start `model` run over `y` and, with the same
-# gains, over a track of ones. The filter is linear in its observations, so the
-# innovations of `y - L` are `vʸ - L·v¹`. Returns `(ll, b, c)` over the observed
-# samples: the zero-mean log likelihood of `y`, `b = Σ vʸ·v¹/S` and
-# `c = Σ (v¹)²/S`. The GLS level of `y` is `b/c`.
-function _level_sums(model, y, r, x)
-    Base.require_one_based_indexing(y, r, x)
+# gains, over each regressor of the design `rows`. The filter is linear in its
+# observations, so the innovations of `y − Hβ` are `vʸ − vᴴ·β`. Returns
+# `(ll, b, C)` over the observed samples: the zero-mean log likelihood of `y`,
+# `b = Σ vʸ·vᴴ/S` and `C = Σ vᴴ·vᴴᵀ/S`. The GLS mean of `y` is `C⁻¹b`.
+function _mean_sums(model, y, r, x, rows)
+    Base.require_one_based_indexing(y, r, x, rows)
     T = _filter_eltype(model, y, r, x)
-    ll, _, b, c = _kalman_forward(model, y, r, x, Val(statedim(model)), T, Val(true), nothing)
-    return ll, b, c
+    ll, _, b, C = _kalman_forward(model, y, r, x, Val(statedim(model)), T, rows, nothing)
+    return ll, b, C
+end
+
+# The pooled sums `(ll, b, C)` of `_mean_sums` over tracks with the designs
+# `design`, each track's added at its coefficients.
+function _pooled_mean_sums(models, ys, rs, xs, design, ::Type{T}) where {T}
+    p = _mean_count(design)
+    ll = zero(T)
+    b = zeros(T, p)
+    C = zeros(T, p, p)
+    for i in eachindex(ys, rs, xs, design)
+        lli, bi, Ci = _mean_sums(_track_model(models, i), ys[i], rs[i], xs[i], design[i].rows)
+        cols = design[i].cols
+        ll += lli
+        b[cols] .+= bi
+        C[cols, cols] .+= Ci
+    end
+    return ll, b, C
+end
+
+# The coefficients some observed sample measures, and the factorization of their
+# block of `C`; the data must determine them.
+function _measured_mean(C)
+    measured = findall(>(0), diag(C))
+    F = cholesky(Symmetric(C[measured, measured]); check = false)
+    issuccess(F) || throw(
+        ArgumentError(
+            "the observed samples do not determine the mean: its regressors are linearly " *
+                "dependent over them",
+        ),
+    )
+    return measured, F
 end
 
 # The log marginal likelihood of zero-mean tracks `ys` under `models` (one per
-# track, or one for all), or, with `levels` giving each track's level group, of
-# tracks offset by one unknown level per group, integrated out under a flat
-# prior (REML): per group `Σ ll + b²/2c − log(c)/2`, up to a constant.
-function _pooled_loglik(models, ys, rs, xs, levels)
+# track, or one for all), or, with `mean` giving each track's level group (one
+# id per track) or design (`_level_design`), of tracks offset by their mean,
+# integrated out under a flat prior on its coefficients (REML):
+# `Σ ll + bᵀC⁻¹b/2 − log det(C)/2` over the coefficients the data measure, up to
+# a constant.
+function _pooled_loglik(models, ys, rs, xs, mean)
     T = float(promote_type(_model_eltype(_track_model(models, firstindex(ys))), eltype(eltype(ys))))
-    lp = zero(T)
-    if isnothing(levels)
+    if isnothing(mean)
+        lp = zero(T)
         for i in eachindex(ys, rs, xs)
             lp += _kalman_loglik(_track_model(models, i), ys[i], rs[i], xs[i])
         end
         return lp
     end
-    b = zeros(T, maximum(levels))
-    c = zeros(T, maximum(levels))
-    for i in eachindex(ys, rs, xs, levels)
-        ll, bi, ci = _level_sums(_track_model(models, i), ys[i], rs[i], xs[i])
-        lp += ll
-        b[levels[i]] += bi
-        c[levels[i]] += ci
-    end
-    for g in eachindex(b, c)
-        c[g] > 0 && (lp += b[g]^2 / (2 * c[g]) - log(c[g]) / 2)
-    end
-    return lp
+    design = eltype(mean) <: Integer ? _level_design(mean, ys) : mean
+    ll, b, C = _pooled_mean_sums(models, ys, rs, xs, design, T)
+    measured, F = _measured_mean(C)
+    bm = b[measured]
+    return ll + dot(bm, F \ bm) / 2 - logdet(F) / 2
 end
 
 _track_model(models::AbstractVector, i) = models[i]
 _track_model(model, i) = model
 
-_ou_loglik(ys, rs, xs, levels; τ, σ2, branches::Bool = false) =
-    (branches ? _branch_pooled_loglik : _pooled_loglik)(OUModel(τ, σ2), ys, rs, xs, levels)
+_ou_loglik(ys, rs, xs, mean; τ, σ2, branches::Bool = false) =
+    (branches ? _branch_pooled_loglik : _pooled_loglik)(OUModel(τ, σ2), ys, rs, xs, mean)
 
 # Type-II MAP of an `OUPrior`'s hyperparameters shared by a group of tracks:
-# the pooled Kalman marginal likelihood (`_ou_loglik`, zero-mean or with each
-# `levels` group's level integrated out) plus the hyperprior density over
+# the pooled Kalman marginal likelihood (`_ou_loglik`, zero-mean or with the
+# `mean` integrated out) plus the hyperprior density over
 # `(log τ, log σ)`, whose Jacobian adds `log τ + log σ`. `scale` and `σ` are each
 # a fixed value or a density (`is_fixed_hyper`); only the densities are searched.
 # `[τ_lo, τ_hi]` bounds the `τ` search and seeds it at its geometric mean. With
 # `branches` the tracks are phases on unknown 2π branches.
-function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real, levels = nothing, branches::Bool = false)
+function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real, mean = nothing, branches::Bool = false)
     T = float(
         promote_type(
             typeof(τ_lo), typeof(τ_hi), typeof(σ2_seed), _blocks_eltype(ys, ws), mapreduce(eltype, promote_type, xs),
@@ -464,7 +600,7 @@ function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_see
     lτ_lo, lτ_hi = log(T(τ_lo)), log(T(τ_hi))
     lτ0 = fixτ ? log(T(scale)) : (lτ_lo + lτ_hi) / 2
     lσ20 = fixσ ? 2 * log(T(σ)) : log(max(T(σ2_seed), σ2_lo))
-    neglp = _OUNegLogPost(ys, rs, xs, levels, scale, σ, lτ_lo, lτ_hi, lτ0, lσ20, σ2_lo, branches)
+    neglp = _OUNegLogPost(ys, rs, xs, mean, scale, σ, lτ_lo, lτ_hi, lτ0, lσ20, σ2_lo, branches)
     x0 = fixτ ? T[lσ20] : fixσ ? T[clamp(lτ0, lτ_lo, lτ_hi)] : T[clamp(lτ0, lτ_lo, lτ_hi), lσ20]
     xbest, _ = _nelder_mead(neglp, x0)
     lτ̂, lσ̂2 = _unpack(neglp, xbest)
@@ -478,7 +614,7 @@ struct _OUNegLogPost{Y, R, X, L, S, G, T}
     ys::Y
     rs::R
     xs::X
-    levels::L
+    mean::L
     scale::S
     σ::G
     lτ_lo::T
@@ -501,7 +637,7 @@ function (f::_OUNegLogPost)(p)
     lτ, lσ2 = _unpack(f, p)
     τ = _tau(f, lτ)
     σ2 = max(exp(lσ2), f.σ2_lo)
-    lp = _ou_loglik(f.ys, f.rs, f.xs, f.levels; τ, σ2, f.branches)
+    lp = _ou_loglik(f.ys, f.rs, f.xs, f.mean; τ, σ2, f.branches)
     is_fixed_hyper(f.scale) || (lp += logdensityof(f.scale, τ) + log(τ))
     is_fixed_hyper(f.σ) || (lp += logdensityof(f.σ, sqrt(σ2)) + log(σ2) / 2)
     val = isfinite(lp) ? -lp : oftype(lp, Inf)

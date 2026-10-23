@@ -6,23 +6,26 @@
 # with non-finite `y`, or `w` not positive and finite, carries no data. A prior
 # relates values within a block, never across blocks.
 #
-# A block may share a level with other blocks: a separate component, flat and
-# unknown, that the prior's zero mean makes identifiable. `level` then gives each
-# block's level group, and `_estimate_levels` its GLS estimate.
+# A block may share a mean with other blocks: a linear model with flat unknown
+# coefficients, such as a level or a delay, that the prior's zero mean makes
+# identifiable. `mean` then gives each block's design (`_level_design`), and
+# `_estimate_mean` its GLS estimate.
 #
 # Fitting is in steps: `_estimate_hypers` fixes a prior's hyperparameters from
-# whichever blocks the caller pools, `_estimate_levels` the levels under them, and
-# `_estimate_map` fits one block, its level removed, under the resolved prior.
+# whichever blocks the caller pools, `_estimate_mean` the mean under them, and
+# `_estimate_map` fits one block, its mean removed, under the resolved prior.
 
 _shape_usable(yk, wk) = isfinite(yk) && isfinite(wk) && wk > 0
 
 """
     _proper_prior(prior) -> Bool
 
-Whether `prior` is proper along every direction of a block, so that a level
-beside it is identifiable: an `OUPrior`, or a `RandomWalkPrior` with an `init`.
+Whether `prior` is proper along every direction of a block, so that a mean
+beside it is identifiable: an `OUPrior`, a `CARMAPrior`, or a `RandomWalkPrior`
+with an `init`.
 """
 _proper_prior(::OUPrior) = true
+_proper_prior(::CARMAPrior) = true
 _proper_prior(p::RandomWalkPrior) = !isnothing(p.init)
 _proper_prior(_) = false
 
@@ -35,14 +38,15 @@ _prior_along(::Nothing, dim) = nothing
 _prior_along(p::NamedTuple, dim) = p[dim]
 
 """
-    _estimate_hypers(prior, ys, ws, xs; level = nothing) -> prior
+    _estimate_hypers(prior, ys, ws, xs; mean = nothing) -> prior
 
 `prior` with every hyperparameter fixed, estimated from the blocks
 `(ys[i], ws[i], xs[i])`. A hyperparameter given as a number is kept; one given
 as a hyperprior is estimated by type-II MAP over the blocks together, on their
-marginal likelihood: zero-mean, or with the level of each group of `level`
-(one group id per block) integrated out under a flat prior. A walk without a
-`init` leaves its own level free, so it takes no `level`; its likelihood is
+marginal likelihood: zero-mean, or with `mean` integrated out under a flat
+prior, given as one level group id per block or one design per block
+(`_level_design`). A walk without an `init` leaves its own level free, so it
+takes no `mean`; its likelihood is
 the restricted one ([`_random_walk_loglik`](@ref)). With `branches`, the blocks
 are phases on unknown 2π branches and the likelihood is summed over their
 branches ([`_branch_filter`](@ref)).
@@ -51,11 +55,11 @@ Blocks without data (for a walk without an `init` of order `m`, with fewer
 than `m` usable segments) are ignored; with none left the hyperpriors cannot
 be resolved and this throws.
 """
-_estimate_hypers(::Nothing, ys, ws, xs; level = nothing, branches::Bool = false) = nothing
+_estimate_hypers(::Nothing, ys, ws, xs; mean = nothing, branches::Bool = false) = nothing
 
-function _estimate_hypers(prior::RandomWalkPrior, ys, ws, xs; level = nothing, branches::Bool = false)
-    _proper_prior(prior) || isnothing(level) || throw(
-        ArgumentError("a RandomWalkPrior without an init leaves its level free; it takes no level groups"),
+function _estimate_hypers(prior::RandomWalkPrior, ys, ws, xs; mean = nothing, branches::Bool = false)
+    _proper_prior(prior) || isnothing(mean) || throw(
+        ArgumentError("a RandomWalkPrior without an init leaves its level free; it takes no mean"),
     )
     is_fixed_hyper(prior.σ) && return prior
     m = prior.order
@@ -68,7 +72,7 @@ function _estimate_hypers(prior::RandomWalkPrior, ys, ws, xs; level = nothing, b
     problems = [_random_walk_problem(ys[i], ws[i], xs[i]) for i in usable]
     neglp = _RandomWalkNegLogPost(
         [_masked(ys[i], ws[i]) for i in usable], first.(problems), getindex.(problems, 2), last.(problems),
-        m, prior.init, prior.σ, isnothing(level) ? nothing : level[usable], branches,
+        m, prior.init, prior.σ, isnothing(mean) ? nothing : mean[usable], branches,
     )
     lσ, _ = _nelder_mead(neglp, T[log(_random_walk_σ_seed(ys[usable], ws[usable], xs[usable], m; branches))])
     return RandomWalkPrior(; order = m, σ = exp(only(lσ)), prior.init)
@@ -77,7 +81,7 @@ end
 # The negative log posterior of a random walk's `log σ` over blocks already set
 # up for the filter (masked values `ys`, variances `rs`, rescaled coordinates
 # `us`, spacings `hs`): their pooled marginal likelihood (restricted, for a flat
-# init or with `levels`; over the 2π branches, with `branches`), the hyperprior
+# init or with `mean`; over the 2π branches, with `branches`), the hyperprior
 # density of `σ`, and the Jacobian `log σ`.
 struct _RandomWalkNegLogPost{Y, R, U, H, S, P, L}
     ys::Y
@@ -87,7 +91,7 @@ struct _RandomWalkNegLogPost{Y, R, U, H, S, P, L}
     order::Int
     init::S
     hyper::P
-    levels::L
+    mean::L
     branches::Bool
 end
 
@@ -97,7 +101,7 @@ function (f::_RandomWalkNegLogPost)(p)
     S = eltype(eltype(f.rs))
     models = [_random_walk_model(f.order, σ, f.init, h, S) for h in f.hs]
     loglik = f.branches ? _branch_pooled_loglik : _pooled_loglik
-    lp = loglik(models, f.ys, f.rs, f.us, f.levels)::S + logdensityof(f.hyper, σ) + lσ
+    lp = loglik(models, f.ys, f.rs, f.us, f.mean)::S + logdensityof(f.hyper, σ) + lσ
     if isnothing(f.init)
         for h in f.hs
             lp -= _flat_start_jacobian(f.order, h)
@@ -106,7 +110,7 @@ function (f::_RandomWalkNegLogPost)(p)
     return isfinite(lp) ? -lp : oftype(lp, Inf)
 end
 
-function _estimate_hypers(prior::OUPrior, ys, ws, xs; level = nothing, branches::Bool = false)
+function _estimate_hypers(prior::OUPrior, ys, ws, xs; mean = nothing, branches::Bool = false)
     is_fixed_hyper(prior.scale) && is_fixed_hyper(prior.σ) && return prior
     usable = [i for i in eachindex(ys, ws, xs) if any(k -> _shape_usable(ys[i][k], ws[i][k]), eachindex(ys[i], ws[i]))]
     isempty(usable) && throw(
@@ -119,34 +123,94 @@ function _estimate_hypers(prior::OUPrior, ys, ws, xs; level = nothing, branches:
     τ, σ2 = _map_ou_hypers(
         yus, wus, xus, prior.scale, prior.σ;
         τ_lo, τ_hi, σ2_seed = _init_track_var(reduce(vcat, yus), reduce(vcat, wus)),
-        levels = isnothing(level) ? nothing : level[usable], branches,
+        mean = isnothing(mean) ? nothing : mean[usable], branches,
     )
     return OUPrior(; scale = τ, σ = sqrt(σ2))
 end
 
-"""
-    _estimate_levels(prior, ys, ws, xs, level, nlevel) -> Vector
+function _estimate_hypers(prior::CARMAPrior, ys, ws, xs; mean = nothing, branches::Bool = false)
+    _hyper_count(prior) == 0 && return prior
+    usable = [i for i in eachindex(ys, ws, xs) if any(k -> _shape_usable(ys[i][k], ws[i][k]), eachindex(ys[i], ws[i]))]
+    isempty(usable) && throw(
+        ArgumentError("cannot estimate the CARMAPrior hyperparameters: no block carries data"),
+    )
+    problems = [_random_walk_problem(ys[i], ws[i], xs[i]) for i in usable]
+    yus = [_masked(ys[i], ws[i]) for i in usable]
+    lo, hi = _group_ou_tau_bounds([xs[i] for i in usable])
+    σ0 = sqrt(_init_track_var(reduce(vcat, yus), reduce(vcat, ws[usable])))
+    neglp = _CARMANegLogPost(
+        prior, yus, first.(problems), getindex.(problems, 2), last.(problems),
+        isnothing(mean) ? nothing : mean[usable], branches,
+    )
+    lθ, _ = _nelder_mead(neglp, _carma_seed(prior, lo, hi, σ0))
+    return _with_log_hypers(prior, lθ)
+end
 
-The GLS estimate of each of `nlevel` levels, where block `i` is its level
-`level[i]` plus a zero-mean process under the proper `prior` (hyperparameters
-fixed; see [`_proper_prior`](@ref)): the level maximizing the marginal
-likelihood of its blocks. `NaN` for a level no block with data holds.
+# The starting log hyperparameters of a `CARMAPrior` given as densities: its
+# scales and periods spread evenly in log over `[lo, hi]`, in order, and `σ0`.
+function _carma_seed(prior, lo, hi, σ0)
+    specs = _hyper_specs(prior)
+    n = count(!is_fixed_hyper, specs[1:(end - 1)])
+    k = 0
+    lθ = typeof(log(σ0))[]
+    for (j, spec) in pairs(specs)
+        is_fixed_hyper(spec) && continue
+        j == length(specs) && (push!(lθ, log(σ0)); continue)
+        k += 1
+        push!(lθ, log(lo) + (log(hi) - log(lo)) * k / (n + 1))
+    end
+    return lθ
+end
+
+# The negative log posterior of a `CARMAPrior`'s log hyperparameters over blocks
+# set up for the filter (masked values `ys`, variances `rs`, coordinates `us` of
+# unit `hs`): their pooled marginal likelihood (with `mean` integrated out; over
+# the 2π branches, with `branches`) and the hyperprior density over the logs,
+# which is proper and so bounds the search.
+struct _CARMANegLogPost{P, Y, R, U, H, L}
+    prior::P
+    ys::Y
+    rs::R
+    us::U
+    hs::H
+    mean::L
+    branches::Bool
+end
+
+function (f::_CARMANegLogPost)(lθ)
+    p = _with_log_hypers(f.prior, lθ)
+    S = eltype(eltype(f.rs))
+    dim = Val(_statedim(f.prior))
+    models = [_carma_model(dim, p, h, S) for h in f.hs]
+    loglik = f.branches ? _branch_pooled_loglik : _pooled_loglik
+    lp = loglik(models, f.ys, f.rs, f.us, f.mean) + _log_hyperprior(f.prior, lθ)
+    return isfinite(lp) ? -lp : oftype(lp, Inf)
+end
+
 """
-function _estimate_levels(prior, ys, ws, xs, level, nlevel::Integer)
+    _estimate_mean(prior, ys, ws, xs, design) -> Vector
+
+The GLS estimate of the coefficients of the mean `design` (`_level_design`),
+where block `i` is its mean plus a zero-mean process under the proper `prior`
+(hyperparameters fixed; see [`_proper_prior`](@ref)): the coefficients
+maximizing the marginal likelihood of the blocks. `NaN` for a coefficient no
+block with data measures.
+"""
+function _estimate_mean(prior, ys, ws, xs, design)
     _proper_prior(prior) || throw(
-        ArgumentError("a level is not identifiable beside $(isnothing(prior) ? "no prior" : _call_string(prior))"),
+        ArgumentError("a mean is not identifiable beside $(isnothing(prior) ? "no prior" : _call_string(prior))"),
     )
     T = _blocks_eltype(ys, ws)
-    b = zeros(T, nlevel)
-    c = zeros(T, nlevel)
-    for i in eachindex(ys, ws, xs, level)
-        model, ym, r, u = _filter_inputs(prior, ys[i], ws[i], xs[i])
-        _, bi, ci = _level_sums(model, ym, r, u)::NTuple{3, eltype(r)}
-        b[level[i]] += bi
-        c[level[i]] += ci
-    end
-    return T[c[g] > 0 ? b[g] / c[g] : T(NaN) for g in eachindex(b, c)]
+    inputs = [_filter_inputs(prior, ys[i], ws[i], xs[i]) for i in eachindex(ys, ws, xs)]
+    _, b, C = _pooled_mean_sums(first.(inputs), getindex.(inputs, 2), getindex.(inputs, 3), last.(inputs), design, T)
+    measured, F = _measured_mean(C)
+    β = fill(T(NaN), length(b))
+    β[measured] = F \ b[measured]
+    return β
 end
+
+# The level of the one block `(y, w, x)` under `prior` ([`_estimate_mean`](@ref)).
+_estimate_level(prior, y, w, x) = only(_estimate_mean(prior, (y,), (w,), (x,), _level_design((1,), (y,))))
 
 # One block as the filter takes it under a prior with fixed hyperparameters: the
 # model, the values `NaN` where they carry no data, the measurement variances,
@@ -160,6 +224,11 @@ end
 function _filter_inputs(prior::RandomWalkPrior, y, w, x)
     r, u, h = _random_walk_problem(y, w, x)
     return _random_walk_model(prior.order, prior.σ, prior.init, h, eltype(r)), _masked(y, w), r, u
+end
+
+function _filter_inputs(prior::CARMAPrior, y, w, x)
+    r, u, h = _random_walk_problem(y, w, x)
+    return _carma_model(Val(_statedim(prior)), prior, h, eltype(r)), _masked(y, w), r, u
 end
 
 """
@@ -177,6 +246,7 @@ determine a value; a block without data is all `NaN`. `out` may be `y`.
   [`_random_walk_track`](@ref)). Without an init, a block with fewer than `m`
   usable segments does not determine the walk and keeps its measured values.
 - `OUPrior`: a zero-mean OU process.
+- `CARMAPrior`: a zero-mean CARMA process.
 """
 function _estimate_map!(out, ::Nothing, y, w, x)
     T = eltype(out)
@@ -199,6 +269,15 @@ function _estimate_map!(out, prior::OUPrior, y, w, x)
     )
     any(k -> _shape_usable(y[k], w[k]), eachindex(y, w)) || return fill!(out, NaN)
     return copyto!(out, smooth_ou_track(_masked(y, w), w, x; τ = prior.scale, σ2 = prior.σ^2))
+end
+
+function _estimate_map!(out, prior::CARMAPrior, y, w, x)
+    _hyper_count(prior) == 0 || throw(
+        ArgumentError("CARMAPrior hyperparameters must be fixed; resolve them with `_estimate_hypers` first"),
+    )
+    any(k -> _shape_usable(y[k], w[k]), eachindex(y, w)) || return fill!(out, NaN)
+    model, ym, r, u = _filter_inputs(prior, y, w, x)
+    return copyto!(out, smooth_track(model, ym, r, u))
 end
 
 """

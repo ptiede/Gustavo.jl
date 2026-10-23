@@ -1,11 +1,11 @@
-# ── Execution configuration (run-wide, not per-step) ─────────────────────────
+# ── Execution configuration (run-wide, not per-fit) ──────────────────────────
 
 """
     ExecutionConfig(; progress = nothing, outer_executor = SerialScheduler(),
                     inner_executor = DynamicScheduler())
 
 Run-wide resources for `fit` and `calibrate`, shared by every pass over the
-data; per-step options, the gauge included, live on the steps. Two runs differing only in their `ExecutionConfig` solve the same
+data; per-fit options, the gauge included, live on the specification. Two runs differing only in their `ExecutionConfig` solve the same
 problem. Each scheduler is used exactly as configured, so the task count you
 set is the concurrency you get.
 
@@ -16,7 +16,7 @@ set is the concurrency you get.
   OhMyThreads `Scheduler` runs its task count of groups concurrently
   (`GreedyScheduler(; ntasks)` balances uneven scan lengths best). Groups
   are dispatched largest-first under every scheduler. Each resident group
-  holds its visibilities, weights and flags plus the step's working memory,
+  holds its visibilities, weights and flags plus the solve's working memory,
   so the task count is bounded by memory as well as cores.
 - `inner_executor` — the within-scan fan-out scheduler
   (`DynamicScheduler()` by default; `SerialScheduler()` for

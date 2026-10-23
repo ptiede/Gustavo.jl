@@ -1,19 +1,19 @@
 # ── Solver capability ────────────────────────────────────────────────────────
 #
-# The compile-time check a step runs on its model before any data is read:
+# The compile-time check a fit runs on its model before any data is read:
 # every component must be one its solver fits (`can_fit`), and the model must
-# hold what the solver requires (`validate_model`). The solver is the step
-# itself or the smoother it delegates to.
+# hold what the solver requires (`validate_model`). The solver is the fit
+# specification itself or the smoother it delegates to.
 
 """
     can_fit(solver, tc::Calibration.GainComponent, geom::Calibration.DataGeometry) -> Bool
 
-Whether `solver` (a solve step, or the smoother a step delegates to) fits the
-θ block of the compiled component `tc` on the geometry `geom`. The step calls
-this once per component of its own model, when the model compiles, and throws
-an `ArgumentError` naming the solver and the component on the first `false`:
-a term nothing writes is a silent no-fit, not a smaller solve. State which
-models the solver fits in its own docstring.
+Whether `solver` (a fit specification, or the smoother one delegates to) fits
+the θ block of the compiled component `tc` on the geometry `geom`. The
+specification calls this once per component of its own model, when the model
+compiles, and throws an `ArgumentError` naming the solver and the component on
+the first `false`: a term nothing writes is a silent no-fit, not a smaller
+solve. State which models the solver fits in its own docstring.
 
 `geom` makes a capability that depends on the data's sampling answerable:
 whether a time segmentation splits a scan is a property of the segmentation

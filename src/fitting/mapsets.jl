@@ -7,7 +7,7 @@ results under the units' keys, in `src`'s order: `k => f(read(u))` for each
 reported. `src` is an ordered keyed collection whose values are Measurement
 Sets or processing sets: a `ProcessingSet` (its Measurement Sets, keyed by
 name), a `groupby` result such as `groupby(ps, ByScan())` (its processing sets,
-keyed by label), or an `OrderedDict` of either. The fringe and adhoc steps need
+keyed by label), or an `OrderedDict` of either. The fringe and adhoc fits need
 every spectral window of a scan, so a body that fits them takes scan groups.
 
 Each unit is read with arrays of its own, copied where the source is already in
@@ -26,7 +26,7 @@ Measurement Sets are read on its `inner_executor`. With more than one task,
 ```julia
 gauge = PinAntenna(1)
 averaged = mapsets(groupby(ps, ByScan())) do g
-    fr = fit(BaselineFringeFit(; gauge), g)
+    fr = fit(FringeClosure(; gauge), fit(FringeSearch(), g))
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
     return average(g, ByScan())
 end

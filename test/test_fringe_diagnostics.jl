@@ -10,74 +10,63 @@
     gauge = PinAntenna(1)
     sols = _fit_chain(
         (
-            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            FringeClosure(; gauge), Bandpass(; gauge),
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ), ps,
     )
     sol = first(sols)
+    dets = fit(FringeSearch(), ps)
 
     @testset "snr table" begin
-        t = FP.fringe_snr_table(sol)
-        fringe = sol.info
+        t = FP.fringe_snr_table(dets)
         @test t isa DimStack
         @test keys(t) == (:max_snr, :pfa)
-        @test collect(lookup(t, Gustavo.Scan)) == fringe.scan_names
-        @test length(fringe.scan_names) == sol.info.nscan
+        @test collect(lookup(t, Gustavo.Scan)) == sol.geom.scan_names
+        @test length(dets) == sol.info.nscan
         @test all(>=(0), t.max_snr)
 
-        # The solve records the per-scan effective search cells, and the
+        # The search records the per-scan effective search cells, and the
         # synthetic fringes are strong → secure detections on every scan.
-        @test all(>=(1), fringe.scan_ncells)
-        @test fringe.search isa FP.FringeSearch
-        @test parent(t.pfa) ≈ FP.fringe_pfa.(fringe.scan_snr, fringe.scan_ncells)
+        ncells = [metadata(d).ncells for d in dets]
+        @test all(>=(1), ncells)
+        @test all(d -> metadata(d).search isa FP.FringeSearch, dets)
+        @test parent(t.pfa) ≈ FP.fringe_pfa.(parent(t.max_snr), ncells)
         @test all(t.pfa[t.max_snr .> 10] .< 1.0e-10)
         # A marginal SNR on the same search space would NOT be secure.
-        @test FP.fringe_pfa(3.0, fringe.scan_ncells[1]) > 0.01
-
-        bp_only = sols[2]
-        @test_throws "the solution is not a fringe solution; it holds :bandpass" FP.fringe_snr_table(bp_only)
+        @test FP.fringe_pfa(3.0, ncells[1]) > 0.01
     end
 
     @testset "fringe_detections" begin
-        # The solve records every MEASURED cell; `det_detected` marks the ones it
-        # accepted as real fringes.
-        inf = sol.info
-        det = FP.fringe_detections(sol)
-        @test keys(det) == (:snr, :pfa, :delay, :rate, :phase, :detected)
+        # The search records every MEASURED cell; `pfa <= pfa_max` marks the
+        # ones the closure accepts as real fringes.
+        det = FP.fringe_detections(dets)
+        @test keys(det) == (:snr, :pfa, :delay, :rate, :phase, :amp)
         @test map(DimensionalData.basetypeof, dims(det)) == (Gustavo.Scan, Gustavo.AntennaPair, Gustavo.FeedPair)
         measured = .!isnan.(det.snr)
-        @test count(measured) == length(inf.det_snr)
-        @test count(det.detected) == count(inf.det_detected)
+        @test count(measured) == sum(d -> count(parent(d.valid)), dets)
         @test all(p -> 0.0 <= p <= 1.0, det.pfa[measured])
-        # `detected` IS the PFA test at the solve's own threshold — nothing else.
-        pfa_max = FP.Stationization().pfa_max
-        @test det.detected == (det.pfa .<= pfa_max)
+        accepted = det.pfa .<= FP.Stationization().pfa_max
         # Strong synthetic fringes: every accepted cell outscores every rejected one.
-        @test minimum(det.snr[det.detected]) > maximum(det.snr[measured .& .!det.detected]; init = -Inf)
+        @test minimum(det.snr[accepted]) > maximum(det.snr[measured .& .!accepted]; init = -Inf)
 
         # Cells are labeled by name.
-        i = findfirst(inf.det_detected)
-        cell = det[
-            Gustavo.Scan(At(inf.scan_names[inf.det_scan[i]])),
-            Gustavo.AntennaPair(At((inf.det_ant_a[i], inf.det_ant_b[i]))),
-            Gustavo.FeedPair(At((inf.det_feed_a[i], inf.det_feed_b[i]))),
-        ]
-        @test cell.snr == inf.det_snr[i] && cell.delay == inf.det_delay[i] && cell.detected
+        d = first(dets)
+        p, f = first(lookup(d, Gustavo.AntennaPair)), first(lookup(d, Gustavo.FeedPair))
+        cell = det[Gustavo.Scan(At(metadata(d).scan)), Gustavo.AntennaPair(At(p)), Gustavo.FeedPair(At(f))]
+        src = d[Gustavo.AntennaPair(At(p)), Gustavo.FeedPair(At(f))]
+        @test cell.snr == src.snr && cell.delay == src.delay
     end
 
     @testset "cat_scans combines per-scan results" begin
         ps2, _ = _build_fringe_ps(; nscans = 2, noise = 0.05)
-        whole = fit(BaselineFringeFit(; gauge), ps2)
-        per_scan = mapsets(g -> fit(BaselineFringeFit(; gauge), g), XRadio.groupby(ps2, XRadio.ByScan()))
+        whole = _fringe_fit(ps2, FringeClosure(; gauge))
+        per_scan = mapsets(g -> _fringe_fit(g, FringeClosure(; gauge)), XRadio.groupby(ps2, XRadio.ByScan()))
         @test length(per_scan) == 2
 
-        t = FP.cat_scans(FP.fringe_snr_table.(values(per_scan)))
-        @test lookup(t, Gustavo.Scan) == lookup(FP.fringe_snr_table(whole), Gustavo.Scan)
-        @test t.max_snr == FP.fringe_snr_table(whole).max_snr
         st = FP.cat_scans(FP.fringe_antenna_solutions.(values(per_scan)))
         @test st.delay ≈ FP.fringe_antenna_solutions(whole).delay
-        det = FP.cat_scans(FP.fringe_detections.(values(per_scan)))
-        @test count(det.detected) == count(FP.fringe_detections(whole).detected)
+        flags = FP.cat_scans(FP.fringe_antenna_flags.(values(per_scan)))
+        @test flags == FP.fringe_antenna_flags(whole)
 
         # Differing labels form a union; a cell an input lacks is NaN (false for Bool).
         a = DimArray([1.0 2.0], (FP._scan_dim(["s1"]), FP._antenna_dim(["A", "B"])))
@@ -173,16 +162,17 @@
     end
 
     @testset "per-scan SNR with DimensionalData's recipes" begin
-        fig = plot(FP.fringe_snr_table(sol).max_snr)
+        fig = plot(FP.fringe_snr_table(dets).max_snr)
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
     end
 
-    det = FP.fringe_detections(sol)
+    det = FP.fringe_detections(dets)
+    scan_det = only(dets)
     labels(m) = map(d -> only(lookup(d)), DimensionalData.refdims(m.snr))
     recorded(scan, pair, feeds) = det[Gustavo.Scan(At(scan)), AntennaPair(At(pair)), FeedPair(At(feeds))]
 
     @testset "fringe_search_map (delay–rate surface)" begin
-        m = FP.fringe_search_map(sol, ps)
+        m = FP.fringe_search_map(scan_det, ps)
         @test m isa FP.FringeSearchMap
         scan, pair, feeds = labels(m)
         @test scan == only(sol.geom.scan_names)
@@ -193,7 +183,7 @@
         @test m.detection.snr ≈ rec.snr rtol = 1.0e-6
         @test m.detection.delay ≈ rec.delay rtol = 1.0e-6
         @test m.detection.rate ≈ rec.rate rtol = 1.0e-6
-        @test m.ncells == only(sol.info.scan_ncells)
+        @test m.ncells == metadata(scan_det).ncells
         @test m.pfa == FP.fringe_pfa(m.detection.snr, m.ncells)
         @test m.pfa < 1.0e-6
         # The map's discrete peak sits at the detection within a grid bin.
@@ -203,25 +193,24 @@
         @test isapprox(rates[pk[2]], m.detection.rate; atol = rates[2] - rates[1])
 
         # Selectors: baseline in either order, either one alone.
-        m2 = FP.fringe_search_map(sol, ps; baseline = reverse(pair), feeds)
+        m2 = FP.fringe_search_map(scan_det, ps; baseline = reverse(pair), feeds)
         @test labels(m2) == (scan, pair, feeds)
         @test m2.detection.snr ≈ m.detection.snr rtol = 1.0e-10
         other = first(p for p in lookup(det, AntennaPair) if p != pair)
-        @test labels(FP.fringe_search_map(sol, ps; baseline = other))[2] == other
-        @test labels(FP.fringe_search_map(sol, ps; feeds = (2, 2)))[3] == (2, 2)
+        @test labels(FP.fringe_search_map(scan_det, ps; baseline = other))[2] == other
+        @test labels(FP.fringe_search_map(scan_det, ps; feeds = (2, 2)))[3] == (2, 2)
 
         # The weakest accepted detection reproduces through its map.
-        I = argmin(ifelse.(det.detected, det.snr, Inf))
+        I = argmin(ifelse.(det.pfa .<= FP.Stationization().pfa_max, det.snr, Inf))
         weak = (lookup(det, AntennaPair)[I[2]], lookup(det, FeedPair)[I[3]])
-        mw = FP.fringe_search_map(sol, ps; baseline = weak[1], feeds = weak[2])
+        mw = FP.fringe_search_map(scan_det, ps; baseline = weak[1], feeds = weak[2])
         @test mw.detection.snr ≈ recorded(scan, weak...).snr rtol = 1.0e-6
 
-        @test_throws "is not a cross baseline" FP.fringe_search_map(sol, ps; baseline = ("A1", "A1"), feeds = (1, 1))
-        @test_throws "holds no feed pair" FP.fringe_search_map(sol, ps; baseline = pair, feeds = (1, 3))
-        @test_throws "measured no cell" FP.fringe_search_map(sol, ps; baseline = ("A1", "nope"))
-        @test_throws "the solution is not a fringe solution" FP.fringe_search_map(sols[2], ps)
+        @test_throws "is not a cross baseline" FP.fringe_search_map(scan_det, ps; baseline = ("A1", "A1"), feeds = (1, 1))
+        @test_throws "holds no feed pair" FP.fringe_search_map(scan_det, ps; baseline = pair, feeds = (1, 3))
+        @test_throws "measured no cell" FP.fringe_search_map(scan_det, ps; baseline = ("A1", "nope"))
         ps2, _ = _build_fringe_ps(; nscans = 2)
-        @test_throws "must hold one scan" FP.fringe_search_map(sol, ps2)
+        @test_throws "must hold one scan" FP.fringe_search_map(scan_det, ps2)
     end
 
     @testset "fringe_search_map after a hierarchical (MBD) search" begin
@@ -230,9 +219,9 @@
         search = FP.FringeSearch(algorithm = FP.HierarchicalMBD())
         gc = FP._GroupCells(ps, sol.geom)
         @test !isnothing(FP._search_axes(gc.freqs, gc.times, search, ComplexF32).mbd)
-        mbd = fit(BaselineFringeFit(; gauge, search), ps)
+        mbd = fit(search, ps)
         mdet = FP.fringe_detections(mbd)
-        m = FP.fringe_search_map(mbd, ps)
+        m = FP.fringe_search_map(only(mbd), ps)
         rec = mdet[Gustavo.Scan(At(labels(m)[1])), AntennaPair(At(labels(m)[2])), FeedPair(At(labels(m)[3]))]
         @test m.detection.snr ≈ rec.snr rtol = 1.0e-6
         @test m.detection.delay ≈ rec.delay rtol = 1.0e-6
@@ -244,7 +233,7 @@
     end
 
     @testset "plot_fringe_search smoke" begin
-        m = FP.fringe_search_map(sol, ps)
+        m = FP.fringe_search_map(scan_det, ps)
         figm = FP.plot_fringe_search(m)
         @test (show(IOBuffer(), MIME("image/png"), figm); true)
         map_axis(f) = only(filter(c -> c isa Axis && c.xlabel[] == "delay (ns)", contents(f.layout)))
@@ -351,7 +340,7 @@
             freqs = collect(range(1.0e9, 1.1e9; length = nchan))
             numF = zeros(1, 1); den = zeros(1); dvar = zeros(1); npts = zeros(Int, 1)
             FP._coherence_accumulate!(
-                zeros(0, 1), numF, den, dvar, npts, V, W, nothing, [1], [1], [0.0], freqs,
+                zeros(0, 1), numF, den, dvar, npts, V, W, [1], [1], [0.0], freqs,
                 Float64[], [2.0e8], debias,
             )
             # ratio as `_curve_from_sums` forms it: debiased sums are POWERS
@@ -388,7 +377,7 @@
         # per-cell SNR ≈ 0.4, so ≈ 1 for a flat-phase source — just noisier
         # than the marginalized version below.
         nT = zeros(1, 1); den = zeros(1)
-        FP._coherence_accumulate!(nT, zeros(1, 1), den, zeros(1), zeros(Int, 1), V, W, nothing, [1], [1], times, freqs, dts, [1.0e8], true)
+        FP._coherence_accumulate!(nT, zeros(1, 1), den, zeros(1), zeros(Int, 1), V, W, [1], [1], times, freqs, dts, [1.0e8], true)
         eta_perchan = eta(nT, den)
         @test eta_perchan > 0.9
         # marginalized: band-average per AP, then time η — same estimand,
@@ -396,7 +385,7 @@
         Vt, Wt = FP._collapse_axis(V, W, falses(size(V)), 1)
         @test size(Vt) == (1, nti, 1, 1)
         nT2 = zeros(1, 1); denT = zeros(1)
-        FP._coherence_accumulate!(nT2, zeros(1, 1), denT, zeros(1), zeros(Int, 1), Vt, Wt, nothing, [1], [1], times, [1.5e9], dts, [1.0], true)
+        FP._coherence_accumulate!(nT2, zeros(1, 1), denT, zeros(1), zeros(Int, 1), Vt, Wt, [1], [1], times, [1.5e9], dts, [1.0], true)
         eta_marg = eta(nT2, denT)
         @test eta_marg > 0.95               # ≈ 1 for a flat-phase source
     end
@@ -428,7 +417,7 @@ end
     w = 2 / noise^2                       # the fixture's weight per real component
     nti = 6
     ps, _ = _build_fringe_ps(; nant = 4, nspw = 2, nchan = 8, ntime = nti, noise)
-    fr = fit(BaselineFringeFit(; gauge = PinAntenna(1)), ps)
+    fr = _fringe_fit(ps, FringeClosure(; gauge = PinAntenna(1)))
     corrected = calibrate(fr, ps; flag_bad = false, apply_flags = false)
     spectra = FP.baseline_spectra(XRadio.average(corrected, XRadio.ByScan()))
 

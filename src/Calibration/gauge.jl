@@ -198,7 +198,7 @@ end
 # Iterate the references without materializing a container: a `Tuple` built from a
 # runtime-length vector has no statically known length, which costs an allocation
 # and a dynamic dispatch on a function the station solve calls per component.
-_gauge_refs(r::Integer) = (Int(r),)
+_gauge_refs(r::Integer) = (r,)
 _gauge_refs(r::AbstractVector{<:Integer}) = r
 _gauge_refs(r) = error(
     "gauge references must be resolved to antenna indices before use; got $(typeof(r)). " *
@@ -220,23 +220,21 @@ end
     resolve_gauge(g::AbstractGauge, ant_names) -> AbstractGauge
 
 Return `g` with any station codes replaced by 1-based station indices, matched
-against `ant_names`. Errors on a code the antenna table does not carry.
+against `ant_names`. A `PinAntenna` drops the codes the table does not carry, so
+a ranked list falls to its next entry, and errors when it carries none of them.
 """
 resolve_gauge(g::AbstractGauge, ant_names) = g
 
 function resolve_gauge(g::PinAntenna, ant_names)
     refs = g.refs isa Union{Integer, AbstractString, Symbol} ? (g.refs,) : g.refs
-    out = Int[_antenna_index(r, ant_names, "PinAntenna") for r in refs]
-    isempty(out) && error("PinAntenna: no references given.")
+    isempty(refs) && error("PinAntenna: no references given.")
+    out = Int[i for i in (_antenna_index(r, ant_names) for r in refs) if !isnothing(i)]
+    isempty(out) && error("PinAntenna: none of the references $(collect(refs)) is in antenna table $(ant_names).")
     return PinAntenna(out)
 end
 
-_antenna_index(r::Integer, ant_names, who) = Int(r)
-function _antenna_index(r, ant_names, who)
-    i = findfirst(==(String(r)), ant_names)
-    isnothing(i) && error("$who: antenna code \"$r\" not in antenna table $(ant_names).")
-    return i
-end
+_antenna_index(r::Integer, ant_names) = r
+_antenna_index(r, ant_names) = findfirst(==(String(r)), ant_names)
 
 """
     remap_gauge(g::AbstractGauge, map) -> AbstractGauge
@@ -264,13 +262,14 @@ gauge_antenna_order(::AbstractGauge) = ()
 
 Use a different gauge for some model components: `choices` maps component
 names to gauges, and every other freedom uses `default`. The names are the
-step model's own, as a solution lists its components (`fringe.phase.rate` is
+model's own, as a solution lists its components (`fringe.phase.rate` is
 `rate`); a nested model takes nested choices, and a gauge given for a subtree
 covers every component under it.
 
-    BaselineFringeFit(; gauge = ByComponent((; rate = PinAntenna("A2")); default = PinAntenna("A1")))
+    FringeClosure(; gauge = ByComponent((; rate = PinAntenna("A2")); default = PinAntenna("A1")))
 
-A step rejects, when constructed, a name its model does not have. A freedom
+A `FringeClosure`, `Bandpass` or `AdhocPhase` rejects, when constructed, a
+name its model does not have. A freedom
 spanning components with different choices is an error.
 """
 struct ByComponent{C <: NamedTuple, D <: AbstractGauge} <: AbstractGauge
@@ -336,8 +335,8 @@ remap_gauge(g::ByComponent, map) =
     check_gauge_components(g::AbstractGauge, names)
 
 Throw if `g` names a component absent from `names`, the component paths
-without their `:phase`/`:logamp` root (e.g. `(:rate,)`) of the model of the
-step `g` belongs to. The default checks nothing.
+without their `:phase`/`:logamp` root (e.g. `(:rate,)`) of the model `g`
+gauges. The default checks nothing.
 """
 check_gauge_components(::AbstractGauge, names) = nothing
 
@@ -345,7 +344,7 @@ function check_gauge_components(g::ByComponent, names)
     for key in _leaf_paths(g.choices)
         any(n -> length(n) >= length(key) && n[1:length(key)] == key, names) || throw(
             ArgumentError(
-                "ByComponent: no component $(join(key, '.')) in the step's model; " *
+                "ByComponent: no component $(join(key, '.')) in the gauged model; " *
                     "the components are $(join((join(n, '.') for n in names), ", ")).",
             ),
         )

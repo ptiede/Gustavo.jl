@@ -3,7 +3,7 @@
 # The structural plan routers that locate each stage's θ components by term
 # Type (per-scan delay, adhoc) — never by hardcoded index.
 #
-# A step whose own model names the component it needs reaches it directly
+# A fit whose own model names the component it needs reaches it directly
 # through `layout.plantree` instead; a router is only for a component a stage
 # must recognize in a model it did not name itself.
 
@@ -23,7 +23,7 @@ _is_perscan_delay(tc) =
     tc.term isa Delay && !(tc.Ti isa GlobalTime) &&
     tc.Frequency isa GlobalFrequency && tc.Feed isa SharedFeeds
 
-# The fringe step's feed-common wideband delay (`mbd` by default), the only
+# The fringe fit's feed-common wideband delay (`mbd` by default), the only
 # `_is_perscan_delay`-signatured component its model may hold.
 function _perscan_delay_plan(model, layout)
     i = findfirst(_is_perscan_delay, phase_components(model))

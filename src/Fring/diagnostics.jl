@@ -1,10 +1,10 @@
 # ── Fringe diagnostics ───────────────────────────────────────────────────────
 #
-# Diagnostics read off a fringe `CalibrationSolution` — its solved parameters
-# and the fringe step's `info` — returned as labeled `DimStack`s and
-# `DimArray`s keyed by scan name, station name and feed, plus the per-baseline
-# data helpers the Makie plot stubs consume. The plot entry points themselves
-# are stubs in `Fring.jl`, implemented by `GustavoMakieExt`.
+# Diagnostics read off the detections of a fringe search and a fringe
+# `CalibrationSolution`, returned as labeled `DimStack`s and `DimArray`s keyed
+# by scan name, station name and feed, plus the per-baseline data helpers the
+# Makie plot stubs consume. The plot entry points themselves are stubs in
+# `Fring.jl`, implemented by `GustavoMakieExt`.
 
 DimensionalData.@dim FreqGroup "Frequency group"
 DimensionalData.@dim Triangle "Antenna triangle"
@@ -17,69 +17,55 @@ end
 _scan_dim(names) = Scan(DimensionalData.Lookups.Categorical(collect(String, names); order = DimensionalData.Lookups.Unordered()))
 
 """
-    fringe_snr_table(sol::CalibrationSolution) -> DimStack
+    fringe_snr_table(dets) -> DimStack
 
-Per-scan fringe-search summary of the fringe step, over `Scan` (scan names):
+Per-scan summary of the fringe search `dets` (the detection stacks of
+`fit(FringeSearch(...), ps)`), over `Scan` (scan names):
 
-- `max_snr` — the largest detection SNR in the scan.
-- `pfa` — the scan's false-alarm probability [`fringe_pfa`](@ref): the chance
-  that pure noise, searched over the scan's full delay × rate × baseline ×
-  product space, gives a peak of at least `max_snr`. `pfa ≪ 1` marks a secure
+- `max_snr` — the largest SNR the scan's search measured.
+- `pfa` — its false-alarm probability [`fringe_pfa`](@ref): the chance that
+  pure noise, searched over the scan's full delay × rate × baseline × product
+  space, gives a peak of at least `max_snr`. `pfa ≪ 1` marks a secure
   detection, `pfa` near 1 a likely false fringe.
-
-Throws when `sol` has no `:fringe` step. Per-scan results of
-[`mapsets`](@ref Gustavo.mapsets) combine with [`cat_scans`](@ref).
 """
-function fringe_snr_table(sol::CalibrationSolution)
-    info = _fringe_info(sol)
-    pfa = fringe_pfa.(info.scan_snr, info.scan_ncells)
-    return DimStack((; max_snr = info.scan_snr, pfa), (_scan_dim(info.scan_names),))
+function fringe_snr_table(dets::AbstractVector)
+    max_snr = [maximum((d.snr[i] for i in eachindex(d.snr, d.valid) if d.valid[i]); init = 0.0) for d in dets]
+    pfa = fringe_pfa.(max_snr, [DimensionalData.metadata(d).ncells for d in dets])
+    return DimStack((; max_snr, pfa), (_scan_dim([DimensionalData.metadata(d).scan for d in dets]),))
 end
 
 """
-    fringe_detections(sol::CalibrationSolution) -> DimStack
+    fringe_detections(dets) -> DimStack
 
-Every (baseline, product) cell the fringe search measured, over
+Every (baseline, product) cell the fringe search `dets` measured, over
 `(Scan, AntennaPair, FeedPair)` — scan name, `(antenna, antenna)` and
 `(feed, feed)`. Layers: `snr`, `pfa` (family-wise, [`fringe_pfa`](@ref)),
-`delay` (s), `rate` (Hz), `phase` (rad), and `detected`, whether the search
-accepted the cell as a fringe (`pfa ≤ Stationization.pfa_max`). A cell a scan
-did not measure holds `NaN` and `detected = false`.
+`delay` (s), `rate` (Hz), `phase` (rad) and `amp`. A cell a scan did not
+measure holds `NaN`.
 
-The accepted detections that a stricter threshold would reject are the
-marginal ones worth inspecting:
+The detections a [`FringeClosure`](@ref Gustavo.FringeClosure) accepts are
+those with `pfa ≤ pfa_max`; the accepted ones a stricter threshold would
+reject are the marginal ones worth inspecting:
 
 ```julia
-det = fringe_detections(sol)
-findall(det.detected .& (det.pfa .> 1e-6))
+det = fringe_detections(dets)
+findall((det.pfa .<= Stationization().pfa_max) .& (det.pfa .> 1e-6))
 ```
 """
-function fringe_detections(sol::CalibrationSolution)
-    info = _fringe_info(sol)
-    pairs = unique(tuple.(String.(info.det_ant_a), String.(info.det_ant_b)))
-    feeds = sort!(unique(tuple.(Int.(info.det_feed_a), Int.(info.det_feed_b))))
-    d = (_scan_dim(info.scan_names), _antenna_pair_dim(pairs), FeedPair(feeds))
-    n = map(length, d)
-    stack = DimStack(
-        (;
-            snr = fill(NaN, n), pfa = fill(NaN, n), delay = fill(NaN, n),
-            rate = fill(NaN, n), phase = fill(NaN, n), detected = fill(false, n),
-        ), d,
-    )
-    pair_index = Dict(p => i for (i, p) in enumerate(pairs))
-    feed_index = Dict(f => i for (i, f) in enumerate(feeds))
-    for i in eachindex(info.det_scan)
-        cell = (
-            Scan(info.det_scan[i]),
-            AntennaPair(pair_index[(String(info.det_ant_a[i]), String(info.det_ant_b[i]))]),
-            FeedPair(feed_index[(Int(info.det_feed_a[i]), Int(info.det_feed_b[i]))]),
-        )
-        stack.snr[cell] = info.det_snr[i]
-        stack.pfa[cell] = info.det_pfa[i]
-        stack.delay[cell] = info.det_delay[i]
-        stack.rate[cell] = info.det_rate[i]
-        stack.phase[cell] = info.det_phase[i]
-        stack.detected[cell] = info.det_detected[i]
+function fringe_detections(dets::AbstractVector)
+    antenna_pairs = unique(p for d in dets for p in lookup(d, AntennaPair))
+    feeds = sort!(unique(f for d in dets for f in lookup(d, FeedPair)))
+    dm = (_scan_dim([DimensionalData.metadata(d).scan for d in dets]), _antenna_pair_dim(antenna_pairs), FeedPair(feeds))
+    n = map(length, dm)
+    layers = (:snr, :pfa, :delay, :rate, :phase, :amp)
+    stack = DimStack(NamedTuple{layers}(ntuple(_ -> fill(NaN, n), length(layers))), dm)
+    for (k, d) in pairs(dets), p in lookup(d, AntennaPair), f in lookup(d, FeedPair)
+        src = (AntennaPair(At(p)), FeedPair(At(f)))
+        d.valid[src...] || continue
+        cell = (Scan(k), AntennaPair(At(p)), FeedPair(At(f)))
+        for layer in layers
+            stack[layer][cell...] = d[layer][src...]
+        end
     end
     return stack
 end
@@ -87,7 +73,7 @@ end
 """
     fringe_antenna_solutions(sol::CalibrationSolution) -> DimStack
 
-The fringe step's per-scan station delay and rate, decoded
+The fringe closure's per-scan station delay and rate, decoded
 from its solved parameters (no data is read), over
 `(Scan, AntennaName, Feed)`:
 
@@ -95,7 +81,7 @@ from its solved parameters (no data is read), over
   the model gives one, the fitted inter-feed offset.
 - `rate` — station fringe rate (Hz).
 
-Each sums every delay and rate term the fringe step owns; a term
+Each sums every delay and rate term of the closure's model; a term
 the model lacks reads `NaN`. Values are fixed to the solve's gauge; a
 within-scan difference against the same feed of a reference station is
 gauge-invariant.
@@ -151,7 +137,7 @@ end
 """
     fringe_antenna_flags(sol::CalibrationSolution) -> DimArray{Bool}
 
-Over `(Scan, AntennaName, Feed)`: `true` where the fringe step left the
+Over `(Scan, AntennaName, Feed)`: `true` where the fringe closure left the
 station's feed unconstrained in the scan — no accepted detection (`pfa ≤
 Stationization.pfa_max`) on any of its products with that feed, so nothing put
 it in a fringe group. A measured but rejected product does not rescue it: such
@@ -161,7 +147,7 @@ every product with a flagged (station, feed) on either side in that scan
 """
 function fringe_antenna_flags(sol::CalibrationSolution)
     info = _fringe_info(sol)
-    d = (_scan_dim(info.scan_names), _antenna_dim(sol.geom.antennas), Feed(1:sol.geom.nfeed))
+    d = (_scan_dim(sol.geom.scan_names), _antenna_dim(sol.geom.antennas), Feed(1:sol.geom.nfeed))
     flags = fill(false, d)
     for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
         flags[
@@ -184,8 +170,8 @@ baselines or products differ line up by name; a cell an input lacks holds
 types and order.
 
 ```julia
-sols = mapsets(g -> fit(BaselineFringeFit(; gauge), g), groupby(ps, ByScan()))
-snr = cat_scans(fringe_snr_table.(values(sols)))
+sols = mapsets(g -> fit(FringeClosure(; gauge), fit(FringeSearch(), g)), groupby(ps, ByScan()))
+flags = cat_scans(fringe_antenna_flags.(sols))
 ```
 """
 function cat_scans(xs)
@@ -431,35 +417,34 @@ end
 # ── Delay–rate search map (the false-fringe check) ─────────────────────────────
 
 """
-    fringe_search_map(sol, group; baseline = nothing, feeds = nothing) -> FringeSearchMap
+    fringe_search_map(det, group; baseline = nothing, feeds = nothing) -> FringeSearchMap
 
-The delay–rate search surface of one cross baseline of `group`, one scan
-(`groupby(ps, ByScan())`) of the data `sol`'s fringe step searched: the search
-the step ran on that cell, with its own [`FringeSearch`](@ref) options, keeping
-the whole windowed matched-filter plane in SNR units instead of only its peak.
-A real fringe is a single sharp peak far above the sidelobes (`pfa ≪ 1`); a
-false fringe barely clears them.
+The delay–rate search surface of one cross baseline of `group`, the scan
+(`groupby(ps, ByScan())`) whose search gave `det`, one detection stack of
+`fit(FringeSearch(...), ps)`: the search `det` records, with the same
+[`FringeSearch`](@ref) options, keeping the whole windowed matched-filter plane
+in SNR units instead of only its peak. A real fringe is a single sharp peak far
+above the sidelobes (`pfa ≪ 1`); a false fringe barely clears them.
 
 - `baseline` — a station-name pair such as `("A1", "A3")`, in either order.
 - `feeds` — a feed-index pair such as `(1, 1)`.
 
-Either one left out is the scan's strongest cell in
-[`fringe_detections`](@ref)`(sol)` that matches the other. The map's `pfa` is
-over the scan's search family, as the solve recorded it, so it compares with
-`fringe_detections` and `Stationization.pfa_max`. The detection phase is
-referenced to the scan's mean time.
+Either one left out is the scan's strongest cell in `det` that matches the
+other. The map's `pfa` is over the scan's search family, as `det` records it,
+so it compares with `det.pfa` and `Stationization.pfa_max`. The detection
+phase is referenced to the scan's mean time.
 
-The map reproduces the recorded detection only for the data the step searched:
-pass the group with the same flags, weights and corrections. A solve with
-`rounds > 1` recorded its search of the final residual.
+The map reproduces the recorded detection only for the data that was searched:
+pass the group with the same flags, weights and corrections.
 """
 function fringe_search_map(
-        sol::CalibrationSolution, group::XRadio.ProcessingSet; baseline = nothing, feeds = nothing,
+        det::AbstractDimStack, group::XRadio.ProcessingSet; baseline = nothing, feeds = nothing,
     )
-    opts = _fringe_info(sol).search
+    meta = DimensionalData.metadata(det)
     scan = _group_scan(group)
-    baseline, feeds = _strongest_cell(sol, scan, baseline, feeds)
-    gc = _GroupCells(group, sol.geom)
+    scan == meta.scan || throw(ArgumentError("the detections are of scan $(meta.scan), the group of scan $scan"))
+    baseline, feeds = _strongest_cell(det, baseline, feeds)
+    gc = _GroupCells(group, meta.geom)
     j = findfirst(p -> p == baseline || p == reverse(baseline), gc.antenna_pairs)
     isnothing(j) && throw(
         ArgumentError("$(baseline) is not a cross baseline of scan $scan; it holds $(join(gc.antenna_pairs, ", "))")
@@ -467,9 +452,8 @@ function fringe_search_map(
     q = findfirst(==(feeds), gc.feeds)
     isnothing(q) && throw(ArgumentError("scan $scan holds no feed pair $(feeds); it holds $(join(gc.feeds, ", "))"))
     ws = FringeWorkspace(eltype(first(first(gc.layers))))
-    V, W, F = _gather_cell!(ws, gc, j, q)
-    t0 = sum(gc.times) / length(gc.times)
-    m = _fringe_map(V, W, F, gc.freqs, gc.times, sol.geom.f0, t0, opts, ws, _family_cells(gc, opts))
+    X, Wm = _gather_cell!(ws, gc, j, q)
+    m = _fringe_map(X, Wm, gc.freqs, gc.times, meta.geom.f0, meta.epoch, meta.search, ws, meta.ncells)
     refdims = (
         _scan_dim([scan]), _antenna_pair_dim([gc.antenna_pairs[j]]),
         FeedPair(DimensionalData.Lookups.Categorical([gc.feeds[q]]; order = DimensionalData.Lookups.Unordered())),
@@ -485,18 +469,15 @@ function _group_scan(group::XRadio.ProcessingSet)
     return only(names)
 end
 
-function _strongest_cell(sol::CalibrationSolution, scan, baseline, feeds)
+function _strongest_cell(det::AbstractDimStack, baseline, feeds)
     isnothing(baseline) || isnothing(feeds) || return baseline, feeds
-    det = fringe_detections(sol)
-    scan in lookup(det, Scan) || throw(ArgumentError("the solution's fringe step did not search scan $scan"))
-    snr = det.snr[Scan(At(scan))]
     cells = [
-        (p, f) for p in lookup(snr, AntennaPair), f in lookup(snr, FeedPair)
+        (p, f) for p in lookup(det, AntennaPair), f in lookup(det, FeedPair)
             if (isnothing(baseline) || p == baseline || p == reverse(baseline)) &&
-            (isnothing(feeds) || f == feeds) && !isnan(snr[AntennaPair(At(p)), FeedPair(At(f))])
+            (isnothing(feeds) || f == feeds) && det.valid[AntennaPair(At(p)), FeedPair(At(f))]
     ]
     isempty(cells) && throw(
-        ArgumentError("the fringe step measured no cell of scan $scan with baseline = $(repr(baseline)), feeds = $(repr(feeds))")
+        ArgumentError("the search measured no cell of scan $(DimensionalData.metadata(det).scan) with baseline = $(repr(baseline)), feeds = $(repr(feeds))")
     )
-    return argmax(((p, f),) -> snr[AntennaPair(At(p)), FeedPair(At(f))], cells)
+    return argmax(((p, f),) -> det.snr[AntennaPair(At(p)), FeedPair(At(f))], cells)
 end

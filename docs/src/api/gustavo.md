@@ -1,7 +1,7 @@
 # Gustavo
 
 The data model on MSv4 Measurement Sets, UVFITS I/O, a-priori calibration,
-solve steps, verbs, corrections, and the step protocol.
+solvers and fit specifications, verbs, corrections, and the solver protocol.
 
 ```@autodocs
 Modules = [Gustavo]

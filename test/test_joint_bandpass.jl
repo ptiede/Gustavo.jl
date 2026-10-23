@@ -13,7 +13,7 @@
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 
-# The bandpass step's `obs` (`:phase` or `:logamp`) bandpass parameters over
+# A bandpass solution's `obs` (`:phase` or `:logamp`) bandpass parameters over
 # `(param, Feed, Frequency, Ti, AntennaName)`.
 _jb_leaf(sol, obs) = parent(only(sol[obs, :bandpass].components).params)
 
@@ -53,7 +53,7 @@ end
     # `ref_ant` indexes the truth arrays below; `gauge` is what the solve takes.
     ref_ant = 1
     gauge = PinAntenna(ref_ant)     # the gauge every test here passes to `fit`
-    _, sol = _fit_chain((BaselineFringeFit(; model = fm, gauge), Bandpass(; gauge)), ps; exec = ExecutionConfig())
+    _, sol = _fit_chain((FringeClosure(; model = fm, gauge), Bandpass(; gauge)), ps; exec = ExecutionConfig())
     pleaf, aleaf = _jb_leaf(sol, :phase), _jb_leaf(sol, :logamp)
 
     # The fringe fit's delays take up each station's phase slope across the band,
@@ -105,7 +105,7 @@ end
     runbp(sm; prior = nothing) = last(
         _fit_chain(
             (
-                BaselineFringeFit(; model = fm, gauge = PinAntenna(1)),
+                FringeClosure(; model = fm, gauge = PinAntenna(1)),
                 Bandpass(; model = CAL.GainModel(; phase = (; bandpass = bpc(prior)), logamp = (; bandpass = bpc(prior))), smoother = sm, gauge = PinAntenna(1)),
             ),
             ps; exec = ExecutionConfig(),
@@ -175,7 +175,7 @@ end
     fm = default_fringe_model()
     runbp(sm) = last(
         _fit_chain(
-            (BaselineFringeFit(; model = fm, gauge = PinAntenna(1)), Bandpass(; smoother = sm, gauge = PinAntenna(1))),
+            (FringeClosure(; model = fm, gauge = PinAntenna(1)), Bandpass(; smoother = sm, gauge = PinAntenna(1))),
             ps; exec = ExecutionConfig(),
         )
     )
@@ -791,11 +791,16 @@ end
         end
     end
 
-    @testset "hyperparameters are resolved and recorded" begin
-        ou = CAL.OUPrior(; scale = LogNormal(log(2.0e6), 1.0), σ = LogNormal(log(0.2), 1.0))
+    @testset "hyperparameters are resolved and recorded under $(nameof(typeof(spec)))" for spec in (
+            CAL.OUPrior(; scale = LogNormal(log(2.0e6), 1.0), σ = LogNormal(log(0.2), 1.0)),
+            CAL.CARMAPrior(;
+                ar = (CAL.ComplexRoots(; period = LogNormal(log(8.0e6), 1.0), scale = LogNormal(log(4.0e6), 1.0)),),
+                ma = (CAL.RealRoot(; scale = 1.0e6),), σ = LogNormal(log(0.2), 1.0),
+            ),
+        )
         l = CAL.plan_parameters(
             CAL.GainModel(;
-                phase = (; bandpass = bpf(ChannelBlocks(1))), logamp = (; bandpass = bpf(ChannelBlocks(1); prior = ou)),
+                phase = (; bandpass = bpf(ChannelBlocks(1))), logamp = (; bandpass = bpf(ChannelBlocks(1); prior = spec)),
             ), anames, geom,
         )
         θ = zeros(l.nθ)
@@ -805,20 +810,21 @@ end
         Strue = [(0.5 + rand(rng)) * cis(2pi * rand(rng)) for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(feeds)]
         results = _joint_scan_accumulators(gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom)
         amp_priors = [FP._block_prior_array(b, geom) for b in ab]
-        @test all(p -> p === ou, only(amp_priors))
+        @test all(p -> p === spec, only(amp_priors))
         fits = FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1))
         FP._record_track_fits!(nothing, amp_priors, fits.amp)
-        @test all(p -> CAL.is_fixed_hyper(p.scale) && CAL.is_fixed_hyper(p.σ), only(amp_priors))
+        @test all(p -> p isa typeof(spec).name.wrapper && FP._hyper_count(p) == 0, only(amp_priors))
         rep = FP._bandpass_track_report(nothing, nothing; amp_priors = only(amp_priors))
         @test rep.amp_priors === only(amp_priors)
-        @test (@inferred FP._hyper_gradient(sum, [0.1, 0.2], ou)) == [1.0, 1.0]
-        @test (@inferred FP._hyper_hessian(x -> x[1] * x[2], [0.1, 0.2], ou)) == [0.0 1.0; 1.0 0.0]
     end
 end
 
 # ── A level per spectral window beside a zero-mean shape ─────────────────────
 
-@testset "JointSmoother: levels per spectral window plus an OU shape" begin
+@testset "JointSmoother: levels per spectral window plus an $name shape" for (name, shape_prior) in (
+        ("OU", CAL.OUPrior(; scale = 3.0e6, σ = 1.0)),
+        ("CARMA", CAL.CARMAPrior(; ar = (CAL.ComplexRoots(; period = 1.2e7, scale = 3.0e6),), ma = (CAL.RealRoot(; scale = 1.0e6),), σ = 1.0)),
+    )
     nant, nchan = 4, 12
     anames = ["A$i" for i in 1:nant]
     geom = CAL.DataGeometry(; nfeed = 2,
@@ -828,9 +834,8 @@ end
         scan_names = ["No00$i" for i in 1:4], spw_names = ["A", "B"],
         antennas = anames,
     )
-    ou = CAL.OUPrior(; scale = 3.0e6, σ = 1.0)
     comp(fs; prior = nothing) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = fs, Feed = PerFeed(), prior)
-    obs = (; level = comp(CAL.PerSpectralWindow()), shape = comp(ChannelBlocks(1); prior = ou))
+    obs = (; level = comp(CAL.PerSpectralWindow()), shape = comp(ChannelBlocks(1); prior = shape_prior))
     l = CAL.plan_parameters(CAL.GainModel(; phase = obs, logamp = obs), anames, geom)
     s = (;
         layout = l,
@@ -874,6 +879,60 @@ end
         Lstep = level_leaf(alb)[1, f, 2, 1, a] - level_leaf(alb)[1, f, 1, 1, a]
         tstep = log(abs(gtrue[a, f, 1, end])) - log(abs(gtrue[a, f, 1, 1]))
         @test Lstep ≈ tstep atol = 0.05
+    end
+end
+
+# ── A delay beside a zero-mean shape ─────────────────────────────────────────
+
+@testset "JointSmoother: a delay beside an OU shape takes up each feed's delay" begin
+    nant, nchan = 4, 64
+    anames = ["A$i" for i in 1:nant]
+    geom = CAL.DataGeometry(; nfeed = 2,
+        times = collect(0.0:3.0), scan_of_time = collect(1:4),
+        channel_freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6),
+        spw_of_chan = repeat([1, 2]; inner = nchan ÷ 2),
+        scan_names = ["No00$i" for i in 1:4], spw_names = ["A", "B"],
+        antennas = anames,
+    )
+    ou = CAL.OUPrior(; scale = LogNormal(log(8.0e6), 1.0), σ = LogNormal(log(0.1), 1.5))
+    shape = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior = ou)
+    delay = GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = PerFeed())
+    l = CAL.plan_parameters(CAL.GainModel(; phase = (; delay, shape), logamp = (; shape)), anames, geom)
+    s = (;
+        layout = l,
+        paths = (; phase = FP._bandpass_paths(l.plantree, :phase), logamp = FP._bandpass_paths(l.plantree, :logamp)),
+    )
+    θ = zeros(l.nθ)
+    pb, ab, db = FP._bandpass_blocks(s, θ, :phase), FP._bandpass_blocks(s, θ, :logamp), FP._bandpass_delay_blocks(s, θ)
+    @test length(db) == 1
+
+    # Delays of a few ns per feed, several radians across the band, and a small
+    # ripple; the cross-hands relate the feeds.
+    rng = MersenneTwister(78)
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    feeds = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    f0 = geom.f0
+    τtrue = 4.0e-9 .* randn(rng, nant, 2)
+    ripple = 0.03 .* sin.((1:nchan) ./ 3)
+    gtrue = ones(ComplexF64, nant, 2, 1, nchan)
+    for a in 1:nant, f in 1:2
+        gtrue[a, f, 1, :] .= cis.(2π .* τtrue[a, f] .* (geom.channel_freqs .- f0) .+ ripple)
+    end
+    Strue = [(0.5 + rand(rng)) * cis(2pi * rand(rng)) for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(feeds)]
+    results = _joint_scan_accumulators(gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom)
+    FP.solve_joint_bandpass!(θ, results, geom, pb, ab; delay_blocks = db, gauge = PinAntenna(1))
+
+    τ = only(db).θ
+    shape_φ = only(pb).θ
+    cdemean(v) = rem2pi.(v .- angle(sum(cis, v)), RoundNearest)
+    for a in 1:nant, f in 1:2
+        # Delays are measured against the pinned feed, which carries none.
+        @test τ[1, f, 1, 1, a] ≈ τtrue[a, f] - τtrue[1, 1] atol = 0.05e-9
+        φ = shape_φ[1, f, :, 1, a] .+ 2π .* τ[1, f, 1, 1, a] .* (geom.channel_freqs .- f0)
+        want = angle.(gtrue[a, f, 1, :]) .- angle.(gtrue[1, 1, 1, :])
+        @test maximum(abs, rem2pi.(φ .- cdemean(want), RoundNearest)) < 1.0e-2
+        # The shape keeps only the ripple.
+        @test maximum(abs, shape_φ[1, f, :, 1, a]) < 0.2
     end
 end
 
@@ -994,10 +1053,14 @@ end
         @test antenna_mean_spread(zs) < 1.0e-8
     end
 
-    @testset "only a pin marks pinned slots" begin
+    @testset "each gauge holds one slot per freedom" begin
+        # Without a prior every (feed, channel) is a freedom. A pin holds the
+        # reference's slot in each; a zero sum holds a well-measured one and
+        # reaches the zero sum by a shift after the solve.
         blocks = FP._bandpass_blocks(setup(layout()), zeros(layout().nθ), :phase)
-        @test isempty(_joint_pins(geom, blocks, results, fill(1, nant, 4), ZeroSumPhase()))
-        @test length(_joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(1))) == 2 * nchan
+        pins = _joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(1))
+        @test pins == Set((1, (1, f, c, 1)) for f in 1:2 for c in 1:nchan)
+        @test length(_joint_pins(geom, blocks, results, fill(1, nant, 4), ZeroSumPhase())) == 2 * nchan
     end
 
 end
@@ -1054,6 +1117,17 @@ end
             θ, results, geom, pb, ab; phase_level_blocks = plb, amp_level_blocks = alb,
             gauge, max_iterations = 60, tolerance = 1.0e-10,
         )
+        # Another Krylov method of LinearSolve.jl solves the same steps.
+        θm = zeros(lp.nθ)
+        pbm, abm = FP._bandpass_blocks(setup_p, θm, :phase), FP._bandpass_blocks(setup_p, θm, :logamp)
+        FP.solve_joint_bandpass!(
+            θm, results, geom, pbm, abm;
+            phase_level_blocks = FP._bandpass_level_blocks(setup_p, θm, :phase),
+            amp_level_blocks = FP._bandpass_level_blocks(setup_p, θm, :logamp),
+            gauge, max_iterations = 60, tolerance = 1.0e-10, linsolve = FP.LinearSolve.KrylovJL_MINRES(),
+        )
+        @test all(isfinite, θ)
+        @test θm ≈ θ rtol = 1.0e-6
     end
 end
 
@@ -1165,7 +1239,7 @@ end
         # amplitude is zero: the posterior has no mode and the solve says so,
         # with the phases still a smooth track the data pull on.
         prior = CAL.RandomWalkPrior(; order = 2, σ = sqrt(3 / (2 * 1.0e6^3)))
-        φp = @test_logs (:warn, r"kept the current 2π branches") (:warn, r"did not converge") solve(
+        φp = @test_logs (:warn, r"has no mode for the amplitude") match_mode = :any solve(
             1, 1, ZeroSumPhase(), geom, results; prior, max_iterations = 100,
         )
         @test all(isfinite, φp)
@@ -1175,22 +1249,20 @@ end
 
 # ── One observable ──────────────────────────────────────────────────────────
 
-@testset "JointSmoother: a pinned track's hyperparameters are fit like the others" begin
-    # A pin holds the reference's track fixed; the hyperparameters' marginal
-    # likelihood is that of the prior conditioned on the pin, so the pinned
-    # track's prior is not driven to zero width.
+@testset "JointSmoother: a held track takes no part in the prior fit" begin
+    # A pin holds the reference's track at zero throughout, so its prior has
+    # nothing to act on: it is recorded as given, and the others are fit.
     nant, nspw, nchan, ntime, nscans = 4, 2, 16, 6, 3
     rng = MersenneTwister(0xDEC1)
     bp_true = cumsum(cumsum(0.02 .* randn(rng, nant, 2, nspw * nchan); dims = 3); dims = 3)
     ps, _ = _build_fringe_ps(; nant, nspw, nchan, ntime, nscans, antenna_gains = false, bandpass = bp_true, noise = 0.3, seed = 31)
     unit = sqrt(3 / (2 * 2.0e6^3))
-    bpc = GainComponent(
-        ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(),
-        prior = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(0.05 * unit), 1.0)),
-    )
+    rw = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(0.05 * unit), 1.0))
+    bpc = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior = rw)
     sol = fit(Bandpass(; model = CAL.GainModel(; phase = (; bandpass = bpc)), gauge = PinAntenna(1)), ps)
-    lσ = log.(map(p -> p.σ, parent(sol.info.phase_priors)[:, :, 1]))
-    @test abs(lσ[1, 1] - median(lσ[2:end, :])) < 1.5
+    priors = parent(sol.info.phase_priors)[:, :, 1]
+    @test priors[1, 1] == rw
+    @test all(p -> p.σ isa Real && isfinite(p.σ), priors[2:end, :])
 end
 
 @testset "JointSmoother: a station whose baselines carry noise alone leaves the others as if it were flagged" begin
@@ -1211,16 +1283,16 @@ end
     unit = sqrt(3 / (2 * 2.0e6^3))
     rw2(σ) = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(σ * unit), 1.0))
     bpc(prior) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
-    step = Bandpass(;
+    solver = Bandpass(;
         model = CAL.GainModel(; phase = (; bandpass = bpc(rw2(0.05))), logamp = (; bandpass = bpc(rw2(0.02)))), gauge = PinAntenna(1),
     )
-    sol = fit(step, ps)
+    sol = fit(solver, ps)
 
     flagged = Gustavo.materialize(ps)
     for ms in values(flagged), (bi, pair) in pairs(XRadio.baselines(ms))
         "A4" in pair && (view(ms[:flag], BaselineID(bi)) .= true)
     end
-    ref = @test_logs (:warn, r"carry no measured frequency shape") match_mode = :any fit(step, flagged)
+    ref = @test_logs (:warn, r"carry no measured frequency shape") match_mode = :any fit(solver, flagged)
     st = sol.info.phase_status
     others = setdiff(axes(st, 1), findfirst(==("A4"), lookup(st, AntennaName)))
     for obs in (:phase, :logamp)
@@ -1239,8 +1311,8 @@ end
     function compare(obs, data_kw)
         ps, _ = _build_fringe_ps(; nant, nspw = 1, nchan, ntime, nscans, data_kw...)
         one_sided = GainModel(; (obs => getproperty(terms, obs),)...)
-        _, sol1 = _fit_chain((BaselineFringeFit(; model = fm, gauge), Bandpass(; model = one_sided, gauge)), ps)
-        _, sol2 = _fit_chain((BaselineFringeFit(; model = fm, gauge), Bandpass(; model = terms, gauge)), ps)
+        _, sol1 = _fit_chain((FringeClosure(; model = fm, gauge), Bandpass(; model = one_sided, gauge)), ps)
+        _, sol2 = _fit_chain((FringeClosure(; model = fm, gauge), Bandpass(; model = terms, gauge)), ps)
         return sol1, maximum(abs, _jb_leaf(sol1, obs) .- _jb_leaf(sol2, obs))
     end
 
@@ -1300,4 +1372,104 @@ end
     for f in 1:2
         @test abs(sum(x .* (la[f, :, 1] .- la[f, :, 2]))) < 1.0e-8
     end
+end
+
+# ── The profiled objective's derivatives and the step's preconditioner ───────
+
+# A toy joint problem over `nant` stations of one feed and `C` channels, every
+# baseline in `nscan` scans, each (scan, baseline) with its own source term:
+# the cells, the slot pairs, the true gains and the slot count.
+function _toy_bandpass_cells(rng; nscan = 2, nant = 3, C = 6, noise = 0.3)
+    bl = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    slot(a, c) = (a - 1) * C + c
+    edge = zeros(Int32, nscan, length(bl), 1, C)
+    slot_pairs = Tuple{Int, Int}[]
+    for c in 1:C, (k, (a, b)) in pairs(bl)
+        push!(slot_pairs, (slot(a, c), slot(b, c)))
+        edge[:, k, 1, c] .= length(slot_pairs)
+    end
+    gtrue = exp.(complex.(0.2 .* randn(rng, nant * C), randn(rng, nant * C)))
+    w = 1 .+ rand(rng, size(edge)...)
+    r = zeros(ComplexF64, size(edge))
+    for I in CartesianIndices(edge)
+        na, nb = slot_pairs[edge[I]]
+        S = (1 + I[1]) * cis(I[2])
+        r[I] = w[I] * (gtrue[na] * S * conj(gtrue[nb]) + noise * complex(randn(rng), randn(rng)) / sqrt(w[I]))
+    end
+    return FP.BandpassCells(r, w, edge, slot_pairs; nchunks = 2), slot_pairs, gtrue, nant * C
+end
+
+# The Hessian of `f` at `x` by central differences.
+function _fd_hessian(f, x; h = 1.0e-4)
+    n = length(x)
+    e(i) = h .* (1:n .== i)
+    return [(f(x + e(i) + e(j)) - f(x + e(i) - e(j)) - f(x - e(i) + e(j)) + f(x - e(i) - e(j))) / (4h^2) for i in 1:n, j in 1:n]
+end
+
+@testset "Bandpass: the profiled χ²'s gradient and Hessian" begin
+    rng = MersenneTwister(11)
+    ex = FP.SerialScheduler()
+    cells, slot_pairs, g0, n = _toy_bandpass_cells(rng)
+    ℓ0 = real.(log.(g0)) .+ 0.05 .* randn(rng, n)
+    φ0 = angle.(g0) .+ 0.1 .* randn(rng, n)
+    g = exp.(complex.(ℓ0, φ0))
+    S = FP._source!(zeros(ComplexF64, length(cells.ranges)), g, cells, ex)
+    lin = FP._linearize(g, S, cells, n, length(slot_pairs), ex)
+    H, pos = FP._curvature_pattern(slot_pairs, n)
+    unit(i) = Float64.((1:n) .== i)
+    for (σ, obs) in ((-1, :phase), (1, :logamp))
+        f(x) = FP._profiled_chi2(σ < 0 ? exp.(complex.(ℓ0, x)) : exp.(complex.(x, φ0)), cells, ex) / 2
+        x0 = σ < 0 ? φ0 : ℓ0
+        held = Matrix(FP._data_curvature!(copy(H), pos, lin.q, σ))
+        exact = held + reduce(hcat, [FP._profile_product!(zeros(n), unit(i), g, S, cells, σ, ex) for i in 1:n])
+        fd = _fd_hessian(f, x0)
+        @test maximum(abs, exact - fd) < 1.0e-5 * maximum(abs, fd)
+        # The gradient is the held-S gradient at the optimal S.
+        b = σ < 0 ? imag.(lin.c) : real.(lin.c)
+        fdg = [(f(x0 + 1.0e-6 * unit(i)) - f(x0 - 1.0e-6 * unit(i))) / 2.0e-6 for i in 1:n]
+        @test -b ≈ fdg rtol = 1.0e-6
+    end
+
+    # Both observables at once, with the cross block between them.
+    fj(v) = FP._profiled_chi2(exp.(complex.(v[(n + 1):end], v[1:n])), cells, ex) / 2
+    held = cat(Matrix(FP._data_curvature!(copy(H), pos, lin.q, -1)), Matrix(FP._data_curvature!(copy(H), pos, lin.q, 1)); dims = (1, 2))
+    joint = reduce(hcat, [vcat(FP._joint_profile_product!(zeros(n), zeros(n), e[1:n], e[(n + 1):end], g, S, cells, ex)...) for e in (Float64.((1:2n) .== i) for i in 1:2n)])
+    fd = _fd_hessian(fj, [φ0; ℓ0])
+    @test maximum(abs, held + joint - fd) < 1.0e-5 * maximum(abs, fd)
+    @test maximum(abs, fd[1:n, (n + 1):end]) > 1.0e-3 * maximum(abs, fd)
+
+    # Where the model fits the data, the exact Hessian is the Gauss–Newton one:
+    # the held-S curvature less its Schur complement in S.
+    cells, slot_pairs, g0, n = _toy_bandpass_cells(rng; noise = 0.0)
+    S = FP._source!(zeros(ComplexF64, length(cells.ranges)), g0, cells, ex)
+    for σ in (-1, 1)
+        x = randn(rng, n)
+        @test FP._profile_product!(zeros(n), x, g0, S, cells, σ, ex) ≈ FP._gauss_newton_product!(zeros(n), x, g0, S, cells, σ, ex)
+    end
+    # The passes do not depend on how the J's are chunked.
+    one_chunk = FP.BandpassCells(cells.r, cells.w, cells.e, cells.na, cells.nb, cells.ranges, [1:length(cells.ranges)])
+    x = randn(rng, n)
+    @test FP._profile_product!(zeros(n), x, g0, S, cells, 1, ex) ≈ FP._profile_product!(zeros(n), x, g0, S, one_chunk, 1, ex)
+end
+
+@testset "Bandpass: the balancing preconditioner" begin
+    rng = MersenneTwister(12)
+    n, m = 30, 3
+    B = FP.sparse(randn(rng, n, n) .* (rand(rng, n, n) .< 0.15))
+    K = B * B' + 4I
+    A = Matrix(K) - (x -> x * x')(randn(rng, n, 2) ./ sqrt(n))
+    Z = FP.sparse(repeat(1:m; inner = 4), 1:(4m), ones(4m), m, n)'
+    U = A * Z
+    F = FP._factor(K, collect(1.0:n))
+    P = FP.ProfilePreconditioner(F, FP.sparse(Z), U)
+    E = Matrix(Z' * U)
+    Q = I - Z * (E \ U')
+    Minv = Q * inv(Matrix(K)) * Q' + Z * (E \ Z')
+    x = randn(rng, n)
+    @test ldiv!(zeros(n), P, x) ≈ Minv * x
+    # It is A's inverse on the coarse space.
+    @test ldiv!(zeros(n), P, A * Z[:, 1]) ≈ Z[:, 1]
+    cov = FP._covariance(P, K)
+    pattern = [(i, j) for j in 1:n for i in FP.rowvals(K)[FP.nzrange(K, j)]]
+    @test maximum(((a, b),) -> abs(cov(a, b) - Minv[a, b]), pattern) < 1.0e-10
 end

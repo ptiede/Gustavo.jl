@@ -1,10 +1,11 @@
 # The cases and the calibration chain `record.jl` records and `compare.jl`
-# replays, so both run the same steps on the same data.
+# replays, so both run the same fits on the same data.
 
 using Gustavo
 using Gustavo: Calibration
 using XRadio
 using LinearAlgebra: BLAS
+using DimensionalData: At, lookup
 
 const REPO = normpath(joinpath(@__DIR__, "..", ".."))
 const SYNTHETIC_DIR = joinpath(REPO, "testdata", "references")
@@ -46,17 +47,36 @@ function bandpass_model(ps; phase_σ = 0.05, logamp_σ = 0.02)
     return Calibration.GainModel(; phase = (; bandpass = comp(rw2(phase_σ))), logamp = (; bandpass = comp(rw2(logamp_σ))))
 end
 
-const CHAIN_TEXT = "fit(BaselineFringeFit()) → calibrate! → fit(Bandpass(; model = bandpass_model(ps))) → " *
-    "calibrate! → fit(AdhocPhase()), each step's default gauge and calibrate!'s default flags"
+const CHAIN_TEXT = "fit(FringeClosure(), fit(FringeSearch(), ps)) → calibrate! → fit(Bandpass(; model = bandpass_model(ps))) → " *
+    "calibrate! → fit(AdhocPhase()), each fit's default gauge and calibrate!'s default flags"
 
-# The gains of every step, composed; the steps share one grid.
+# The gains of every solution, composed; the solutions share one grid.
 composed_gains(sols) = reduce((a, b) -> a .* b, map(gains, values(sols)))
 
-# Each step is fit on data the steps before it corrected in place.
+# Every measured cell of the search `dets` as parallel columns, `det_scan`
+# indexing the scans in order and `det_detected` the closure's default threshold.
+function detection_columns(dets)
+    rows = [
+        (k, p, f, d[AntennaPair(At(p)), FeedPair(At(f))])
+            for (k, d) in pairs(dets) for p in lookup(d, AntennaPair), f in lookup(d, FeedPair)
+            if d.valid[AntennaPair(At(p)), FeedPair(At(f))]
+    ]
+    pfa_max = Stationization().pfa_max
+    return (;
+        det_scan = [r[1] for r in rows], det_ant_a = [r[2][1] for r in rows], det_ant_b = [r[2][2] for r in rows],
+        det_feed_a = [r[3][1] for r in rows], det_feed_b = [r[3][2] for r in rows],
+        det_snr = [Float64(r[4].snr) for r in rows], det_delay = [Float64(r[4].delay) for r in rows],
+        det_rate = [Float64(r[4].rate) for r in rows], det_detected = [r[4].pfa <= pfa_max for r in rows],
+    )
+end
+
+# Each fit runs on data the fits before it corrected in place.
 function replay(ps)
     BLAS.set_num_threads(1)
     ps = Gustavo.materialize(ps)
-    fringe = fit(BaselineFringeFit(), ps)
+    dets = fit(FringeSearch(), ps)
+    fringe = fit(FringeClosure(), dets)
+    fringe = CalibrationSolution(fringe.geom, fringe.name, fringe.components, merge(fringe.info, detection_columns(dets)); spec = fringe.spec)
     calibrate!(fringe, ps)
     bandpass = fit(Bandpass(; model = bandpass_model(ps)), ps)
     calibrate!(bandpass, ps)

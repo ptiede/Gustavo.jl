@@ -68,6 +68,20 @@ the cost of a loss that is no longer convex in the residual.
 """
 struct Cauchy <: AbstractRobustLoss end
 
+"""
+    OutlierMixture()
+
+Each detection is either explained by the station values, with its noise
+model's variance plus a floor `s_c²`, or not, at probability `π_c`, with a
+value spread evenly over the delay or rate window its search covered. The class
+`c` is whether the detection relates the same feed index on its two stations
+or different ones. `s_c` and `π_c` are estimated by EM along with the station
+values, which a detection then weights by its probability of being explained,
+starting from the [`SoftL1`](@ref) solution; no detection leaves the system.
+A detection more likely unexplained than not is reported.
+"""
+struct OutlierMixture <: AbstractRobustLoss end
+
 # ρ′(u): the IRLS weight multiplier at normalized squared residual `u ≥ 0`.
 robust_weight(::LeastSquares, u::Real) = one(u)
 robust_weight(::SoftL1, u::Real) = inv(sqrt(1 + u))
@@ -76,7 +90,8 @@ robust_weight(::Cauchy, u::Real) = inv(1 + u)
 
 """
     Stationization(; eltype = Float64, pfa_max, weak_sys_scale, loss, loss_scale,
-                     irls_iters, systematic_delay, systematic_delay_rate)
+                     irls_iters, systematic_delay, systematic_delay_rate,
+                     max_em_iterations, em_tolerance)
     Stationization{T}(; kw...)
 
 Options for [`solve_antenna_systems!`](@ref).
@@ -118,6 +133,12 @@ of 1e-4 Hz). Without a floor, data with no real systematics drives `z` to the
 numerical noise floor and the loss reweights rounding noise.
 `weak_sys_scale` multiplies the total σ of an above-threshold row, floor
 included.
+
+A model whose priors along time give hyperparameters as densities, or the
+[`OutlierMixture`](@ref) loss, makes the solve an EM over those parameters,
+which stops once a cycle moves no log hyperparameter or outlier fraction, nor
+any floor's square relative to its detections' median noise variance, by more
+than `em_tolerance`, and warns after `max_em_iterations`.
 """
 struct Stationization{T <: AbstractFloat, L <: AbstractRobustLoss}
     pfa_max::T
@@ -127,6 +148,8 @@ struct Stationization{T <: AbstractFloat, L <: AbstractRobustLoss}
     irls_iters::Int
     systematic_delay::T
     systematic_delay_rate::T
+    max_em_iterations::Int
+    em_tolerance::T
 end
 
 Stationization(; eltype::Type{<:AbstractFloat} = Float64, kw...) = Stationization{eltype}(; kw...)
@@ -135,9 +158,11 @@ function Stationization{T}(;
         pfa_max = 1.0e-4, weak_sys_scale = 1.0e3,
         loss = SoftL1(), loss_scale = 8.0, irls_iters = 5,
         systematic_delay = 0.0, systematic_delay_rate = 2.3e-15,
+        max_em_iterations = 200, em_tolerance = 1.0e-3,
     ) where {T}
     return Stationization{T, typeof(loss)}(
         pfa_max, weak_sys_scale, loss, loss_scale, irls_iters, systematic_delay, systematic_delay_rate,
+        max_em_iterations, em_tolerance,
     )
 end
 
@@ -291,7 +316,8 @@ end
 
 # A detection stack's scan-level provenance: the representative global time
 # index, and the mean frequency and RMS frequency/time spreads the weights need.
-_scan_meta(ti, freq_mean, freq_rms, time_rms) = (; ti = Int(ti), freq_mean, freq_rms, time_rms)
+_scan_meta(ti, freq_mean, freq_rms, time_rms, delay_window = nothing, rate_window = nothing) =
+    (; ti = Int(ti), freq_mean, freq_rms, time_rms, delay_window, rate_window)
 
 # Attach a representative global time index to an existing detection stack (the
 # search's own `search_scan` return, which carries no `:ti` — the caller knows
@@ -299,7 +325,8 @@ _scan_meta(ti, freq_mean, freq_rms, time_rms) = (; ti = Int(ti), freq_mean, freq
 _with_ti(
     stack::AbstractDimStack, ti::Integer; freq_mean::Union{Nothing, Real} = nothing,
     freq_rms::Union{Nothing, Real} = nothing, time_rms::Union{Nothing, Real} = nothing,
-) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, freq_mean, freq_rms, time_rms))
+    delay_window = nothing, rate_window = nothing,
+) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, freq_mean, freq_rms, time_rms, delay_window, rate_window))
 
 _scan_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, AntennaPair))
 _scan_feeds(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, FeedPair))
@@ -310,7 +337,7 @@ end
 _scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc).ti
 
 """
-    solve_antenna_systems!(θ, scans, components, antennas; gauge, opts) -> (ncomp, covered, unlinked)
+    solve_antenna_systems!(θ, scans, components, antennas; gauge, opts, times) -> (ncomp, covered, unlinked, fits)
 
 Solve the stage-B fringe systems (delay and rate) over `scans` and
 accumulate the per-(station, feed) values into `θ` at the columns the model
@@ -328,8 +355,19 @@ in every solved kind: those an accepted detection (`pfa ≤ pfa_max`) touches on
 that feed. Coverage is independent of the gauge (see `Stationization` for how
 inconsistent rows are weighted). A θ column no accepted detection touches —
 per-scan or scan-spanning, per-feed or shared by every feed — is set to zero
-(identity gain). With a single per-scan/per-feed component per kind and one scan,
+(identity gain), as is one under [`OutlierMixture`](@ref) that only
+detections it leaves unexplained touch. With a single per-scan/per-feed component per kind and one scan,
 each scan's system is independent and solves exactly as it would alone.
+
+A component with a prior along `Ti` adds the prior's rows over its time
+segments, placed at the mean of `times`, the solve geometry's sample times, in
+each segment. The prior ties the segments' values, so a column it ties counts
+as constrained, and a station's feed is covered where every column of its value
+is constrained and one is tied.
+
+`fits` holds, per kind that ran the EM of `Stationization`, the resolved prior
+of each chain, the [`OutlierMixture`](@ref) parameters per row class, and the
+rows more likely unexplained than not.
 
 `unlinked` holds the `(kind, scan index)` pairs in which the accepted
 detections leave the offset between some station's feeds free: no accepted
@@ -338,34 +376,41 @@ it, at the gauge's preferred station, so it is not measured.
 """
 function solve_antenna_systems!(
         θ::AbstractVector, scans, components, antennas;
-        gauge::AbstractGauge, opts::Stationization{T} = Stationization(),
+        gauge::AbstractGauge, opts::Stationization{T} = Stationization(), times = nothing,
     ) where {T}
     # θ columns are numbered from 1 (`_block_index`).
     Base.require_one_based_indexing(θ)
     slot = Dict(n => i for (i, n) in pairs(antennas))
     ncomp = 0
-    # (station, feed, scan-index) triples the solve constrains, intersected over
-    # the solved kinds: a station's feed must be constrained in delay and rate to
-    # count as calibrated. Everything else is flagged downstream.
-    covered = Set{Tuple{Int, Int, Int}}()
+    # (station, feed, scan-index) triples the solve constrains: touched by an
+    # accepted detection in every solved kind, or determined in every kind and
+    # tied by a prior in one. Everything else is flagged downstream.
+    touched = Set{Tuple{Int, Int, Int}}()
+    determined = Set{Tuple{Int, Int, Int}}()
+    tied = Set{Tuple{Int, Int, Int}}()
     unconstrained = Set{Int}()
     unlinked = Set{Tuple{Symbol, Int}}()
+    fits = Dict{Symbol, Any}()
     first_kind = true
     for kind in (:delay, :rate)
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
-        nc, cov, solved, constrained, free_scans = _solve_kind_cols!(θ, scans, plans, slot, gauge, opts, Val(kind))
+        nc, cov, solved, constrained, free_scans, fit = _solve_kind_cols!(θ, scans, plans, slot, gauge, opts, Val(kind), times)
+        isnothing(fit) || (fits[kind] = fit)
         union!(unlinked, ((kind, si) for si in free_scans))
         union!(unconstrained, setdiff(keys(solved), constrained))
-        covered = first_kind ? cov : intersect(covered, cov)
+        touched = first_kind ? cov.touched : intersect(touched, cov.touched)
+        determined = first_kind ? cov.determined : intersect(determined, cov.determined)
+        union!(tied, cov.tied)
         first_kind = false
         kind === :delay && (ncomp = nc)
     end
+    covered = union(touched, intersect(determined, tied))
     # Columns no accepted row touches hold values set by weak rows alone.
     for col in unconstrained
         θ[col] = zero(eltype(θ))
     end
-    return ncomp, Set{Tuple{eltype(antennas), Int, Int}}((antennas[a], f, si) for (a, f, si) in covered), unlinked
+    return ncomp, Set{Tuple{eltype(antennas), Int, Int}}((antennas[a], f, si) for (a, f, si) in covered), unlinked, fits
 end
 
 # Solve one observable kind across all scans, accumulating into θ. Each detection
@@ -379,7 +424,7 @@ end
 # compile time; the caller's `Val(kind)` is the only dynamic dispatch.
 function _solve_kind_cols!(
         θ::AbstractVector, scans, plans, slot, gauge::AbstractGauge, opts::Stationization{T},
-        ::Val{kind},
+        ::Val{kind}, times,
     ) where {T, kind}
     getval(d) = getfield(d, kind)
     spread_key = kind === :delay ? :freq_rms : :time_rms
@@ -400,6 +445,12 @@ function _solve_kind_cols!(
         push!(node_col, col); push!(node_feed, fd); push!(node_antenna, st); push!(node_scan, sidx)
         push!(node_path, path)
         return colnode[col] = length(node_col)
+    end
+    # A state of a prior's chain beyond the column's own value: no θ column.
+    function latentnode(st, fd, sidx, path)
+        push!(node_col, 0); push!(node_feed, fd); push!(node_antenna, st); push!(node_scan, sidx)
+        push!(node_path, path)
+        return length(node_col)
     end
 
     # Rows in θ-column space: each side is the list of θ columns whose sum is
@@ -450,42 +501,305 @@ function _solve_kind_cols!(
             push!(rsta_a, a); push!(rsta_b, b); push!(rfeed_a, fa); push!(rfeed_b, fb)
         end
     end
-    isempty(rowA) && return (0, Set{Tuple{Int, Int, Int}}(), Dict{Int, T}(), Set{Int}(), Set{Int}())
+    if isempty(rowA)
+        none = Set{Tuple{Int, Int, Int}}()
+        return (0, (; touched = none, determined = copy(none), tied = copy(none)), Dict{Int, T}(), Set{Int}(), Set{Int}(), nothing)
+    end
+    chains = _prior_chains!(getnode, latentnode, colnode, node_feed, plans, scans, times)
+    priors = Any[_hyper_start(ch.spec) for ch in chains]
 
     # Robust solve: IRLS over `opts.loss`, rescaling each row's noise-model
     # weight by the loss's derivative at that row's normalized residual (see
     # `Stationization`). No row leaves the system, so the graph's connectivity,
     # and hence which stations are solvable, is fixed before the first solve.
+    # An `OutlierMixture` starts from the `SoftL1` solution.
     w = copy(rw)
     rows = (;
         A = rowA, B = rowB, links = rlinks, val = rval, accept = raccept,
         sta_a = rsta_a, feed_a = rfeed_a, sta_b = rsta_b, feed_b = rfeed_b, scan = rscan,
+        prior = _prior_block(chains, priors, length(node_col), T),
     )
     nodes = (; feed = node_feed, antenna = node_antenna, scan = node_scan, component = node_path)
-    x, ncomp, resid = _solve_tagged_system(rows, w, nodes, gauge, kind)
-    if !(opts.loss isa LeastSquares)
+    x, ncomp, resid, _ = _solve_tagged_system(rows, w, nodes, gauge, kind)
+    loss = opts.loss isa OutlierMixture ? SoftL1() : opts.loss
+    if !(loss isa LeastSquares)
         for _ in 1:max(opts.irls_iters, 0)
-            _irls_weights!(w, rw, opts.loss, opts.loss_scale, resid) || break
-            x, ncomp, resid = _solve_tagged_system(rows, w, nodes, gauge, kind)
+            _irls_weights!(w, rw, loss, opts.loss_scale, resid) || break
+            x, ncomp, resid, _ = _solve_tagged_system(rows, w, nodes, gauge, kind)
         end
+    end
+    fits = nothing
+    informative = raccept
+    if opts.loss isa OutlierMixture || any(ch -> _hyper_count(ch.spec) > 0, chains)
+        width = [_search_width(scans[k], kind) for k in rscan]
+        em = _closure_em!(rows, rw, w, nodes, gauge, kind, chains, priors, width, opts)
+        x, ncomp, resid = em.x, em.ncomp, em.resid
+        # A detection the mixture leaves unexplained still measures its
+        # stations, but sets no value.
+        informative = em.rows.accept
+        rows = merge(em.rows, (; accept = raccept))
+        fits = (; em.priors, em.mixture, em.outliers, em.converged, em.iterations, chains = [(; ch.plan.path, ch.antenna, ch.node) for ch in chains])
     end
     solved = Dict{Int, T}()
     for n in eachindex(node_col)
+        node_col[n] == 0 && continue
         θ[node_col[n]] += x[n]
         solved[node_col[n]] = x[n]
     end
-    constrained = Set{Int}(
-        node_col[n] for i in eachindex(rowA, rowB, raccept) if raccept[i]
+    accepted = Set{Int}(
+        node_col[n] for i in eachindex(rowA, rowB, informative) if informative[i]
             for n in Iterators.flatten((rowA[i], rowB[i]))
     )
-    covered = _covered_antenna_feeds(rsta_a, rfeed_a, rsta_b, rfeed_b, rscan, raccept)
-    A = _incidence(rows, length(node_col), T)
-    return ncomp, covered, solved, constrained, _unlinked_scans(A, rows)
+    chained = Set{Int}(node_col[first(ch.states[k])] for ch in chains for k in eachindex(ch.states))
+    covered = _covered_antenna_feeds(rows, node_col, accepted, chained)
+    return ncomp, covered, solved, union(accepted, chained), _unlinked_scans(_incidence(rows, length(node_col), T), rows), fits
 end
 
-# The (station, feed, scan) triples this system calibrates: those carrying at
-# least one accepted detection on that feed. Everything else is flagged
-# downstream.
+# The chains a prior along time runs over in a kind's system, one per (station,
+# feed node) of each component whose prior runs along `Ti`: over the
+# component's time segments in time order, each segment's state is its column's
+# node followed by the prior's further states, `latentnode`s. A chain is built
+# where the station's feed node has a column some detection touches; the
+# columns of segments no detection touches join it and take the prior's
+# interpolation. Each chain holds its resolved prior `spec`, the coordinates
+# `u` and unit `h` its model runs on, and its states.
+function _prior_chains!(getnode, latentnode, colnode, node_feed, plans, scans, times)
+    chains = NamedTuple[]
+    for plan in plans
+        any(p -> !isnothing(_prior_along(p, :Ti)), plan.priors) || continue
+        epochs = [_segment_time(plan, times, k) for k in 1:plan.shape.Ti]
+        order = sortperm(epochs)
+        scan_of = Dict(plan.tseg_id[_scan_ti(sc)] => sidx for (sidx, sc) in pairs(scans))
+        for a in eachindex(plan.priors), n in 1:plan.shape.node
+            spec = _prior_along(plan.priors[a], :Ti)
+            isnothing(spec) && continue
+            cols = [_block_index(plan, n, 1, k, a) for k in order]
+            present = findfirst(c -> haskey(colnode, c), cols)
+            isnothing(present) && continue
+            fd = node_feed[colnode[cols[present]]]
+            u, h = _piece_coordinates(spec, epochs[order])
+            states = map(eachindex(cols, order)) do k
+                sidx = get(scan_of, order[k], 0)
+                [getnode(cols[k], a, fd, sidx, plan.path); [latentnode(a, fd, sidx, plan.path) for _ in 2:_statedim(spec)]]
+            end
+            push!(chains, (; plan, antenna = a, node = n, spec, u, h, states, dim = Val(_statedim(spec))))
+        end
+    end
+    return chains
+end
+
+# The prior rows of `chains` under the resolved `priors`, one per chain, as a
+# dense matrix over `nnodes` nodes with right-hand sides: each prior's whitened
+# transitions `L⁻¹(s′ − A s)` and, for a proper start, its whitened first
+# state, so that with unit weights their squared sum is the prior's energy.
+function _prior_block(chains, priors, nnodes::Integer, ::Type{T}) where {T}
+    rows = Vector{Tuple{Int, T}}[]
+    rhs = T[]
+    for (ch, prior) in zip(chains, priors)
+        _with_piece_models(prior, ch.dim, T) do model_of
+            model = model_of(ch.h)
+            start = initial(model, T)
+            if !isnothing(start)
+                μ0, P0 = start
+                W = inv(cholesky(Symmetric(Matrix(P0))).L)
+                _push_prior_rows!(rows, rhs, W, ch.states[1], W * μ0)
+            end
+            for k in 2:length(ch.states)
+                A, Q = transition(model, ch.u[k] - ch.u[k - 1], T)
+                W = inv(cholesky(Symmetric(Matrix(Q))).L)
+                _push_prior_rows!(rows, rhs, hcat(W, -W * A), [ch.states[k]; ch.states[k - 1]], zeros(T, size(W, 1)))
+            end
+        end
+    end
+    M = zeros(T, length(rows), nnodes)
+    for (r, entries) in pairs(rows), (n, v) in entries
+        M[r, n] += v
+    end
+    return (; M, rhs)
+end
+
+# The rows `W * s = b` over the nodes `s`.
+function _push_prior_rows!(rows, rhs, W, nodes, b)
+    for i in axes(W, 1)
+        push!(rows, [(nodes[j], W[i, j]) for j in axes(W, 2)])
+        push!(rhs, b[i])
+    end
+    return rows
+end
+
+# The resolved prior `spec` with every hyperparameter it gives as a density at
+# that density's median.
+_hyper_start(spec) = _hyper_count(spec) == 0 ? spec :
+    _with_log_hypers(spec, [log(median(h)) for h in _hyper_order(spec) if !is_fixed_hyper(h)])
+_hyper_order(p::RandomWalkPrior) = (p.σ,)
+_hyper_order(p::OUPrior) = (p.scale, p.σ)
+_hyper_order(p::CARMAPrior) = _hyper_specs(p)
+
+# The width of the window a scan's search covered in `kind`'s observable.
+_search_width(sc, kind) = (w = getproperty(DimensionalData.metadata(sc), kind === :delay ? :delay_window : :rate_window); w[2] - w[1])
+
+# Each row's class: `1` where it relates the same feed index on its two
+# stations, `2` where different ones.
+_row_classes(rows) = [fa == fb ? 1 : 2 for (fa, fb) in zip(rows.feed_a, rows.feed_b)]
+
+"""
+    _closure_em!(rows, rw, w, nodes, gauge, kind, chains, priors, width, opts)
+
+EM over a kind's station values `x` and the parameters of its noise and prior
+models, from the weights `w` of the starting solve. Under
+[`OutlierMixture`](@ref), a row's inlier variance is `f = σ² + s_c²`: its
+noise variance `σ² = 1/rw` and its class's floor `s_c²`. Each cycle's E-step
+gives each row's probability `γ` of being unexplained, from its residual `e`
+against `x`: `π_c/W` (`W` its search's `width`) against `(1 − π_c)·N(e; 0, f)`;
+then the Gaussian posterior of `x`, `x̂` and `Σ`, with each row weighted by
+`(1 − γ)/f`. The M-step sets `π_c` to the mean `γ` of its class and `s_c²` to
+the mean over the class, weighted by `1 − γ`, of the floor's posterior second
+moment, `s²(f − s²)/f + (s²/f)²(e² + v)` with `e` against `x̂` and `v` the
+variance of the row's fitted value (Henderson's variance-component step); and
+each chain whose prior gives hyperparameters as densities to the maximum of its
+expected log prior plus hyperprior (`_m_step`). A row more likely unexplained
+than not no longer joins stations into a fringe group, as a detection above
+`pfa_max` does not; other losses keep reweighting as their IRLS does.
+"""
+function _closure_em!(rows, rw, w, nodes, gauge, kind, chains, priors, width, opts::Stationization{T}) where {T}
+    mixture = opts.loss isa OutlierMixture
+    loss = mixture ? SoftL1() : opts.loss
+    nnodes = length(nodes.feed)
+    A = _incidence(rows, nnodes, T)
+    class = _row_classes(rows)
+    σ2 = inv.(rw)
+    present = [any(==(c), class) for c in 1:2]
+    s2 = [present[c] ? median(σ2[class .== c]) : zero(T) for c in 1:2]
+    frac = [present[c] ? T(0.05) : zero(T) for c in 1:2]
+    estimated = [i for i in eachindex(chains) if _hyper_count(chains[i].spec) > 0]
+    As = sparse(A)
+    gauges = Dict{BitVector, @NamedTuple{A::Matrix{T}, C::Matrix{T}, d::Vector{T}, ncomp::Int}}()
+    # The gauge rows given which rows the station values explain: the others
+    # carry no information, so they neither link stations nor hold a gauge,
+    # and a station's value only they measure is pinned like any other value
+    # the rows leave free.
+    sides = _row_sides(rows)
+    gauge_for(rs, explained, wts) = get!(() -> _gauge_rows(_select_rows(rs, explained), wts[explained], nodes, gauge, kind; sides), gauges, explained)
+    function solve(rs, explained, wts)
+        local g = gauge_for(rs, explained, wts)
+        basis = _gauge_basis(g.C, g.d)
+        return _gauge_solve(As, wts, rs, basis)..., basis.Z
+    end
+
+    x0, _, _ = solve(rows, trues(length(rw)), w)
+
+    # One EM cycle from station values `x`, updating the parameters in place:
+    # the next station values, the largest parameter change, and the E-step and
+    # solve it made.
+    function cycle(x)
+        local prior, resid, γ, change
+        prior = _prior_block(chains, priors, nnodes, T)
+        resid = rows.val .- As * x
+        γ = zeros(T, length(rw))
+        kept = ones(T, length(rw))
+        f = σ2 .+ s2[class]
+        wts = copy(w)
+        if mixture
+            for r in eachindex(resid, γ, kept)
+                c = class[r]
+                inlier = log1p(-frac[c]) - (resid[r]^2 / f[r] + log(2T(π) * f[r])) / 2
+                outlier = log(frac[c]) - log(T(width[r]))
+                γ[r] = inv(1 + exp(inlier - outlier))
+                kept[r] = inv(1 + exp(outlier - inlier))
+            end
+            wts .= kept ./ f
+        elseif !(loss isa LeastSquares)
+            _irls_weights!(wts, rw, loss, opts.loss_scale, resid)
+        end
+        explained = BitVector(γ .<= 1 / 2)
+        rs = merge(rows, (; prior, accept = rows.accept .& explained))
+        x1, F, Z = solve(rs, explained, wts)
+        resid1 = rows.val .- As * x1
+        cov = _covariance(F, Z)
+        v = mixture ? _fit_variances(cov, As) : nothing
+        Σ = isempty(estimated) ? nothing : _node_covariance(cov, chains[estimated], nnodes)
+        change = zero(T)
+        if mixture
+            # A floor's posterior second moment, averaged over its class's rows
+            # weighted by their probability of being explained. Rows all
+            # unexplained say nothing about the floor, which keeps its value.
+            function second_moment(s2j, members)
+                total = sum(kept[r] for r in members)
+                iszero(total) && return s2j
+                return sum(kept[r] * (s2j * (f[r] - s2j) / f[r] + (s2j / f[r])^2 * (resid1[r]^2 + v[r])) for r in members) / total
+            end
+            # Each change is against its rows' variance, the relative change in
+            # their weights, as a variance tending to zero moves its logarithm
+            # without bound.
+            for c in 1:2
+                present[c] || continue
+                members = findall(==(c), class)
+                π1 = sum(γ[members]) / length(members)
+                s21 = second_moment(s2[c], members)
+                change = max(change, abs(π1 - frac[c]), abs(s21 - s2[c]) / median(f[members]))
+                frac[c], s2[c] = π1, s21
+            end
+        end
+        for i in estimated
+            ch = chains[i]
+            priors[i], δ = _m_step(ch.spec, priors[i], [ch], [_state_moments(ch, x1, Σ)])
+            change = max(change, δ)
+        end
+        return x1, change, (; γ, explained, wts, rows = rs)
+    end
+
+    x, change, last = cycle(x0)
+    iterations = 1
+    while !(change < opts.em_tolerance) && iterations < opts.max_em_iterations
+        x, change, last = cycle(x)
+        iterations += 1
+    end
+    converged = change < opts.em_tolerance
+    prior = _prior_block(chains, priors, nnodes, T)
+    final = merge(last.rows, (; prior))
+    g = gauge_for(final, last.explained, last.wts)
+    x = ConstrainedWLS(vcat(A, prior.M), vcat(last.wts, ones(T, size(prior.M, 1))), g.C, g.d)(vcat(final.val, prior.rhs))
+    resid = final.val .- A * x
+    γ = last.γ
+    outliers = [
+        (; sta_a = final.sta_a[r], feed_a = final.feed_a[r], sta_b = final.sta_b[r], feed_b = final.feed_b[r], scan = final.scan[r], residual = resid[r], probability = γ[r])
+            for r in eachindex(γ) if γ[r] > 1 / 2
+    ]
+    return (; x, ncomp = g.ncomp, resid, rows = final, priors, converged, iterations, outliers,
+        mixture = mixture ? (; floor = sqrt.(s2), outlier_fraction = frac) : nothing)
+end
+
+# The detection rows `keep` selects, with every prior row.
+_select_rows(rows, keep) = merge(
+    map(v -> v[keep], Base.structdiff(rows, NamedTuple{(:prior,)})),
+    (; rows.prior),
+)
+
+# A chain's state moments under the posterior mean `x` and covariance `Σ`: its
+# first state's mean and second moment, and the second moment of each
+# consecutive pair `(s_k, s_{k−1})`, as `_m_step` reads them.
+function _state_moments(ch, x, Σ)
+    D = length(first(ch.states))
+    second(idx) = x[idx] * x[idx]' + Σ[idx, idx]
+    s1 = ch.states[1]
+    return (;
+        start = (SVector{D}(x[s1]), SMatrix{D, D}(second(s1))),
+        pairs = [SMatrix{2D, 2D}(second([ch.states[k]; ch.states[k - 1]])) for k in 2:length(ch.states)],
+    )
+end
+
+# The mean of the `times` in a component's time segment `k`.
+function _segment_time(plan, times, k)
+    ts = [times[i] for i in eachindex(plan.tseg_id, times) if plan.tseg_id[i] == k]
+    return sum(ts) / length(ts)
+end
+
+
+# The (station, feed, scan) triples this system calibrates, as three sets:
+# `touched`, those carrying at least one accepted detection on that feed;
+# `determined`, those whose value sums only columns an accepted detection
+# touches or a prior along time ties to its neighbors (`chained`); and `tied`,
+# those whose value sums a chained column.
 #
 # Acceptance must be read from `raccept`, not from the rows: every measured cell
 # contributes a row, so reading coverage off the rows alone would call a station
@@ -504,14 +818,21 @@ end
 # looks like; the robust loss then arbitrates inconsistency among those rows
 # without removing any. A station with no accepted detection is uncalibrated
 # however the surviving rows are weighted.
-function _covered_antenna_feeds(sta_a, feed_a, sta_b, feed_b, rscan, raccept)
-    cov = Set{Tuple{Int, Int, Int}}()
-    for i in eachindex(sta_a, feed_a, sta_b, feed_b, rscan, raccept)
-        raccept[i] || continue
-        push!(cov, (sta_a[i], feed_a[i], rscan[i]))
-        push!(cov, (sta_b[i], feed_b[i], rscan[i]))
+function _covered_antenna_feeds(rows, node_col, accepted, chained)
+    touched = Set{Tuple{Int, Int, Int}}()
+    determined = Set{Tuple{Int, Int, Int}}()
+    tied = Set{Tuple{Int, Int, Int}}()
+    for i in eachindex(rows.A, rows.B, rows.accept)
+        sides = ((rows.sta_a[i], rows.feed_a[i], rows.A[i]), (rows.sta_b[i], rows.feed_b[i], rows.B[i]))
+        for (st, f, nodes) in sides
+            key = (st, f, rows.scan[i])
+            cols = [node_col[n] for n in nodes]
+            rows.accept[i] && push!(touched, key)
+            all(c -> c in accepted || c in chained, cols) && push!(determined, key)
+            any(in(chained), cols) && push!(tied, key)
+        end
     end
-    return cov
+    return (; touched, determined, tied)
 end
 
 # Constrained WLS over a tagged node graph, the column-space generalization of
@@ -530,6 +851,16 @@ end
 # columns of several components at once is pinned by `_pin_leftover_freedoms`.
 # Any other freedom is an error.
 function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol)
+    T = eltype(rows.val)
+    (; A, C, d, ncomp) = _gauge_rows(rows, w, nodes, gauge, kind)
+    solve_system = ConstrainedWLS(vcat(A, rows.prior.M), vcat(w, ones(T, size(rows.prior.M, 1))), C, d)
+    x = solve_system(vcat(rows.val, rows.prior.rhs))
+    return x, ncomp, rows.val .- A * x, solve_system
+end
+
+# The gauge rows `Cx = d` of a kind's system under the weights `w`, the number
+# of gauged components the accepted rows form, and the dense incidence `A`.
+function _gauge_rows(rows, w, nodes, gauge::AbstractGauge, kind::Symbol; sides = _row_sides(rows))
     T = eltype(rows.val)
     nnodes = length(nodes.feed)
     compid, ncomp, nfree = _gauge_components(rows, nodes)
@@ -550,22 +881,126 @@ function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol
     C, d = _gauge_system(gauge, GaugeFreedoms{T}(freedoms, nnodes))
     # The null-space test and the constrained factorization work on dense rows.
     C = Matrix(C)
-    C, d = _pin_leftover_freedoms(C, d, A, rows, nodew, gauge)
-    solve_system = try
-        ConstrainedWLS(A, w, C, d)
-    catch err
-        err isa ArgumentError || rethrow()
-        throw(
-            ArgumentError(
-                "the $kind antenna system is not determined after its gauge ($(err.msg)): " *
-                    "the detections leave a combination of the model's columns free, such " *
-                    "as two components of this observable that every detection sees only " *
-                    "as their sum.",
-            ),
+    C, d = _pin_leftover_freedoms(C, d, A, rows, nodew, gauge, sides)
+    return (; A, C, d, ncomp)
+end
+
+# The feasible set `x0 + Z·y` of the gauge rows `Cx = d`. An unknown no row
+# touches is its own column of `Z`, and each set of unknowns the rows couple
+# gets a null-space block of its own, so `Z` is as sparse as the rows are local.
+function _gauge_basis(C, d)
+    T = eltype(C)
+    n = size(C, 2)
+    group = collect(1:n)
+    root(j) = group[j] == j ? j : (group[j] = root(group[j]))
+    for row in eachrow(C)
+        cols = findall(!iszero, row)
+        for j in cols
+            group[root(j)] = root(first(cols))
+        end
+    end
+    constrained = falses(n)
+    blocks = Dict{Int, Vector{Int}}()
+    for (r, row) in pairs(eachrow(C))
+        cols = findall(!iszero, row)
+        constrained[cols] .= true
+        push!(get!(blocks, root(first(cols)), Int[]), r)
+    end
+    x0 = zeros(T, n)
+    I, J, V = Int[], Int[], T[]
+    ncol = 0
+    for j in findall(!, constrained)
+        push!(I, j); push!(J, ncol += 1); push!(V, one(T))
+    end
+    for rs in values(blocks)
+        cols = findall(j -> constrained[j] && root(j) == root(findfirst(!iszero, C[first(rs), :])), 1:n)
+        Cb = C[rs, cols]
+        x0[cols] = pinv(Cb) * d[rs]
+        N = nullspace(Cb)
+        for k in axes(N, 2), (i, j) in pairs(cols)
+            push!(I, j); push!(J, ncol + k); push!(V, N[i, k])
+        end
+        ncol += size(N, 2)
+    end
+    return (; Z = sparse(I, J, V, n, ncol), x0)
+end
+
+# The station values from the normal equations of the detection rows (sparse
+# incidence `As`, weights `w`) and prior rows on the gauge's feasible set
+# `x0 + Z·y`, and the Cholesky factor `F` of the reduced normal matrix
+# `Z'HZ`, from which `_covariance` reads the posterior covariance.
+function _gauge_solve(As, w, rows, basis)
+    (; Z, x0) = basis
+    M = sparse(rows.prior.M)
+    H = transpose(As) * Diagonal(w) * As + transpose(M) * M
+    g = transpose(As) * (w .* rows.val) + transpose(M) * rows.prior.rhs
+    F = cholesky(Symmetric(transpose(Z) * H * Z))
+    return x0 + Z * (F \ (transpose(Z) * (g - H * x0))), F
+end
+
+# Overwrite the lower-triangular Cholesky factor `L` with the entries of
+# `(LL')⁻¹` on its pattern, which a factor's pattern closes under (Takahashi,
+# Fagan & Chen 1973): `Σᵢⱼ = −Σₖ LₖⱼΣᵢₖ/Lⱼⱼ` for `i > j` and
+# `Σⱼⱼ = (1/Lⱼⱼ − Σₖ LₖⱼΣₖⱼ)/Lⱼⱼ`, over the `k > j` of column `j`. Column `j`
+# reads only its own `L` entries and the `Σ` of later columns.
+function _selected_inverse!(L::SparseMatrixCSC)
+    rv, v = rowvals(L), nonzeros(L)
+    for j in reverse(axes(L, 2))
+        r = nzrange(L, j)
+        d = v[first(r)]
+        off = r[2:end]
+        l = v[off]
+        for p in off
+            v[p] = -sum(l[k] * _lower_entry(L, rv[p], rv[q]) for (k, q) in pairs(off)) / d
+        end
+        v[first(r)] = (inv(d) - sum((l[k] * v[q] for (k, q) in pairs(off)); init = zero(d))) / d
+    end
+    return L
+end
+
+# Entry `(i, k)` of the symmetric matrix whose lower triangle `S` stores.
+function _lower_entry(S, i, k)
+    j, m = minmax(i, k)
+    r = nzrange(S, j)
+    return nonzeros(S)[r[searchsortedfirst(view(rowvals(S), r), m)]]
+end
+
+# The posterior covariance `Z (Z'HZ)⁻¹ Z'` of the station values from the
+# factor `F` of `Z'HZ`, as a function of two unknowns. It reads `(Z'HZ)⁻¹` on
+# the factor's pattern, which holds every pair of unknowns sharing a row or a
+# prior row.
+function _covariance(F, Z)
+    Σ = _selected_inverse!(sparse(F.L))
+    ip = invperm(F.p)
+    Zt = sparse(transpose(Z))
+    return function (i, j)
+        ri, rj = nzrange(Zt, i), nzrange(Zt, j)
+        return sum(
+            (nonzeros(Zt)[p] * nonzeros(Zt)[q] * _lower_entry(Σ, ip[rowvals(Zt)[p]], ip[rowvals(Zt)[q]]) for p in ri for q in rj);
+            init = zero(eltype(Zt)),
         )
     end
-    x = solve_system(rows.val)
-    return x, ncomp, rows.val .- A * x
+end
+
+# Each row's fitted-value variance `aᵣ'Σaᵣ`.
+function _fit_variances(cov, As)
+    At = sparse(transpose(As))
+    return map(axes(At, 2)) do r
+        rng = nzrange(At, r)
+        sum(nonzeros(At)[p] * nonzeros(At)[q] * cov(rowvals(At)[p], rowvals(At)[q]) for p in rng for q in rng)
+    end
+end
+
+# The posterior covariance between consecutive states of each of `chains`, in
+# an `nnodes × nnodes` sparse matrix holding only those entries.
+function _node_covariance(cov, chains, nnodes)
+    I, J = Int[], Int[]
+    for ch in chains, k in eachindex(ch.states)
+        idx = k == 1 ? ch.states[1] : [ch.states[k]; ch.states[k - 1]]
+        append!(I, repeat(idx, outer = length(idx)))
+        append!(J, repeat(idx, inner = length(idx)))
+    end
+    return sparse(I, J, [cov(i, j) for (i, j) in zip(I, J)], nnodes, nnodes, (a, b) -> a)
 end
 
 # Row `i` observes `Σ x[rows.A[i]] − Σ x[rows.B[i]]`.
@@ -590,6 +1025,14 @@ function _held_rows(rows)
     return [rows.accept[i] || any(n -> n ∉ touched, Iterators.flatten((rows.A[i], rows.B[i]))) for i in eachindex(rows.A, rows.B, rows.accept)]
 end
 
+# The rows a gauge must leave unchanged, as a matrix over the nodes: the held
+# detection rows of the incidence `A` and every prior row, scaled to unit size
+# like the detection rows so a null-space tolerance applies to both.
+_held_system(A, rows) = vcat(sparse(A[_held_rows(rows), :]), sparse(rows.prior.M ./ maximum(abs, rows.prior.M; dims = 2, init = zero(eltype(A)))))
+
+# `X`'s null space, through `XᵀX`: an `n × n` problem however many rows `X` has.
+_null_basis(X) = nullspace(Matrix(transpose(X) * X))
+
 # Each (station, feed, scan) a row side measures, and the columns whose sum is
 # its value.
 function _row_sides(rows)
@@ -606,7 +1049,7 @@ end
 # station's feeds, so only a gauge can set the offset between them.
 function _unlinked_scans(A, rows)
     T = eltype(A)
-    N = nullspace(A[_held_rows(rows), :])
+    N = _null_basis(_held_system(A, rows))
     scans = Set{Int}()
     size(N, 2) == 0 && return scans
     feeds = Dict{Tuple{Int, Int}, Vector{Pair{Int, Vector{Int}}}}()
@@ -634,12 +1077,11 @@ end
 # columns assume. Values are tried in the gauge's station order, then by row
 # weight, lowest feed first, and one is kept only if it fixes a further
 # direction. A direction no value fixes is left for the solve to reject.
-function _pin_leftover_freedoms(C, d, A, rows, nodew, gauge::AbstractGauge)
+function _pin_leftover_freedoms(C, d, A, rows, nodew, gauge::AbstractGauge, sides = _row_sides(rows))
     T = eltype(C)
-    K = nullspace(vcat(A[_held_rows(rows), :], C))
+    K = _null_basis(vcat(_held_system(A, rows), C))
     size(K, 2) == 0 && return C, d
 
-    sides = _row_sides(rows)
     weight = Dict{Int, T}()
     for ((st, _, _), cols) in sides
         weight[st] = get(weight, st, zero(T)) + sum(n -> nodew[n], cols)
@@ -700,6 +1142,14 @@ end
 # rows too for the components `all_rows(c)` selects.
 function _shift_invariant(compid, ncomp::Integer, rows, all_rows)
     free = trues(ncomp)
+    # A prior along time holds the shift of a chain's values unless the
+    # shift leaves its rows unchanged, as a flat random walk's does.
+    M = rows.prior.M
+    for c in 1:ncomp
+        members = findall(==(c), compid)
+        isempty(members) && continue
+        any(r -> abs(sum(view(M, r, members))) > sqrt(eps(eltype(M))) * maximum(abs, view(M, r, :)), axes(M, 1)) && (free[c] = false)
+    end
     tally = Dict{Int, Int}()
     for i in eachindex(rows.A, rows.B, rows.accept)
         empty!(tally)
@@ -735,7 +1185,7 @@ end
     antenna_closure_residuals(dets; observable = :phase, feeds = (1, 1), pfa_max) -> Vector
 
 For every closed triangle of antenna pairs in the detection stack `dets` (the
-`AntennaPair × FeedPair` shape [`search_scan`](@ref) returns), the residual
+`AntennaPair × FeedPair` shape a fringe search returns), the residual
 closure quantity of the chosen `observable` (`:delay`/`:rate`/`:phase`) on the
 feed pair `feeds`, using the *measured* detections: the signed sum around the
 triangle that station-based quantities cancel. On noiseless station-differenced

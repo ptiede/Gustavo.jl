@@ -169,9 +169,10 @@ end
     scans = (FR.detection_stack(D32, named(bl), pols; ti = 1, SCAN_SPREAD...),)
     slot = Dict(n => i for (i, n) in pairs(ANTENNAS))
     for (T, kind, plan) in ((Float32, :delay, layout.plans[1]), (Float64, :rate, layout.plans[2]))
-        r = @inferred FR._solve_kind_cols!(
+        # The EM's results exist only when it runs.
+        r = @inferred Tuple{Int, NamedTuple, Dict{Int, T}, Set{Int}, Set{Int}, Union{Nothing, NamedTuple}} FR._solve_kind_cols!(
             zeros(layout.nθ), scans, [plan], slot, PinAntenna(1),
-            FR.Stationization(eltype = T), Val(kind),
+            FR.Stationization(eltype = T), Val(kind), nothing,
         )
         @test r[3] isa Dict{Int, T}
     end
@@ -751,7 +752,7 @@ end
     end
 end
 
-# The engine contract behind `BaselineFringeFit`'s scan-local mode: on a model whose
+# The engine contract behind `FringeClosure`'s per-scan closes: on a model whose
 # every column is per-scan, solving each scan's system alone accumulates the
 # same solution as one pooled call over all scans. The graph aggregation is
 # EXACT — connectivity is weight-independent, so component counts sum and the
@@ -849,4 +850,17 @@ end
         @test θ[col(dplan, a)] ≈ τ[a, 1] - τ[1, 1] atol = 1.0e-18
         @test θ[col(rplan, a)] ≈ ṙ[a, 1] - ṙ[1, 1] atol = 1.0e-12
     end
+end
+
+@testset "Stationize: the selected inverse matches the inverse on the factor's pattern" begin
+    rng = MersenneTwister(0x5e1)
+    n = 40
+    B = FR.sparse(randn(rng, n, n) .* (rand(rng, n, n) .< 0.08) + 2I)
+    H = transpose(B) * B
+    F = cholesky(Symmetric(H))
+    Σ = FR._selected_inverse!(FR.sparse(F.L))
+    dense = inv(Matrix(H))[F.p, F.p]
+    rows, cols, _ = FR.findnz(Σ)
+    @test length(rows) > 2n
+    @test all(Σ[i, j] ≈ dense[i, j] for (i, j) in zip(rows, cols))
 end

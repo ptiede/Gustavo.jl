@@ -78,7 +78,7 @@
     @testset "end-to-end: recovers injected per-feed delays from a solve" begin
         ps, truth = _build_fringe_ps(nant = 4)
         gauge = PinAntenna(1)
-        sol = fit(BaselineFringeFit(; gauge), ps)
+        sol = _fringe_fit(ps, FringeClosure(; gauge))
         st = FP.fringe_antenna_solutions(sol)
         @test size(st) == (sol.info.nscan, length(sol.geom.antennas), 2)
         @test collect(lookup(st, Gustavo.Scan)) == sol.geom.scan_names

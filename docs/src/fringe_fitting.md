@@ -19,8 +19,10 @@ Both stages are derived below. The choice of which parameters are solved, at
 what time and frequency resolution, and with what tying across feeds belongs to
 the gain model, described in
 [Specifying gain models](@ref specifying-models); the fringe stage's model is a
-phase-only [`GainModel`](@ref Gustavo.Calibration.GainModel), and the search
-and station-solve options are fields of [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit). Phase sense,
+phase-only [`GainModel`](@ref Gustavo.Calibration.GainModel). The search's
+options are a [`FringeSearch`](@ref Gustavo.Fring.FringeSearch), fit on the
+data, and the station solve's are fields of
+[`FringeClosure`](@ref Gustavo.FringeClosure), fit on the search's detections. Phase sense,
 parameter signs and units are fixed in [Conventions](@ref conventions).
 
 ## Matched filter
@@ -81,7 +83,7 @@ carried.
 
 [`baseline_fringe_search`](@ref) performs this search for one block, given a
 `DimStack` over `(Frequency, Ti)` with `:vis`, `:weights` and `:flags` layers.
-[`search_scan`](@ref) applies it to every cross baseline and feed pair of a
+`fit(FringeSearch(...), ps)` applies it to every cross baseline and feed pair of a
 scan group, joining each baseline's spectral windows into one plane so the
 delay search spans them all; autocorrelations are excluded. Each search returns a [`Detection`](@ref),
 holding ``\hat\tau``, ``\hat{\dot r}``, ``\hat\varphi``, ``\hat A``, a
@@ -309,7 +311,7 @@ amplitude over its per-component noise,
 
 At high SNR the phase of ``D`` has standard deviation ``1/\mathrm{SNR}`` (the
 noise component perpendicular to ``D``, divided by ``|D|``), and so does
-``\log A``. The bandpass and adhoc steps use the same quantity for a coherent
+``\log A``. The bandpass and adhoc solvers use the same quantity for a coherent
 sum of visibilities, ``|\sum w V|^2 / \sum w``, as the inverse variance of its
 phase and log-amplitude.
 
@@ -358,7 +360,7 @@ so the implied threshold varies slowly with both arguments: for
 ``\mathrm{SNR} \approx 5.7``.
 
 ``N_c`` is counted over a family of searches rather than one:
-[`search_scan`](@ref) uses ``n_\mathrm{baseline} \times n_\mathrm{pol}``, a
+A fringe search uses ``n_\mathrm{baseline} \times n_\mathrm{pol}``, a
 Bonferroni correction over the scan. A recorded PFA is therefore directly
 comparable with [`Stationization`](@ref)'s `pfa_max`, is not a per-search
 quantity, and does not depend on how many other scans a solve holds.
@@ -441,7 +443,7 @@ follows from the model's feed tying; no product is treated as a special case.
 The rows ``e_i - e_j`` annihilate any vector constant on a connected component
 of the graph, so ``M`` has a null space of dimension equal to the number of
 components and the system is rank-deficient. One constraint row per component
-is supplied by the step's `gauge`, an
+is supplied by the fit's `gauge`, an
 [`AbstractGauge`](@ref Gustavo.Calibration.AbstractGauge):
 [`PinAntenna`](@ref Gustavo.Calibration.PinAntenna) sets one node to zero, and
 [`ZeroSumPhase`](@ref Gustavo.Calibration.ZeroSumPhase) constrains the mean
@@ -462,7 +464,8 @@ a station's feed order differs from the reference's and no accepted detection
 relates different feeds, is fixed by setting one (station, feed) value to
 zero, at the gauge's preferred station where it can. Whenever a fringe group's
 feeds are not linked by an accepted detection, so that the offset between them
-is set by the gauge rather than measured, the step warns, naming the scans.
+is set by the gauge rather than measured, the fringe closure warns, naming the
+scans.
 Any other
 undetermined combination of columns, such as two feed-2 offsets that every
 detection sees only as their sum, is an error.
@@ -473,16 +476,16 @@ which per-station values are reported, and hence whether values from different
 scans are comparable.
 
 [`ByComponent`](@ref Gustavo.Calibration.ByComponent) chooses a gauge per
-model component, by the component names of the step's model (those a solution
-lists, such as `fringe.phase.rate`):
+model component, by the component names of the model (those a solution lists,
+such as `fringe.phase.rate`):
 
 ```julia
 gauge = ByComponent((; rate = PinAntenna("A2")); default = PinAntenna("A1"))
-sol = fit(BaselineFringeFit(; gauge), ps)
+sol = fit(FringeClosure(; gauge), fit(FringeSearch(), ps))
 ```
 
-The step rejects a name its model does not have, listing the components it
-does have.
+`FringeClosure` rejects a name its model does not have, listing the components
+it does have.
 
 A new convention subtypes `AbstractGauge`. Each freedom reaches it as a
 [`GaugeFreedom`](@ref Gustavo.Calibration.GaugeFreedom): its nodes and, per
@@ -535,7 +538,7 @@ is recorded and is not used as a threshold.
 
 ## Adhoc phase
 
-The adhoc step ([`AdhocPhase`](@ref Gustavo.AdhocPhase)) solves a phase per
+The adhoc solver ([`AdhocPhase`](@ref Gustavo.AdhocPhase)) solves a phase per
 station and accumulation period (AP) that a per-scan delay and rate cannot
 follow, such as atmospheric turbulence. It works on residual visibilities, with
 the fringe solution already divided out and the band coherently averaged to one
@@ -564,7 +567,7 @@ x^p_{ab} \to x^p_{ab} - \left(c_{a,n(f_a)} - c_{b,n(f_b)}\right),
 ```
 
 so each track ``\phi_{a,n}(t)`` is reported with zero weighted mean over the
-scan, and its time variation, including a slope, is what the step solves.
+scan, and its time variation, including a slope, is what the solver fits.
 
 ### Using every product
 
@@ -710,7 +713,7 @@ with ``w_u(t)`` the node's gated weight. One constant per component is exactly
 the freedom the data leave: shifting a set of nodes that is not a whole
 component would change the observed difference on every edge leaving it.
 
-The gauge given to the step is applied last, one constant per AP across every
+The gauge given to the solver is applied last, one constant per AP across every
 node. Its constraint is built once per scan, over the nodes covered in every
 AP, so a pinned station that drops out of some APs falls back to the same node
 throughout the scan rather than to a different one per AP. It changes no
@@ -718,20 +721,63 @@ baseline difference, so it does not change the applied
 correction; the per-AP pin, the registration above, and the smoothing frame
 are internal to the solve and independent of it.
 
-## Diagnostics
+## Drift, outliers and the closure's EM
 
-A fringe solution's diagnostics are labeled arrays keyed by scan name,
-station and feed: [`fringe_snr_table`](@ref) (per-scan peak SNR and
-false-alarm probability), [`fringe_detections`](@ref) (every measured
-baseline and product), [`fringe_antenna_solutions`](@ref) (per-scan station
-delay, rate and phase) and [`fringe_antenna_flags`](@ref) (station feeds a scan
-left unconstrained). Per-scan solutions from [`mapsets`](@ref Gustavo.mapsets) combine with
-[`cat_scans`](@ref):
+A fringe component may carry a prior along time, a `RandomWalkPrior`,
+`OUPrior` or `CARMAPrior` keyed `Ti`, which ties its values across the scans
+it spans. The closure adds the prior's whitened transitions to the station
+system as rows, the prior's further states as unknowns, so the solve is still
+weighted least squares and its posterior Gaussian. A drifting inter-feed delay
+is a flat level beside a mean-zero drift, and every scan is then closed
+together:
 
 ```julia
-sols = mapsets(g -> fit(BaselineFringeFit(; gauge), g), groupby(ps, ByScan()))
-det = cat_scans(fringe_detections.(values(sols)))
-findall(det.detected .& (det.pfa .> 1e-6))     # accepted, but marginal
+rel_delay = GainComponent(Delay(); Ti = GlobalTime(), Feed = ExceptFeed(1))
+rel_drift = GainComponent(Delay(); Ti = PerScan(), Feed = ExceptFeed(1),
+                          prior = OUPrior(; scale = LogNormal(log(3600.0), 1.0), σ = LogNormal(log(3.0e-11), 1.0)))
+model = merge(default_fringe_model(); phase = (; rel_delay, rel_drift))
+sol = fit(FringeClosure(; model, closure = Stationization(; loss = OutlierMixture())), dets)
+```
+
+The gauge then fixes only what the detections and the prior leave free: one
+level per track where no detection relates the feeds, rather than one offset
+per scan. A scan whose detections leave a station's feed weak takes the
+prior's interpolation of its neighbors, and so counts as calibrated.
+
+Hyperparameters given as densities are estimated per station and feed node by
+MAP-EM: the E-step is the Gaussian posterior of the station values, the M-step
+maximizes each chain's expected log prior plus its hyperprior. The estimates
+are in `sol.info.priors`.
+
+[`OutlierMixture`](@ref Gustavo.Fring.OutlierMixture) replaces the robust
+loss with a model of the detections: each is explained by the station values,
+with its noise variance plus a floor `s_c²`, or it is not, at probability `π_c`,
+with a value spread evenly over its search window. The class `c` is whether
+the detection relates the same feed index on its two stations or different
+ones, so a population of cross-hand detections that a leaked fringe moves, or
+that source polarization structure biases, is separated from the parallel hands
+without naming either. The same EM estimates `s_c` and `π_c`
+(`sol.info.mixture`). No detection is removed: one more likely unexplained than
+not weighs nothing, joins no fringe group, and is reported per station and
+feed with its median offset from the solution. It still counts as a
+measurement of its stations, which it leaves unflagged, but a station value
+that only such detections measure is set to zero.
+
+## Diagnostics
+
+A fringe search's and a fringe solution's diagnostics are labeled arrays keyed
+by scan name, station and feed: [`fringe_snr_table`](@ref) (per-scan peak SNR
+and false-alarm probability) and [`fringe_detections`](@ref) (every measured
+baseline and product) of the search's detections, and
+[`fringe_antenna_solutions`](@ref) (per-scan station delay, rate and phase) and
+[`fringe_antenna_flags`](@ref) (station feeds a scan left unconstrained) of the
+closure's solution. Per-scan solutions from [`mapsets`](@ref Gustavo.mapsets)
+combine with [`cat_scans`](@ref):
+
+```julia
+dets = reduce(vcat, values(mapsets(g -> fit(FringeSearch(), g), groupby(ps, ByScan()))))
+det = fringe_detections(dets)
+findall((det.pfa .<= Stationization().pfa_max) .& (det.pfa .> 1e-6))     # accepted, but marginal
 ```
 
 With a Makie backend loaded, the labeled results plot with DimensionalData's
@@ -764,7 +810,7 @@ series(angle.(after.vis[Scan = 1, FeedPair = At((1, 1))]))   # one line per base
 delay_closure(before)
 ```
 
-[`fringe_search_map`](@ref) reruns the fringe step's search on one baseline
+[`fringe_search_map`](@ref) reruns the fringe search on one baseline
 and feed pair of a scan and returns the windowed delay–rate surface itself as
 a [`FringeSearchMap`](@ref), rather than only its maximum. This is required to
 determine why a detection occurred at a given delay and rate, and whether a

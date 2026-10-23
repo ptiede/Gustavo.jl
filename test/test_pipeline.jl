@@ -80,7 +80,7 @@ end
     gauge = PinAntenna(1)
     sols = _fit_chain(
         (
-            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            FringeClosure(; gauge), Bandpass(; gauge),
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ), ps,
     )
@@ -115,7 +115,7 @@ end
             @test sol2.geom.channel_widths == sol.geom.channel_widths
             @test sol2.components == sol.components
             @test sol2.name == sol.name
-            @test sol2.step == sol.step
+            @test sol2.spec == sol.spec
         end
         bp, bp2 = sols[2], back[:bandpass]
         @test bp2.info.phase_status == bp.info.phase_status
@@ -150,7 +150,7 @@ end
         sol = first(sols)
         @test occursin("CalibrationSolution", sprint(show, sol))
         @test occursin("CalibrationSolution", sprint(show, MIME"text/plain"(), sol))
-        @test occursin("Step      : fringe", sprint(show, MIME"text/plain"(), sol))
+        @test occursin("Name      : fringe", sprint(show, MIME"text/plain"(), sol))
         @test occursin("ComponentFit", sprint(show, first(sol.components)))
     end
 end
@@ -197,8 +197,8 @@ end
         @test any(!=(0), off1[:, 1, :, :])           # ...and the plan is non-trivial
     end
 
-    # The step's default carries the same tie: the AdhocPhase step's compiled
-    # component is the feed-common adhoc form.
+    # AdhocPhase's default carries the same tie: its compiled component is the
+    # feed-common adhoc form.
     t = Gustavo.model_components(AdhocPhase(; gauge = PinAntenna(1)), nothing)
     @test t.phase.adhoc.Feed isa CAL.SharedFeeds
     @test isempty(t.logamp)
@@ -246,7 +246,7 @@ end
     # parallel hands still flatten.
     ps, _ = _build_fringe_ps()
     gauge = PinAntenna(1)
-    sols = _fit_chain((BaselineFringeFit(; gauge), AdhocPhase(; model = pf, smoother = sm, gauge)), ps)
+    sols = _fit_chain((FringeClosure(; gauge), AdhocPhase(; model = pf, smoother = sm, gauge)), ps)
     adhoc_c = only(last(sols)[:phase, :adhoc].components)
     @test adhoc_c.component.Feed isa CAL.PerFeed
     leaf = parent(adhoc_c.params)     # (param, node, fseg, tseg, ant)
@@ -262,7 +262,7 @@ end
     ps, _ = _build_fringe_ps()
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
-    sols_ref = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+    sols_ref = _fit_chain((FringeClosure(; gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
     out_fused = _calibrate_chain(sols_ref, ps)
     @test collect(keys(out_fused)) == collect(keys(ps))
     same(x, y) = (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5)
@@ -327,14 +327,14 @@ end
     @inferred FP._weighted_sums!(zeros(ComplexF32, out), zeros(Float32, out), V, W, F, Frequency)
 end
 
-@testset "Fringe pipeline: rounds > 1 accumulates (no corruption)" begin
-    # Each round accumulates onto the solution of the rounds before it, so
-    # coherence stays high on every round.
+@testset "Fringe pipeline: fringe fits of the residual compose (no corruption)" begin
+    # Each fringe fit searches the residual of the ones before it, so coherence
+    # stays high however many there are.
     ps, _ = _build_fringe_ps()
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     for r in (1, 2, 3)
         gauge = PinAntenna(1)
-        sols = _fit_chain((BaselineFringeFit(; rounds = r, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+        sols = _fit_chain((ntuple(_ -> FringeClosure(; gauge), r)..., Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
         @test minimum(_product_coherences(_calibrate_chain(sols, ps); keep = _parallel_hand)) > 0.99
     end
 end
@@ -342,17 +342,16 @@ end
 @testset "Fringe false-alarm family is one scan's searches" begin
     # Noise puts every pfa strictly inside (0, 1), where the family size moves it.
     ps, _ = _build_fringe_ps(; nscans = 2, noise = 10.0)
-    step = BaselineFringeFit(; gauge = PinAntenna(1))
-    both = fit(step, ps).info
+    both = first(fit(FringeSearch(), ps))
     first_scan = first(values(XRadio.groupby(ps, XRadio.ByScan())))
-    alone = fit(step, first_scan).info
-    rows = both.det_scan .== 1
-    @test count(rows) == length(alone.det_pfa) > 0
-    @test any(p -> 0 < p < 1, alone.det_pfa)
-    @test 0 < count(alone.det_detected) < length(alone.det_detected)
-    @test both.det_snr[rows] == alone.det_snr
-    @test both.det_pfa[rows] == alone.det_pfa
-    @test both.det_detected[rows] == alone.det_detected
+    alone = only(fit(FringeSearch(), first_scan))
+    measured = parent(alone.valid)
+    @test count(measured) > 0
+    pfa = parent(alone.pfa)[measured]
+    @test any(p -> 0 < p < 1, pfa)
+    @test 0 < count(<=(FP.Stationization().pfa_max), pfa) < length(pfa)
+    @test both.snr == alone.snr
+    @test both.pfa == alone.pfa
 end
 
 @testset "Phase bandpass: per-channel phase recovered" begin
@@ -372,7 +371,7 @@ end
     ps, _ = _build_fringe_ps(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
-    ff = BaselineFringeFit(; gauge)
+    ff = FringeClosure(; gauge)
     sols_on = _fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
     sols_off = _fit_chain((ff, AdhocPhase(adhoc; gauge)), ps)
 
@@ -417,17 +416,17 @@ end
     end
     ps, _ = _build_fringe_ps(; nant, nspw, nchan, nscans = 3, bandpass = bp)
     gauge = PinAntenna(1)
-    ff = BaselineFringeFit(; gauge)
+    ff = FringeClosure(; gauge)
 
     averaged = mapsets(XRadio.groupby(ps, XRadio.ByScan())) do g
-        calibrate!(fit(ff, g), g; flag_bad = false, apply_flags = false)
+        calibrate!(_fringe_fit(g, ff), g; flag_bad = false, apply_flags = false)
         return XRadio.average(g, XRadio.ByScan())
     end
     avg = XRadio.ProcessingSet(averaged)
     @test all(ms -> length(XRadio.times(ms)) == 1, values(avg))
     bp_avg = fit(Bandpass(; gauge), avg)
 
-    fr = fit(ff, ps)
+    fr = _fringe_fit(ps, ff)
     bp_full = fit(Bandpass(; gauge), _precal(fr, ps))
     θ(sol) = reduce(vcat, [vec(collect(c.params)) for c in sol.components])
     @test θ(bp_avg) ≈ θ(bp_full) rtol = 1.0e-4
@@ -447,17 +446,17 @@ end
     end
     ps, _ = _build_fringe_ps(; nant, nspw, nchan, nscans = 3, bandpass = bp)
     gauge = PinAntenna(1)
-    ff = BaselineFringeFit(; gauge)
+    ff = FringeClosure(; gauge)
 
     averaged = mapsets(XRadio.groupby(ps, XRadio.ByScan())) do g
-        calibrate!(fit(ff, g), g; flag_bad = false, apply_flags = false)
+        calibrate!(_fringe_fit(g, ff), g; flag_bad = false, apply_flags = false)
         return XRadio.average(g, XRadio.ByScan(), XRadio.ChannelBins(2))
     end
     avg = XRadio.ProcessingSet(averaged)
     @test all(ms -> length(XRadio.frequencies(ms)) == nchan ÷ 2, values(avg))
     bp_avg = fit(Bandpass(; gauge), avg)
 
-    out = _precal(fit(ff, ps), ps)
+    out = _precal(_fringe_fit(ps, ff), ps)
     calibrate!(bp_avg, out)
     R = _band_coherence(out, (1, 1))
     @test minimum(R) > 0.95
@@ -493,7 +492,7 @@ end
     ps, _ = _build_fringe_ps(; nant = nant, nspw = nspw, nchan = nchan, bandpass = bp)
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
-    ff = BaselineFringeFit(; gauge)
+    ff = FringeClosure(; gauge)
     sols_on = _fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
     sols_off = _fit_chain((ff, AdhocPhase(adhoc; gauge)), ps)
 
@@ -598,7 +597,7 @@ end
     end
 
     gauge = PinAntenna(1)
-    ff = BaselineFringeFit(; gauge)
+    ff = FringeClosure(; gauge)
     sols_off = _fit_chain(
         (
             ff,
@@ -648,10 +647,10 @@ end
     end
 end
 
-@testset "Default adhoc step flattens end-to-end" begin
+@testset "Default adhoc solver flattens end-to-end" begin
     ps, _ = _build_fringe_ps()
     gauge = PinAntenna(1)
-    sols = _fit_chain((BaselineFringeFit(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
+    sols = _fit_chain((FringeClosure(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
     @test minimum(_product_coherences(_calibrate_chain(sols, ps); keep = _parallel_hand)) > 0.99
 end
 
@@ -668,14 +667,15 @@ end
     gauge = PinAntenna(1)
     sols = _fit_chain(
         (
-            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            FringeClosure(; gauge), Bandpass(; gauge),
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ), ps,
     )
-    fr = first(sols)
-    @test all(>(10), filter(isfinite, fr.info.scan_snr))
-    det = FP.fringe_detections(fr)
-    @test all(det.pfa[det.detected] .< 1.0e-10)             # all detections secure
+    dets = fit(FringeSearch(), ps)
+    @test all(>(10), FP.fringe_snr_table(dets).max_snr)
+    det = FP.fringe_detections(dets)
+    accepted = det.pfa .<= FP.Stationization().pfa_max
+    @test all(det.pfa[accepted] .< 1.0e-10)                 # all detections secure
     @test minimum(_product_coherences(_calibrate_chain(sols, ps))) > 0.99
 end
 
@@ -692,33 +692,33 @@ end
     gauge = PinAntenna(1)
     sols = _fit_chain(
         (
-            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            FringeClosure(; gauge), Bandpass(; gauge),
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ), ps;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
     )
     ngroups = length(XRadio.groupby(ps, XRadio.ByScan()))
-    # Stages report under each step's `provides` name (:fringe/:bandpass/:adhoc).
-    for st in (:fringe, :adhoc)
+    # Stages report under the search's name and each solver's `solution_name` name.
+    for st in (:fringe_search, :adhoc)
         ev = [(d, t) for (s2, d, t) in events if s2 == st]
         @test !isempty(ev)
         total = ev[1][2]
-        st === :fringe && @test total == ngroups
+        st === :fringe_search && @test total == ngroups
         @test sort([d for (d, _) in ev]) == collect(0:total)   # announcement + every scan
         @test all(t == total for (_, t) in ev)
     end
     @test any(e -> e[1] === :bandpass, events)                 # bandpass enabled by default
-    fringe_step, bandpass_step, adhoc_step = (s.info for s in sols)
-    @test fringe_step.t_pass > 0 && adhoc_step.t_pass > 0 && bandpass_step.t_pass >= 0
-    @test all(s -> s.info.ntasks_used >= 1 && s.info.inner_tasks >= 1, sols)
-    # Every step publishes the SAME generic per-scan timing shape — no
-    # per-step-name code in the runner, so a third-party step gets this too.
-    for step in (fringe_step, bandpass_step, adhoc_step)
-        t = step.timing
+    bandpass_info, adhoc_info = (s.info for s in sols[2:end])
+    @test adhoc_info.t_pass > 0 && bandpass_info.t_pass >= 0
+    @test all(s -> s.info.ntasks_used >= 1 && s.info.inner_tasks >= 1, sols[2:end])
+    # Every solver publishes the SAME generic per-scan timing shape — no
+    # per-solver-name code in the runner, so a third-party solver gets this too.
+    for info in (bandpass_info, adhoc_info)
+        t = info.timing
         @test collect(lookup(t, Gustavo.Scan)) == first(sols).geom.scan_names
         @test all(>=(0), t.decode) && all(>=(0), t.work)
     end
-    @test sum(fringe_step.timing.work) > 0
+    @test sum(adhoc_info.timing.work) > 0
 
     # The bandpass/adhoc chain still produces a working solve on a
     # single-scan set (the stage-B/bandpass/adhoc chain is intact).
@@ -726,7 +726,7 @@ end
     gauge = PinAntenna(1)
     solsc = _fit_chain(
         (
-            BaselineFringeFit(; gauge), Bandpass(; gauge),
+            FringeClosure(; gauge), Bandpass(; gauge),
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ), ps;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),
@@ -776,13 +776,9 @@ end
         ms[:visibility] = vis
     end
     gauge = PinAntenna(1)
-    ff = BaselineFringeFit(;
-        model = default_fringe_model(),
-        search = FP.FringeSearch(algorithm = FP.FullGrid()),
-        gauge,
-    )
-    # Each scan's station systems solve as it is searched.
-    @test Gustavo._scan_local_solve(ff)
+    ff = (FP.FringeSearch(algorithm = FP.FullGrid()), FringeClosure(; model = default_fringe_model(), gauge))
+    # Each scan's station systems solve on their own.
+    @test Gustavo._closes_per_scan(default_fringe_model())
     sols = _fit_chain((ff, AdhocPhase(; gauge)), ps)
     flags = FP.fringe_antenna_flags(first(sols))
     @test any(flags)

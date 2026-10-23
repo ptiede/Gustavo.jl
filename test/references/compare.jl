@@ -42,7 +42,7 @@ recorded_gains(g, ax) = DimArray(
     (Frequency(ax.frequency), Ti(ax.time), AntennaName(Categorical(ax.antenna; order = Unordered())), Feed(ax.feed)),
 )
 
-# Every labeled `value` under a step's `components/`, keyed by its path: the
+# Every labeled `value` under a solution's `components/`, keyed by its path: the
 # values, their dimension names and each dimension's lookup.
 function recorded_components(g, prefix = ())
     out = Dict{Tuple, Any}()

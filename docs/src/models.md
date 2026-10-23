@@ -4,7 +4,7 @@ CurrentModule = Gustavo.Calibration
 
 # [Specifying gain models](@id specifying-models)
 
-Every solve step in Gustavo separates WHAT it solves from HOW.
+Every fit in Gustavo separates WHAT it solves from HOW.
 The WHAT is a *gain model*: named parametric contributions to each station's
 complex gain,
 
@@ -14,8 +14,8 @@ gain(station, feed, channel, time) = exp(Σ logamp) · cis(Σ phase)
 
 where each sum runs over that station's named components. This page is the
 model vocabulary: what a component is, the terms, resolutions, and feed
-tyings it is built from, how the built-in steps accept one, and what the
-standard steps' models solve and why.
+tyings it is built from, how the built-in fits accept one, and what their
+standard models solve and why.
 
 ## The atom: `GainComponent`
 
@@ -74,6 +74,7 @@ data:
 | [`IIDPrior`](@ref)`(σ)` | each parameter `N(0, σ²)` |
 | [`RandomWalkPrior`](@ref)`(; order, σ, init)` | the `(order − 1)`-times integrated Brownian motion along the axis; `σ²` per unit of `x^(2·order − 1)`; `σ` a number or a hyperprior; `init` a Gaussian on the initial value and its derivatives, or `nothing` (free) |
 | [`OUPrior`](@ref)`(; scale, σ)` | a zero-mean Ornstein–Uhlenbeck process along the axis; `scale` and `σ` each a number or a hyperprior |
+| [`CARMAPrior`](@ref)`(; ar, ma, σ)` | a zero-mean CARMA(p, q) process along the axis, its roots given as [`RealRoot`](@ref)`(; scale)` and [`ComplexRoots`](@ref)`(; period, scale)` factors; every `scale`, `period` and `σ` a number or a hyperprior |
 
 `σ` is in the parameter's own units, per the power of the axis coordinate (s or Hz) the random walk states. A correlated prior runs along the one axis
 the component segments (the one whose segmentation is not `GlobalTime` or
@@ -154,8 +155,8 @@ itself be a named subtree of components, addressed through its key
 
 ## Where a model plugs in
 
-Each built-in solve step takes its model as a constructor argument, vetted at
-compile time — before any data is read — against the step's solver: the
+Each built-in fit specification takes its model as a constructor argument,
+vetted at compile time — before any data is read — against its solver: the
 solver declares [`can_fit`](@ref Gustavo.Fring.can_fit) per component
 (default `false`, so an undeclared combination fails loudly with the
 component's constructor spelling, never solves to silent zeros), plus
@@ -164,25 +165,25 @@ whole-tree requirements via
 
 - [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_model(), smoother = ...)`,
   [`AdhocPhase`](@ref Gustavo.AdhocPhase)`(model = default_adhoc_model(), smoother = ...)`
-  and [`BaselineFringeFit`](@ref Gustavo.BaselineFringeFit)`(model = default_fringe_model(), search = ...)`
-  take a `GainModel`; the fringe step's model has phase components only
+  and [`FringeClosure`](@ref Gustavo.FringeClosure)`(model = default_fringe_model(), closure = ...)`
+  take a `GainModel`; the fringe closure's model has phase components only
   ([`default_fringe_model`](@ref Gustavo.Fring.default_fringe_model)).
 
 [`merge`](@ref Base.merge(::GainModel)) builds a variant of a model by adding
 or replacing named components:
 
 ```julia
-BaselineFringeFit(model = merge(default_fringe_model();
+FringeClosure(model = merge(default_fringe_model();
     phase = (; rel_rate = GainComponent(Rate(); Ti = PerScan(), Feed = ExceptFeed(1)))))
 ```
 
-Each step compiles and solves its own model on its own private θ — no step's
+Each fit compiles and solves its own model on its own private θ — no fit's
 parameter block is shared with or visible to another's. Gains compose
-multiplicatively across steps.
+multiplicatively across fits.
 
 ## The standard model, component by component
 
-The three steps `BaselineFringeFit()`, `Bandpass()` and `AdhocPhase()`, fit in
+The fringe closure `FringeClosure()`, `Bandpass()` and `AdhocPhase()`, fit in
 turn, solve the following phase components
 — this is the standard VLBI calibration model, and each tying below is a
 physics decision:
@@ -212,12 +213,12 @@ opted into as a separate `PerScan × ExceptFeed(1)` rate component, not by
 untying this one.
 
 **`bandpass` — per-channel constant phase, time-global, per-feed** (the
-`Bandpass` step's phase half). The residual nonlinear-in-frequency
+`Bandpass` solver's phase half). The residual nonlinear-in-frequency
 instrumental phase that a per-scan linear delay cannot represent, stable
 across the observation (HOPS-style).
 
 **`adhoc` — per-integration constant phase, feed-common** (the
-`AdhocPhase` step). Residual atmospheric phase is non-birefringent
+`AdhocPhase` solver). Residual atmospheric phase is non-birefringent
 (common to every feed), so it is solved feed-common — which both denoises it
 and contributes exactly zero inter-feed phase in any feed basis. A `PerFeed`
 adhoc lets per-AP solve noise differ between feeds and scatters the inter-feed
@@ -230,7 +231,7 @@ trades against the source terms and so is a gauge rather than a parameter.
 And one log-amplitude component:
 
 **`bandpass` — per-channel constant log-amplitude, time-global, per-feed**
-(the `Bandpass` step's logamp half). The instrumental amplitude passband
+(the `Bandpass` solver's logamp half). The instrumental amplitude passband
 (filterbank shape), measured on the calibrator under the component's prior,
 if any. The absolute flux scale is *not* its job — that stays with the a-priori
 amplitude calibration.
@@ -268,9 +269,9 @@ Heterogeneity is opt-in per solver
 ([`supports_antenna_heterogeneity`](@ref Gustavo.supports_antenna_heterogeneity)):
 a solver that has not declared support rejects a heterogeneous model at
 compile time with an error naming the differing component, rather than
-silently leaving θ blocks unsolved. Among the shipped steps, `Bandpass` with a
+silently leaving θ blocks unsolved. Among the shipped solvers, `Bandpass` with a
 `JointSmoother` declares support; solvers written against the station-block
-iterator can declare it too (see [Authoring a solve step](@ref authoring-steps)).
+iterator can declare it too (see [Authoring a solver](@ref authoring-solvers)).
 
 ## Inspecting a model
 

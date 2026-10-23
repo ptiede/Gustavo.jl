@@ -1,84 +1,84 @@
-# ── Step protocol ────────────────────────────────────────────────────────────
+# ── Solver protocol ──────────────────────────────────────────────────────────
 #
-# The hooks a `SolveStep` implements are defined below; docs/src/authoring_steps.md
-# walks through writing a step. Run-wide resources (schedulers, progress) live on the `ExecutionConfig` passed
-# to `fit`; anything that changes what a step solves, its gauge included, lives
-# on the step.
+# The hooks an `AbstractSolver` implements are defined below; docs/src/authoring_solvers.md
+# walks through writing a solver. Run-wide resources (schedulers, progress) live on the `ExecutionConfig` passed
+# to `fit`; anything that changes what a solver solves, its gauge included,
+# lives on the solver.
 
 """
-    SolveStep
+    AbstractSolver
 
-A solve of one gain model (fringe fit, bandpass
-estimation, adhoc phasing, …). A solve step declares its model components
+A solve of one gain model (bandpass estimation, adhoc phasing, …) that reads
+the data itself. A solver declares its model components
 with [`model_components`](@ref) and fits them in [`solve`](@ref), reading the
 data with [`each_group`](@ref).
 """
-abstract type SolveStep end
+abstract type AbstractSolver end
 
 """
-    model_components(step::SolveStep, spec) -> GainModel
+    model_components(solver::AbstractSolver, spec) -> GainModel
 
-The [`GainModel`](@ref) `step` solves. `spec = (; geom)` carries the data
-geometry (with the run's `antennas`) the step may consult (e.g. to resolve an
+The [`GainModel`](@ref) `solver` solves. `spec = (; geom)` carries the data
+geometry (with the run's `antennas`) the solver may consult (e.g. to resolve an
 `:auto` option). Default: no components.
 """
-model_components(step::SolveStep, spec) = GainModel()
+model_components(solver::AbstractSolver, spec) = GainModel()
 
 """
-    supports_antenna_heterogeneity(step::SolveStep) -> Bool
+    supports_antenna_heterogeneity(solver::AbstractSolver) -> Bool
 
-Whether `step`'s solver handles a gain model whose component signatures differ
+Whether `solver` handles a gain model whose component signatures differ
 across stations. Default `false`: the runner then rejects a heterogeneous
-compiled model aimed at the step
+compiled model aimed at the solver
 ([`Calibration.require_antenna_uniform`](@ref)), naming the differing
 components and their per-station signatures, so an undeclared solver never
 receives θ blocks it would silently leave unsolved.
 
-A step that declares `true` must write its solve as a loop over the station
+A solver that declares `true` must write its solve as a loop over the station
 blocks the layout supplies — [`Calibration.antenna_blocks`](@ref) — rather
-than assuming one rectangular `(…, nant)` leaf per component. A step whose
-solving is delegated to a pluggable solver object forwards this question to it,
-so the generic also answers for solver objects — [`Bandpass`](@ref) asks its
+than assuming one rectangular `(…, nant)` leaf per component. A solver whose
+solving is delegated to a pluggable object forwards this question to it, so
+the generic also answers for those objects — [`Bandpass`](@ref) asks its
 smoother.
 """
-supports_antenna_heterogeneity(step::SolveStep) = false
+supports_antenna_heterogeneity(solver::AbstractSolver) = false
 
 """
-    provides(step::SolveStep) -> Symbol
+    solution_name(solver::AbstractSolver) -> Symbol
 
-The capability this step contributes (`:fringe`, `:bandpass`, `:adhoc`, …):
+The capability this solver contributes (`:fringe`, `:bandpass`, `:adhoc`, …):
 names its solution (`sol.name`) and labels its progress-callback stage.
 Default: `:nothing`.
 """
-provides(step::SolveStep) = :nothing
+solution_name(solver::AbstractSolver) = :nothing
 
 """
-    step_gauge(step::SolveStep) -> Union{Nothing, AbstractGauge}
+    solver_gauge(solver::AbstractSolver) -> Union{Nothing, AbstractGauge}
 
-The gauge this step fixes its undetermined station values with. `fit` resolves
+The gauge this solver fixes its undetermined station values with. `fit` resolves
 its station codes against the run's antenna table into `ctx.gauge`. Default:
-`nothing`, for a step with no gauge freedom.
+`nothing`, for a solver with no gauge freedom.
 """
-step_gauge(step::SolveStep) = nothing
+solver_gauge(solver::AbstractSolver) = nothing
 
 """
-    solve(step::SolveStep, ctx::SolveContext) -> NamedTuple
+    solve(solver::AbstractSolver, ctx::SolveContext) -> NamedTuple
 
-Fit `step`'s own model: fill `ctx.θ` and return the step's diagnostics, which
+Fit `solver`'s own model: fill `ctx.θ` and return the solver's diagnostics, which
 become `sol.info`. The data are read
 with [`each_group`](@ref), once per pass the solve needs; a solve that
 iterates (a residual re-search, say) calls it once per round. The runner adds
 `t_pass`, the solve's wall time, and `timing`, each scan group's decode and
-work seconds summed over the step's passes.
+work seconds summed over the solver's passes.
 
-Every `SolveStep` must define a method.
+Every `AbstractSolver` must define a method.
 """
 function solve end
 
-solve(step::SolveStep, ctx) = throw(
+solve(solver::AbstractSolver, ctx) = throw(
     ArgumentError(
-        "$(nameof(typeof(step))) does not define `Gustavo.solve(::$(nameof(typeof(step))), ctx)`, " *
-            "which fits the step's θ and returns its diagnostics NamedTuple.",
+        "$(nameof(typeof(solver))) does not define `Gustavo.solve(::$(nameof(typeof(solver))), ctx)`, " *
+            "which fits the solver's θ and returns its diagnostics NamedTuple.",
     ),
 )
 
@@ -87,12 +87,12 @@ solve(step::SolveStep, ctx) = throw(
 """
     SolveContext
 
-What a step's [`solve`](@ref) works with: the step's own compiled model
+What a solver's [`solve`](@ref) works with: its own compiled model
 (`model`, `layout`, and `θ`, the flat parameter vector over `layout`, which
 `solve` fills; a component's block is `reshape(view(θ, plan.range),
 plan.shape)`), the data geometry `geom` (its `antennas` are the run's station
-table), the step's `gauge` with station codes resolved (`nothing` for a step
-whose [`step_gauge`](@ref) is `nothing`), `nant`, and the scan groups of the
+table), the solver's `gauge` with station codes resolved (`nothing` for a
+solver whose [`solver_gauge`](@ref) is `nothing`), `nant`, and the scan groups of the
 data (`groupby(ps, ByScan())`).
 """
 const _PassTiming = @NamedTuple{decode::Vector{Float64}, work::Vector{Float64}}
@@ -117,7 +117,7 @@ end
 """
     each_group(f, ctx::SolveContext) -> Vector
 
-Read each scan group of the step's data and return `f(group)` for every
+Read each scan group of the solver's data and return `f(group)` for every
 group, in group order. `group` is a `ProcessingSet` of in-memory Measurement
 Sets, one per spectral window of the scan. Groups run on the run's outer scheduler, heaviest first, and the
 progress callback is told of each.

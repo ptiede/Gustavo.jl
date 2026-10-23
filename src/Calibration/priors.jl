@@ -9,7 +9,8 @@
     AbstractPrior
 
 A Gaussian prior on the parameters of a [`GainComponent`](@ref):
-[`IIDPrior`](@ref), [`RandomWalkPrior`](@ref) or [`OUPrior`](@ref). A
+[`IIDPrior`](@ref), [`RandomWalkPrior`](@ref), [`OUPrior`](@ref) or
+[`CARMAPrior`](@ref). A
 correlated prior relates values along the one axis the component segments
 ([`resolve_prior`](@ref)).
 """
@@ -113,14 +114,116 @@ function OUPrior(; scale, σ)
     return OUPrior{typeof(s), typeof(g)}(s, g)
 end
 
+"""
+    RealRoot(; scale)
+
+A real root `−1/scale` of a [`CARMAPrior`](@ref)'s autoregressive or
+moving-average polynomial. Alone in the autoregressive part it is an
+Ornstein–Uhlenbeck decay over `scale`. `scale` is in the coordinate's units (Hz
+along frequency): a positive number, held fixed, or a hyperprior.
+"""
+struct RealRoot{S}
+    scale::S
+    function RealRoot{S}(scale) where {S}
+        _check_hyper("RealRoot scale", scale)
+        return new{S}(scale)
+    end
+end
+RealRoot(; scale) = RealRoot{typeof(scale)}(scale)
+
+"""
+    ComplexRoots(; period, scale)
+
+The complex pair of roots `−1/scale ± 2πi/period` of a [`CARMAPrior`](@ref)'s
+autoregressive or moving-average polynomial. In the autoregressive part it adds
+a quasi-periodic term to the covariance, `∝ e^(−|Δ|/scale)·cos(2πΔ/period + ϑ)`:
+a ripple of `period` whose phase stays coherent over about `scale`, and a
+fixed sinusoid with Gaussian amplitudes as `scale → ∞`. Both are in the
+coordinate's units, each a positive number or a hyperprior.
+"""
+struct ComplexRoots{P, S}
+    period::P
+    scale::S
+    function ComplexRoots{P, S}(period, scale) where {P, S}
+        _check_hyper("ComplexRoots period", period)
+        _check_hyper("ComplexRoots scale", scale)
+        return new{P, S}(period, scale)
+    end
+end
+function ComplexRoots(; period, scale)
+    p, s = _promote_fixed(period, scale)
+    return ComplexRoots{typeof(p), typeof(s)}(p, s)
+end
+
+const _RootFactor = Union{RealRoot, ComplexRoots}
+
+_root_count(::RealRoot) = 1
+_root_count(::ComplexRoots) = 2
+_root_count(::Tuple{}) = 0
+_root_count(factors::Tuple) = _root_count(first(factors)) + _root_count(Base.tail(factors))
+
+"""
+    CARMAPrior(; ar, ma = (), σ)
+
+A stationary continuous-time autoregressive moving-average process, CARMA(p, q)
+(Kelly et al. 2014), along the component's axis (see [`resolve_prior`](@ref))
+about a free level per block:
+
+    a(D) x = b(D) ε,   a(s) = Π (s − r),   b(s) = Π (1 − s/r),
+
+with `D` the derivative along the coordinate, `ε` white noise, `a` over the
+roots of `ar` and `b` over those of `ma`. Each is a tuple of
+[`RealRoot`](@ref) and [`ComplexRoots`](@ref) factors; `ar` holds `p ≥ 1`
+roots and `ma` `q < p`. Every root has a negative real part, so the process is
+stationary, and `σ` is its stationary standard deviation, in the parameter's
+own units. The power spectrum is `∝ |b(2πiφ)|²/|a(2πiφ)|²`: the
+autoregressive roots set the correlation scales and any quasi-periodic peaks,
+and the moving-average roots raise the spectrum's tail, so that the process is
+`p − q − 1` times differentiable. `ar = (RealRoot(; scale),)` is the
+[`OUPrior`](@ref) with that `scale`.
+
+Every `scale`, `period` and `σ` is a positive number, held fixed, or a
+hyperprior estimated by type-II MAP as for [`OUPrior`](@ref), over their logs.
+"""
+struct CARMAPrior{A <: Tuple, M <: Tuple, G} <: AbstractPrior
+    ar::A
+    ma::M
+    σ::G
+    function CARMAPrior{A, M, G}(ar, ma, σ) where {A, M, G}
+        all(f -> f isa _RootFactor, ar) && all(f -> f isa _RootFactor, ma) || throw(
+            ArgumentError("CARMAPrior ar and ma must hold RealRoot and ComplexRoots factors, got $(typeof(ar)) and $(typeof(ma))"),
+        )
+        p, q = _root_count(ar), _root_count(ma)
+        p >= 1 || throw(ArgumentError("CARMAPrior needs at least one autoregressive root"))
+        q < p || throw(
+            ArgumentError("CARMAPrior needs fewer moving-average roots than autoregressive ones, got q = $q and p = $p"),
+        )
+        _check_hyper("CARMAPrior σ", σ)
+        return new{A, M, G}(ar, ma, σ)
+    end
+end
+function CARMAPrior(; ar, ma = (), σ)
+    a, m = Tuple(ar), Tuple(ma)
+    return CARMAPrior{typeof(a), typeof(m), typeof(σ)}(a, m, σ)
+end
+
 Base.:(==)(a::IIDPrior, b::IIDPrior) = a.σ == b.σ
 Base.hash(p::IIDPrior, h::UInt) = hash(p.σ, hash(:IIDPrior, h))
 Base.:(==)(a::RandomWalkPrior, b::RandomWalkPrior) = a.order == b.order && a.σ == b.σ && a.init == b.init
 Base.hash(p::RandomWalkPrior, h::UInt) = hash(p.init, hash(p.σ, hash(p.order, hash(:RandomWalkPrior, h))))
 Base.:(==)(a::OUPrior, b::OUPrior) = a.scale == b.scale && a.σ == b.σ
 Base.hash(p::OUPrior, h::UInt) = hash(p.σ, hash(p.scale, hash(:OUPrior, h)))
+Base.:(==)(a::RealRoot, b::RealRoot) = a.scale == b.scale
+Base.hash(f::RealRoot, h::UInt) = hash(f.scale, hash(:RealRoot, h))
+Base.:(==)(a::ComplexRoots, b::ComplexRoots) = a.period == b.period && a.scale == b.scale
+Base.hash(f::ComplexRoots, h::UInt) = hash(f.scale, hash(f.period, hash(:ComplexRoots, h)))
+Base.:(==)(a::CARMAPrior, b::CARMAPrior) = a.ar == b.ar && a.ma == b.ma && a.σ == b.σ
+Base.hash(p::CARMAPrior, h::UInt) = hash(p.σ, hash(p.ma, hash(p.ar, hash(:CARMAPrior, h))))
 
-const _CorrelatedPrior = Union{RandomWalkPrior, OUPrior}
+Base.show(io::IO, f::RealRoot) = print(io, "RealRoot(; scale = ", repr(f.scale), ")")
+Base.show(io::IO, f::ComplexRoots) = print(io, "ComplexRoots(; period = ", repr(f.period), ", scale = ", repr(f.scale), ")")
+
+const _CorrelatedPrior = Union{RandomWalkPrior, OUPrior, CARMAPrior}
 
 _promote_fixed(a::Real, b::Real) = promote(a, b)
 _promote_fixed(a, b) = (a, b)
@@ -192,7 +295,7 @@ function _resolve_prior(e, nt::NamedTuple)
         p isa _CorrelatedPrior || throw(
             ArgumentError(
                 "$(component_label(e)): the prior keyed $k is a $(typeof(p)); a keyed prior " *
-                    "must be a RandomWalkPrior or OUPrior (pass an IIDPrior unkeyed).",
+                    "must be a RandomWalkPrior, OUPrior or CARMAPrior (pass an IIDPrior unkeyed).",
             ),
         )
         k in ax || throw(_relates_nothing(e, "does not segment $k"))
@@ -207,5 +310,6 @@ _relates_nothing(e, why) = ArgumentError(
 _call_string(p::RandomWalkPrior) =
     "RandomWalkPrior(; order = $(p.order), σ = $(repr(p.σ))" * (isnothing(p.init) ? "" : ", init = $(repr(p.init))") * ")"
 _call_string(p::OUPrior) = "OUPrior(; scale = $(repr(p.scale)), σ = $(repr(p.σ)))"
+_call_string(p::CARMAPrior) = "CARMAPrior(; ar = $(repr(p.ar)), ma = $(repr(p.ma)), σ = $(repr(p.σ)))"
 _call_string(nt::NamedTuple) =
     "(" * join(("$k = $(_call_string(p))" for (k, p) in pairs(nt)), ", ") * (length(nt) == 1 ? ",)" : ")")

@@ -18,44 +18,45 @@ visibilities are taken to be normalized already, or to need no normalization.
 function normalize_by_autocorrelations!(ms::XRadio.MeasurementSet)
     feeds = feed_pairs(ms)
     antennas = _antenna_pairs(ms)
-    autos = Dict(
-        (a, first(feeds[p, bi])) => (Polarization(p), BaselineID(bi))
+    # Each autocorrelation as the (antenna, feed) it measures and its (product, baseline).
+    autos = [
+        (a, first(feeds[p, bi])) => (p, bi)
             for (bi, (a, b)) in pairs(antennas) if a == b
             for p in axes(feeds, 1) if allequal(feeds[p, bi])
-    )
+    ]
     isempty(autos) && return ms
-    vis = ms[:visibility]
-    weight = ms[:weight]
-    flag = ms[:flag]
-    for (bi, (a, b)) in pairs(antennas)
-        a == b && continue
-        for p in axes(feeds, 1)
-            fa, fb = feeds[p, bi]
-            _normalize_cell!(
-                vis, weight, flag, (Polarization(p), BaselineID(bi)),
-                get(autos, (a, fa), nothing), get(autos, (b, fb), nothing),
-            )
-        end
-    end
-    for (bi, (a, b)) in pairs(antennas)
-        a == b && (view(flag, BaselineID(bi)) .= true)
-    end
+    slot = Dict(first(x) => k for (k, x) in pairs(autos))
+    # Each (product, baseline) cell's two autocorrelations, as indices into
+    # `autos` (0 for one the set lacks), or `(-1, -1)` for an autocorrelation.
+    ends = [
+        a == b ? (-1, -1) : (get(slot, (a, feeds[p, bi][1]), 0), get(slot, (b, feeds[p, bi][2]), 0))
+            for p in axes(feeds, 1), (bi, (a, b)) in pairs(antennas)
+    ]
+    layers = map(_storage_order, (ms[:visibility], ms[:weight], ms[:flag]))
+    _normalize!(layers..., last.(autos), ends)
     return ms
 end
 
-function _normalize_cell!(vis, weight, flag, cell, auto_a, auto_b)
-    f = view(flag, cell...)
-    if auto_a === nothing || auto_b === nothing
-        f .= true
-        return
+# The normalization on the layers in storage order `(Polarization, Frequency,
+# BaselineID, Ti)`, behind a function barrier: each autocorrelation's scale
+# `√|A|` once, `NaN` where it is unusable, then one pass over every sample in
+# storage order.
+function _normalize!(V, W, F, autos, ends)
+    T = real(eltype(V))
+    scale = similar(V, T, (axes(V, 2), axes(V, 4), eachindex(autos)))
+    for (k, (p, bi)) in pairs(autos), t in axes(V, 4), c in axes(V, 2)
+        A = abs(V[p, c, bi, t])
+        scale[c, t, k] = !F[p, c, bi, t] && isfinite(A) && A > 0 ? sqrt(T(A)) : T(NaN)
     end
-    power = abs.(view(vis, auto_a...)) .* abs.(view(vis, auto_b...))
-    usable = .!view(flag, auto_a...) .& .!view(flag, auto_b...) .&
-        isfinite.(power) .& (power .> 0)
-    v = view(vis, cell...)
-    w = view(weight, cell...)
-    v .= ifelse.(usable, v ./ sqrt.(power), v)
-    w .= ifelse.(usable, w .* power, w)
-    f .|= .!usable
-    return
+    for t in axes(V, 4), bi in axes(V, 3), c in axes(V, 2), p in axes(V, 1)
+        ka, kb = ends[p, bi]
+        s = ka > 0 && kb > 0 ? scale[c, t, ka] * scale[c, t, kb] : T(NaN)
+        if isfinite(s)
+            V[p, c, bi, t] /= s
+            W[p, c, bi, t] *= s * s
+        else
+            F[p, c, bi, t] = true
+        end
+    end
+    return nothing
 end

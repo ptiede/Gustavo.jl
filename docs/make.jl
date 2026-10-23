@@ -19,7 +19,7 @@ makedocs(;
         "Fringe fitting" => "fringe_fitting.md",
         "Fitting under priors" => "priors.md",
         "Authoring a new gain term" => "authoring_terms.md",
-        "Authoring a solve step" => "authoring_steps.md",
+        "Authoring a solver" => "authoring_solvers.md",
         "API reference" => [
             "Gustavo" => "api/gustavo.md",
             "Calibration" => "api/calibration.md",

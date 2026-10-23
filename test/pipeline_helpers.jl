@@ -17,7 +17,7 @@ const FP = Gustavo.Fring
 
 include("synthetic_ps.jl")
 
-# The union of the components the standard pipeline's steps solve (each on its
+# The union of the components the standard pipeline's fits solve (each on its
 # own private θ in a real run), assembled as ONE GainModel: the fringe
 # terms plus the phase/log-amplitude bandpass and the adhoc phase. Structural
 # tests use it to exercise the plan routers and θ decoding on a realistic full

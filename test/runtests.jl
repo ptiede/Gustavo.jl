@@ -61,12 +61,13 @@ include("test_adhoc.jl")
 # End-to-end CalibrationSolution + fit pipeline (Phase 6).
 include("test_pipeline.jl")
 
-# The calibration surface: fit and calibrate, gauges, the step record, defaults.
+# The calibration surface: fit and calibrate, gauges, the specification record,
+# defaults.
 # Reuses _build_fringe_ps + CAL/FP aliases from test_pipeline.jl.
-include("test_steps.jl")
+include("test_calibration_surface.jl")
 
-# Solve-step interface (step protocol, selections, solutions of a chain of
-# steps, fit/calibrate). Reuses the same aliases.
+# Solver interface (solver protocol, selections, solutions of a chain of fits,
+# fit/calibrate). Reuses the same aliases.
 include("test_interface.jl")
 
 # Reading scan groups, and the corrections.
@@ -76,13 +77,13 @@ include("test_mapsets.jl")
 include("test_group_tables.jl")
 include("test_axis_order.jl")
 
-# The BaselineFringeFit step on the new engine (M3 gates): θ ≡ frozen stage A,
-# cross-feed rate opt-in, fit-on-subset masking, corrections before the step.
-include("test_fringe_step.jl")
+# The fringe fit (search, then closure): gauges, capability, cross-feed rate
+# opt-in, fit-on-subset masking, corrections before the fit.
+include("test_fringe_fit.jl")
 
-# The Bandpass step: model vetting, deterministic folding, the per-track
+# The Bandpass solver: model vetting, deterministic folding, the per-track
 # record, and portable calibrate!.
-include("test_bandpass_step.jl")
+include("test_bandpass.jl")
 
 # Bandpass(smoother = JointSmoother()): the alternating complex-visibility +
 # per-scan source-coherence solve, and the shape specs acting as priors inside
@@ -92,9 +93,9 @@ include("test_joint_bandpass.jl")
 # The weight convention behind the bandpass SNRs and gain-estimate weights.
 include("test_noise_convention.jl")
 
-# The AdhocPhase step + output sink: multi-scan solves of the three steps in
+# The AdhocPhase solver + output sink: multi-scan solves of the three fits in
 # turn, and calibrate.
-include("test_smoother_step.jl")
+include("test_adhoc_phase.jl")
 include("test_gauge_invariance.jl")
 
 # Fringe diagnostics + Makie plot stubs (Phase 8).
@@ -128,7 +129,7 @@ end
         @test n in top
     end
 
-    # The corrections, and reading scan groups in a step.
+    # The corrections, and reading scan groups in a solver.
     for n in (
             :normalize_by_autocorrelations!, :scale_weights!, :calibrate!,
             :each_group, :ExecutionConfig,

@@ -22,6 +22,9 @@ _matern12(times, τ, σ2) = [σ2 * exp(-abs(times[i] - times[j]) / τ) for i in 
     @test q ≈ 0.7 * (1 - a^2)                       # stationary variance preserved
     # Symmetric in the sign of the gap.
     @test FRs.ou_step(3.0, 0.7, -1.5) == FRs.ou_step(3.0, 0.7, 1.5)
+    # A gap far shorter than τ: q ≈ 2σ²·Δt/τ, not lost to rounding.
+    @test FRs.ou_step(1.0e42, 0.7, 6.0e7)[2] ≈ 2 * 0.7 * 6.0e7 / 1.0e42 rtol = 1.0e-12
+    @test FRs.ou_step(1.0e15, 0.7, 1.0)[2] ≈ 2 * 0.7 / 1.0e15 rtol = 1.0e-12
 end
 
 @testset "Kalman filter loglik == dense GP loglik" begin
@@ -36,6 +39,58 @@ end
     dense_ll = -0.5 * (logdet(C) + dot(y, C \ y) + n * log(2π))
     kal_ll = FRs.kalman_filter(FRs.OUModel(τ, σ2), y, r, times).loglik
     @test isapprox(kal_ll, dense_ll; atol = 1.0e-9)
+end
+
+# The CARMA autocovariance by residues over the distinct roots of `a`,
+# `Σ_k b(r_k)·b(−r_k)·e^(r_k|Δ|) / (a′(r_k)·a(−r_k))`, scaled to variance `σ2`.
+function _carma_acf(ar, ma, σ2, Δs)
+    a(s) = prod(s - r for r in ar)
+    da(s, k) = prod((s - r for (j, r) in pairs(ar) if j != k); init = one(s))
+    b(s) = prod((1 - s / r for r in ma); init = one(s))
+    c(Δ) = real(sum(b(r) * b(-r) * exp(r * abs(Δ)) / (da(r, k) * a(-r)) for (k, r) in pairs(ar)))
+    return σ2 .* c.(Δs) ./ c(0.0)
+end
+
+@testset "CARMA model: covariance, stationary start and likelihood" begin
+    cases = [
+        (ComplexF64[-0.1 + 0.8im, -0.1 - 0.8im], ComplexF64[]),
+        (ComplexF64[-0.05, -0.3 + 0.5im, -0.3 - 0.5im], ComplexF64[-2.0]),
+        (ComplexF64[-0.05, -0.3 + 0.5im, -0.3 - 0.5im], ComplexF64[-1.0 + 0.4im, -1.0 - 0.4im]),
+        # Roots far slower than the steps.
+        (ComplexF64[-1.0e-3, -2.0e-3 + 1.0e-2im, -2.0e-3 - 1.0e-2im], ComplexF64[-0.5]),
+        # A root that decays within a small part of a step beside slow ones.
+        (ComplexF64[-79.0, -4.0e-4 + 0.026im, -4.0e-4 - 0.026im], ComplexF64[-0.097]),
+    ]
+    Δs = [0.0, 0.3, 1.0, 2.5, 7.0]
+    for (ar, ma) in cases
+        m = FRs.CARMAModel{length(ar)}(ar, ma, 0.04)
+        @test FRs.statedim(m) == length(ar)
+        # The state's first entry carries the process's autocovariance.
+        acf = [(first(FRs.transition(m, Δ, Float64)) * m.P0)[1, 1] for Δ in Δs]
+        @test acf ≈ _carma_acf(ar, ma, 0.04, Δs) rtol = 1.0e-10
+        # The start is stationary and every step's covariance positive definite.
+        A, Q = FRs.transition(m, 1.3, Float64)
+        @test A * m.P0 * A' + Q ≈ m.P0 rtol = 1.0e-10
+        @test isposdef(Matrix(Q))
+    end
+    # One real root is the OU process.
+    ou = FRs.CARMAModel{1}(ComplexF64[-0.2], ComplexF64[], 0.04)
+    @test all(FRs.transition(ou, 1.3, Float64) .≈ FRs.transition(FRs.OUModel(5.0, 0.04), 1.3, Float64))
+
+    # The Kalman likelihood is the dense Gaussian process's.
+    rng = MersenneTwister(31)
+    ar, ma = cases[2]
+    x = sort(cumsum(0.2 .+ rand(rng, 20)))
+    r = fill(0.01, 20)
+    y = randn(rng, 20) .* 0.2
+    C = [only(_carma_acf(ar, ma, 0.04, [a - b])) for a in x, b in x] + Diagonal(r)
+    dense_ll = -0.5 * (logdet(C) + dot(y, C \ y) + 20 * log(2π))
+    @test FRs.kalman_filter(FRs.CARMAModel{3}(ar, ma, 0.04), y, r, x).loglik ≈ dense_ll atol = 1.0e-9
+
+    @test_throws "at least one autoregressive root" CARMAPrior(; ar = (), σ = 0.1)
+    @test_throws "fewer moving-average roots" CARMAPrior(; ar = (RealRoot(; scale = 1.0),), ma = (RealRoot(; scale = 2.0),), σ = 0.1)
+    @test_throws "RealRoot and ComplexRoots" CARMAPrior(; ar = (OUPrior(; scale = 1.0, σ = 1.0),), σ = 0.1)
+    @test_throws "ComplexRoots period must be positive" ComplexRoots(; period = -1.0, scale = 1.0)
 end
 
 @testset "RTS smoother == GP posterior mean; variance shrinks" begin

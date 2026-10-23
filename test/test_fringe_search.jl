@@ -483,19 +483,31 @@ end
     # Sums and refined peaks stay at the compute precision, whatever the weight
     # eltype or the precision of the coordinates passed in.
     F = falses(size(V32))
-    @test @inferred(FR._exact_matched_filter(V32, W32, F, freqs, times, f0, t0, τ_true, ṙ_true)) isa ComplexF32
-    @test @inferred(FR._exact_matched_filter(V32, Float64.(W32), F, freqs, times, f0, t0, τ_true, ṙ_true)) isa ComplexF32
+    weigh(V, W, F) = FR._weigh_plane!(similar(V), similar(V, real(eltype(V))), V, W, F)
+    X32, _ = @inferred weigh(V32, W32, F)
+    @test first(weigh(V32, Float64.(W32), F)) == X32
+    @test @inferred(FR._exact_matched_filter(X32, freqs, times, f0, t0, τ_true, ṙ_true)) isa ComplexF32
     @test @inferred(FR._phase_sum(V32[:, 1], freqs, f0, τ_true)) isa ComplexF32
     pk = @inferred FR._polish_peak_exact!(
-        V32, W32, F, freqs, times, f0, t0, τ_true, ṙ_true;
+        X32, freqs, times, f0, t0, τ_true, ṙ_true;
         delay_bin = 1.0e-9, rate_bin = 1.0e-3, refine_delay = true, refine_rate = true,
     )
     @test pk.delay isa Float32 && pk.rate isa Float32
     axm = FR._search_axes(freqs_m, times, mbd, ComplexF32)
     @test @inferred(FR._stage2_value(wsm.mbd, axm.mbd, 1, 1, 1)) isa ComplexF32
+    Xm32, Wmm32 = weigh(Vm32, Wm32, falses(size(Vm32)))
     @test @inferred(
-        FR._baseline_fringe_search(Vm32, Wm32, falses(size(Vm32)), freqs_m, times, f0m, t0, axm, wsm, mbd, 1.0)
+        FR._baseline_fringe_search(Xm32, Wmm32, freqs_m, times, f0m, t0, axm, wsm, mbd, 1.0)
     ) isa FR.Detection{Float32}
+
+    # The weighted plane holds w·v and w at usable samples and zero at the rest:
+    # flagged, zero or negative weight, non-finite visibility or weight.
+    Vb = ComplexF32[1 + 2im NaN; 3 4im]
+    Wb = Float32[2 3; 0 Inf]
+    Fb = Bool[false false; false false]
+    Xb, Wbm = weigh(Vb, Wb, Fb)
+    @test Xb == ComplexF32[2 + 4im 0; 0 0] && Wbm == Float32[2 0; 0 0]
+    @test first(weigh(Vb, Wb, Bool[true false; false false])) == zeros(ComplexF32, 2, 2)
 
     # The map is at the compute precision too, including a block with no usable data.
     m32 = FR.baseline_fringe_map(FR.fringe_plane(V32, W32, freqs, times), f0, t0)
@@ -505,8 +517,8 @@ end
     @test typeof(empty32) === typeof(m32)
     @test !empty32.detection.valid
 
-    @test_throws "coordinate vector" FR._exact_matched_filter(V32, W32, F, freqs[2:end], times, f0, t0, τ_true, ṙ_true)
-    @test_throws "coordinate vector" FR._exact_matched_filter(V32, W32, F, freqs, times[2:end], f0, t0, τ_true, ṙ_true)
+    @test_throws "coordinate vector" FR._exact_matched_filter(X32, freqs[2:end], times, f0, t0, τ_true, ṙ_true)
+    @test_throws "coordinate vector" FR._exact_matched_filter(X32, freqs, times[2:end], f0, t0, τ_true, ṙ_true)
 end
 
 # An algorithm defined OUTSIDE the package — the only thing that proves
@@ -601,22 +613,24 @@ end
     @test gc.feeds == [(1, 1), (1, 2), (2, 1), (2, 2)]
 
     ws = FR.FringeWorkspace(ComplexF32)
+    # A member's weighted plane of one cell, as the gather builds it.
     member_plane(ms, pair, q) = let bi = findfirst(==(pair), collect(XRadio.baselines(ms)))
         p = findfirst(==(gc.feeds[q]), Gustavo.feed_pairs(ms)[:, bi])
-        Gustavo._cell_plane(ms[:visibility], bi, p)
+        V, W, F = map(L -> Gustavo._cell_plane(L, bi, p), FR._member_layers(ms))
+        FR._weigh_plane!(similar(V, ComplexF32), similar(V, Float32), V, W, F)
     end
     j14 = findfirst(==(("A1", "A4")), gc.antenna_pairs)
-    V, W, F = FR._gather_cell!(ws, gc, j14, 2)
-    @test V[1:nlo, :] == member_plane(lo, ("A1", "A4"), 2)
-    @test all(F[(nlo + 1):end, :]) && all(iszero, W[(nlo + 1):end, :])
+    X, Wm = FR._gather_cell!(ws, gc, j14, 2)
+    @test (X[1:nlo, :], Wm[1:nlo, :]) == member_plane(lo, ("A1", "A4"), 2)
+    @test all(iszero, X[(nlo + 1):end, :]) && all(iszero, Wm[(nlo + 1):end, :])
     j12 = findfirst(==(("A1", "A2")), gc.antenna_pairs)
-    V, W, F = FR._gather_cell!(ws, gc, j12, 3)
-    @test V[(nlo + 1):end, :] == member_plane(hi, ("A1", "A2"), 3)
+    X, Wm = FR._gather_cell!(ws, gc, j12, 3)
+    @test (X[(nlo + 1):end, :], Wm[(nlo + 1):end, :]) == member_plane(hi, ("A1", "A2"), 3)
 
-    @inferred FR._copy_cell_rows!(ws.planes, FR._member_layers(lo), (1, 1), 1:nlo)
+    @inferred FR._gather_cell!(ws, gc, j12, 3)
     ax = FR._search_axes(gc.freqs, gc.times, FR.FringeSearch(), ComplexF32)
     @inferred FR._baseline_fringe_search(
-        V, W, F, gc.freqs, gc.times, geom.f0, geom.t0, ax, ws, FR.FringeSearch(), 1.0,
+        X, Wm, gc.freqs, gc.times, geom.f0, geom.t0, ax, ws, FR.FringeSearch(), 1.0,
     )
 
     det = FR.search_scan(group, geom, FR.FringeSearch())

@@ -73,11 +73,11 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
     @testset "full chain: θ and output bit-identical across OUTER executors" begin
         ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
-        steps = (
-            BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1)),
+        specs = (
+            FringeClosure(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1)),
             AdhocPhase(adhoc; gauge = PinAntenna(1)),
         )
-        run(ex) = _fit_chain(steps, ps; exec = ExecutionConfig(outer_executor = ex))
+        run(ex) = _fit_chain(specs, ps; exec = ExecutionConfig(outer_executor = ex))
         sols_t, sols_d = run(DynamicScheduler()), run(GreedyScheduler())
         for (sol_t, sol_d) in zip(sols_t, sols_d)
             @test parent(gains(sol_d)) == parent(gains(sol_t))
@@ -94,11 +94,11 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
     @testset "full chain: θ bit-identical across INNER executors" begin
         ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
-        steps = (
-            BaselineFringeFit(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1)),
+        specs = (
+            FringeClosure(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1)),
             AdhocPhase(adhoc; gauge = PinAntenna(1)),
         )
-        run(inner) = _fit_chain(steps, ps; exec = ExecutionConfig(inner_executor = inner))
+        run(inner) = _fit_chain(specs, ps; exec = ExecutionConfig(inner_executor = inner))
         # Serial vs multi-chunk within-scan fan-out: the per-block folds are
         # order-fixed by the data layout, so θ is bit-identical.
         sols_ser = run(SerialScheduler())

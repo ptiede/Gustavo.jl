@@ -63,8 +63,10 @@ end
     # Rank order is preserved, and codes and indices may be mixed.
     @test resolve_gauge(PinAntenna(["A4", 1]), names).refs == [4, 1]
     @test resolve_gauge(ZeroSumPhase(), names) === ZeroSumPhase()
-    # A code the antenna table does not carry is an error, not a silent fallback.
-    @test_throws ErrorException resolve_gauge(PinAntenna("ZZ"), names)
+    # A ranked list falls past the codes the table does not carry.
+    @test resolve_gauge(PinAntenna(["ZZ", "A3", "YY", "A1"]), names).refs == [3, 1]
+    @test_throws "none of the references [\"ZZ\", \"YY\"] is in antenna table" resolve_gauge(PinAntenna("ZZ", "YY"), names)
+    @test_throws "no references given" resolve_gauge(PinAntenna(String[]), names)
 end
 
 @testset "gauge_antenna_order and remap_gauge" begin

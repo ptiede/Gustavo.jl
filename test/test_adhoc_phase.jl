@@ -1,6 +1,6 @@
-# ── AdhocPhase step + calibrate ───────────────────────────────────────────────
+# ── AdhocPhase + calibrate ────────────────────────────────────────────────────
 #
-# BaselineFringeFit, Bandpass and AdhocPhase fit in turn on a ProcessingSet,
+# The fringe fit, Bandpass and AdhocPhase fit in turn on a ProcessingSet,
 # each on the data the earlier solutions corrected:
 # - θ is bit-deterministic across runs, and the multi-scan solve flattens the
 #   data.
@@ -29,7 +29,7 @@ function _worst_parallel_coherence(corr)
     return worst
 end
 
-@testset "AdhocPhase step + output sink (new engine)" begin
+@testset "AdhocPhase + output sink (new engine)" begin
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
     nant = 4
@@ -55,8 +55,8 @@ end
         bandpass = bp_true, amp_bandpass = abp_true,
     )
     fm = default_fringe_model()
-    steps = (BaselineFringeFit(; model = fm, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge))
-    sols_n = _fit_chain(steps, ps; exec = ExecutionConfig())
+    specs = (FringeClosure(; model = fm, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge))
+    sols_n = _fit_chain(specs, ps; exec = ExecutionConfig())
     ad_n = last(sols_n)
 
     @testset "3-scan full chain: structure, determinism, coherence" begin
@@ -66,7 +66,7 @@ end
         @test ad_n.info.t_pass > 0
 
         # θ is bit-deterministic across runs.
-        sols4 = _fit_chain(steps, ps; exec = ExecutionConfig())
+        sols4 = _fit_chain(specs, ps; exec = ExecutionConfig())
         for (s4, s) in zip(sols4, sols_n)
             @test parent(gains(s4)) == parent(gains(s))
         end
@@ -75,9 +75,9 @@ end
         @test _worst_parallel_coherence(_calibrate_chain(sols_n, ps)) > 0.99
     end
 
-    @testset "BaselineFringeFit then AdhocPhase (no bandpass)" begin
+    @testset "fringe fit then AdhocPhase (no bandpass)" begin
         fr_fs, ad_fs = _fit_chain(
-            (BaselineFringeFit(; model = fm, gauge), AdhocPhase(adhoc; gauge)), ps;
+            (FringeClosure(; model = fm, gauge), AdhocPhase(adhoc; gauge)), ps;
             exec = ExecutionConfig(),
         )
         components = vcat(fr_fs.components, ad_fs.components)
@@ -87,7 +87,7 @@ end
         # so full coherence is NOT reached — but the delay/rate/adhoc solve must
         # still be sane (all θ finite, per-scan SNRs strong).
         @test all(c -> all(isfinite, c.params), components)
-        @test all(>(10), filter(isfinite, fr_fs.info.scan_snr))
+        @test all(>(10), FP.fringe_snr_table(fit(FringeSearch(), ps)).max_snr)
     end
 
     @testset "fit never writes the caller's data" begin

@@ -559,13 +559,13 @@ end
     sol = CAL.CalibrationSolution(model, layout, geom, θ, (;))
 
     # One component per model entry, in model order, each labeled by its path.
-    @test sol.name === :solution && sol.step == "" && sol.info == (;)
+    @test sol.name === :solution && sol.spec == "" && sol.info == (;)
     @test [c.path for c in sol.components] == [(:phase, :atmos), (:phase, :bp), (:phase, :rl), (:logamp, :amp)]
     @test length(sol) == 4 && collect(sol) == sol.components
     @test haskey(sol, :phase) && haskey(sol, :logamp, :amp) && !haskey(sol, :other) && !haskey(sol, :phase, :nope)
-    # The θ form records `info`, `name` and `step` as given.
-    noted = CAL.CalibrationSolution(model, layout, geom, θ, (; note = 1); name = :fringe, step = "S")
-    @test noted.info == (; note = 1) && noted.name === :fringe && noted.step == "S"
+    # The θ form records `info`, `name` and `spec` as given.
+    noted = CAL.CalibrationSolution(model, layout, geom, θ, (; note = 1); name = :fringe, spec = "S")
+    @test noted.info == (; note = 1) && noted.name === :fringe && noted.spec == "S"
     c = first(sol.components)
     @test c isa CAL.ComponentFit
     @test c.component == model.phase.atmos
@@ -640,7 +640,7 @@ end
     @test vec(parent(dl)) == θsbd[lsbd.plantree.phase.sbd.delay.range]
     @test parent(gains(ssbd)) ≈ CAL.evaluate_gains(lsbd, θsbd)
 
-    # Solutions of different steps may hold components of the same path; one
+    # Solutions of different fits may hold components of the same path; one
     # solution may not.
     atmos2 = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.GlobalFrequency(), Feed = CAL.SharedFeeds())
     model2 = CAL.GainModel(phase = (atmos = atmos2,))
@@ -772,7 +772,7 @@ end
             Frequency = CAL.ChannelBlocks(1), prior = (Ti = ou,),
         )
         @test_throws "prior key AntennaName is not an axis" comp(; both..., prior = (AntennaName = ou,))
-        @test_throws "a keyed prior must be a RandomWalkPrior or OUPrior" comp(; both..., prior = (Ti = iid,))
+        @test_throws "a keyed prior must be a RandomWalkPrior, OUPrior or CARMAPrior" comp(; both..., prior = (Ti = iid,))
         @test_throws "a keyed prior needs at least one axis" comp(; both..., prior = (;))
     end
 

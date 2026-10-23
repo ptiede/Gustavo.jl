@@ -1,9 +1,9 @@
 # ── Verbs: fit / calibrate ───────────────────────────────────────────────────
 #
-#     sol = fit(step, ps)                          # solve
+#     sol = fit(solver, ps)                        # solve
 #     calibrate!(sol, ps; post)                    # apply in place
 #
-# `fit` runs a solve step's `solve` on the data. `calibrate!` divides each
+# `fit` runs a solver's `solve` on the data. `calibrate!` divides each
 # Measurement Set by the solution's gains, then applies its flags and `post`.
 
 # A solve's parallelism is across scan groups and, within a group, across
@@ -21,36 +21,35 @@ function _check_blas_threads()
 end
 
 """
-    fit(step::SolveStep, ps::ProcessingSet; exec = ExecutionConfig()) -> CalibrationSolution
-    fit(step::SolveStep, ms::MeasurementSet; exec = ExecutionConfig()) -> CalibrationSolution
+    fit(solver::AbstractSolver, ps::ProcessingSet; exec = ExecutionConfig()) -> CalibrationSolution
+    fit(solver::AbstractSolver, ms::MeasurementSet; exec = ExecutionConfig()) -> CalibrationSolution
 
-Solve `step` ([`BaselineFringeFit`](@ref), [`Bandpass`](@ref),
-[`AdhocPhase`](@ref) or a third-party `SolveStep`) on `ps`, one scan group
+Solve `solver` ([`Bandpass`](@ref), [`AdhocPhase`](@ref) or a third-party
+`AbstractSolver`) on `ps`, one scan group
 (`groupby(ps, ByScan())`) at a time. `ps` is never modified. Narrow the data by
 subsetting `ps` first. A Measurement Set is fit as a processing set of one.
 
-To fit a step on data an earlier solution has corrected, correct the data
-first: [`calibrate!`](@ref) on data read into memory, or inside
-[`mapsets`](@ref).
+To fit data an earlier solution has corrected, correct the data first:
+[`calibrate!`](@ref) on data read into memory, or inside [`mapsets`](@ref).
 
-The step carries its own gauge ([`step_gauge`](@ref)); `fit` resolves its
+The solver carries its own gauge ([`solver_gauge`](@ref)); `fit` resolves its
 station codes against the data's antenna table. `exec` (an
 [`ExecutionConfig`](@ref)) supplies the schedulers and progress callback.
 
 The solution is a [`CalibrationSolution`](@ref): the solved components, the
-step's diagnostics in `sol.info`, and the step, its gauge included, as text in
-`sol.step`.
+solver's diagnostics in `sol.info`, and the solver, its gauge included, as
+text in `sol.spec`.
 """
 function StatsAPI.fit(
-        step::SolveStep, ps::XRadio.ProcessingSet;
+        solver::AbstractSolver, ps::XRadio.ProcessingSet;
         exec::ExecutionConfig = ExecutionConfig(),
     )
     _check_blas_threads()
-    return _run_step(step, exec, ps)
+    return _run_solver(solver, exec, ps)
 end
 
-StatsAPI.fit(step::SolveStep, ms::XRadio.MeasurementSet; kwargs...) =
-    fit(step, _one_member(ms); kwargs...)
+StatsAPI.fit(solver::AbstractSolver, ms::XRadio.MeasurementSet; kwargs...) =
+    fit(solver, _one_member(ms); kwargs...)
 
 """
     calibrate(sol::CalibrationSolution, ps::ProcessingSet; exec = ExecutionConfig(), kwargs...) -> ProcessingSet
@@ -77,14 +76,14 @@ calibrate(
 Apply a fitted solution, or any selection of one (`sol[:phase]`,
 `sol[:phase, :mbd]`, `filter(pred, sol)`), to the data in place: each
 Measurement Set has the gains of the components `sol` holds divided out
-(`V → V / (g_a·conj(g_b))`, `w → w·|g_a g_b|²`), then the flags of its step
-and `post` applied. `post` modifies the Measurement Set it is handed and
-returns it. To keep the data, use [`calibrate`](@ref); `copy` and `read` of
+(`V → V / (g_a·conj(g_b))`, `w → w·|g_a g_b|²`), then the flags `sol`
+records and `post` applied. `post` modifies the Measurement Set it is handed
+and returns it. To keep the data, use [`calibrate`](@ref); `copy` and `read` of
 in-memory data share its arrays.
 
 ```julia
 gauge = PinAntenna("AA")
-fr = fit(BaselineFringeFit(; gauge), ps)
+fr = fit(FringeClosure(; gauge), fit(FringeSearch(), ps))
 mapsets(groupby(ps, ByScan())) do g
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
     fit(AdhocPhase(; gauge), g)
@@ -93,9 +92,9 @@ end
 
 A gain cell that is zero or non-finite gives a NaN visibility and a flag
 (`flag_bad = true`) or leaves the sample as it is (`flag_bad = false`).
-`apply_flags` flags the baselines of each (station, scan) a step of `sol` left
-unconstrained (the fringe step records these): their gains are identity, so the
-data would pass through uncalibrated. The flagged samples keep their
+`apply_flags` flags the baselines of each (station, scan) the fit behind `sol`
+left unconstrained (the fringe fit records these): their gains are identity, so
+the data would pass through uncalibrated. The flagged samples keep their
 visibilities and weights.
 
 The solution need not have been fit on this data, nor on its sampling. Each
@@ -194,8 +193,8 @@ function _flag_absent_antennas!(ms::XRadio.MeasurementSet, win::GeometryWindow, 
     return ms
 end
 
-# The unconstrained (station name, feed, scan id) triples the step of `sol`
-# records, as a lookup set, `nothing` when it records none.
+# The unconstrained (station name, feed, scan id) triples `sol` records,
+# as a lookup set, `nothing` when it records none.
 function _solution_flag_sets(sol::CalibrationSolution)
     info = sol.info
     haskey(info, :flagged_ant) || return nothing
@@ -242,51 +241,51 @@ end
 
 # ── The runner ───────────────────────────────────────────────────────────────
 
-# Solve one step: compile its model against the data's geometry, then run its
+# Run one solver: compile its model against the data's geometry, then run its
 # `solve` over the scan groups.
-function _run_step(st::SolveStep, exec::ExecutionConfig, ps::XRadio.ProcessingSet)
+function _run_solver(solver::AbstractSolver, exec::ExecutionConfig, ps::XRadio.ProcessingSet)
     geom = DataGeometry(ps)
     spec = (; geom)
-    unresolved = step_gauge(st)
+    unresolved = solver_gauge(solver)
     gauge = isnothing(unresolved) ? nothing : resolve_gauge(unresolved, geom.antennas)
     groups = groupby(ps, XRadio.ByScan())
     sizes = [_group_bytes(g) for g in values(groups)]
-    ctx = _step_context(st, spec, gauge, groups, sizes, exec)
+    ctx = _solver_context(solver, spec, gauge, groups, sizes, exec)
     t0 = time_ns()
-    info = solve(st, ctx)
+    info = solve(solver, ctx)
     info isa NamedTuple || throw(
         ArgumentError(
-            "`solve(::$(nameof(typeof(st))), ctx)` must return a NamedTuple of " *
+            "`solve(::$(nameof(typeof(solver))), ctx)` must return a NamedTuple of " *
                 "diagnostics, got a $(typeof(info))",
         ),
     )
     return CalibrationSolution(
         ctx.model, ctx.layout, geom, ctx.θ, (; _run_info(groups, exec)..., _with_timing(info, ctx, t0)...);
-        name = provides(st), step = sprint(show, st; context = :limit => true),
+        name = solution_name(solver), spec = sprint(show, solver; context = :limit => true),
     )
 end
 
-# A step compiles its own model against the run's geometry and may compile no
+# A solver compiles its own model against the run's geometry and may compile no
 # components at all; it still runs, with nothing to solve. The model is resolved
-# against the run's stations here, so the context and the solution's step text
-# hold the per-station trees the solve uses. A step that does not declare
+# against the run's stations here, so the context holds the per-station trees
+# the solve uses. A solver that does not declare
 # `supports_antenna_heterogeneity` is handed uniform models only; anything else
 # is rejected before any data is read.
-function _step_context(st::SolveStep, spec, gauge, groups, sizes, exec)
+function _solver_context(solver::AbstractSolver, spec, gauge, groups, sizes, exec)
     antennas = spec.geom.antennas
-    model = Calibration.resolve(model_components(st, spec), antennas, spec.geom)
-    supports_antenna_heterogeneity(st) ||
-        Calibration.require_antenna_uniform(model, antennas, string(nameof(typeof(st))))
+    model = Calibration.resolve(model_components(solver, spec), antennas, spec.geom)
+    supports_antenna_heterogeneity(solver) ||
+        Calibration.require_antenna_uniform(model, antennas, string(nameof(typeof(solver))))
     layout = plan_parameters(model, antennas, spec.geom; require_nonempty = false)
     return SolveContext(
         model, layout, spec.geom, zeros(layout.nθ), gauge, length(antennas),
-        groups, sizes, exec, provides(st), _PassTiming[],
+        groups, sizes, exec, solution_name(solver), _PassTiming[],
     )
 end
 
-# A step's diagnostics plus `t_pass`, the wall time of its `solve`, and
+# A solver's diagnostics plus `t_pass`, the wall time of its `solve`, and
 # `timing`, a `DimStack` over `Scan` of each group's `decode`/`work` seconds
-# summed over the step's passes.
+# summed over the solver's passes.
 function _with_timing(info::NamedTuple, ctx::SolveContext, t0::UInt64)
     ngroups = length(ctx.groups)
     decode, work = zeros(ngroups), zeros(ngroups)
@@ -307,7 +306,7 @@ function _group_scan_names(groups)
     return names
 end
 
-# The run's diagnostics, which `sol.info` holds beside the step's own.
+# The run's diagnostics, which `sol.info` holds beside the solver's own.
 function _run_info(groups, exec)
     return (;
         nscan = length(groups),

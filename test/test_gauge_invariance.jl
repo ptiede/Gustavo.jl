@@ -1,5 +1,5 @@
 # A gauge fixes only what the data cannot: every baseline's gain product
-# g_a[fa]·conj(g_b[fb]) must not depend on which gauge a step uses, nor, beyond
+# g_a[fa]·conj(g_b[fb]) must not depend on which gauge a fit uses, nor, beyond
 # rounding, on the visibilities' precision.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
@@ -26,12 +26,12 @@ end
 # `AdhocPhase` (with each smoother) on data the first corrected. The bandpass is
 # converged well inside its default tolerance, at which two gauges stop at
 # different points within 0.01 of a standard error.
-function _fit_each_step(ps, gauge)
-    fringe = fit(BaselineFringeFit(; gauge), ps)
+function _fit_each(ps, gauge)
+    fringe = _fringe_fit(ps, FringeClosure(; gauge))
     corrected = calibrate(fringe, ps; flag_bad = false, apply_flags = false)
     bandpass = Bandpass(; gauge, smoother = Gustavo.Fring.JointSmoother(; tolerance = 1.0e-6))
     return (;
-        fringe, pooled = fit(BaselineFringeFit(; rounds = 2, gauge), ps),
+        fringe, pooled = _fringe_fit(ps, FringeClosure(; model = default_fringe_model(rel_time = CAL.GlobalTime()), gauge)),
         bandpass = fit(bandpass, corrected), adhoc = fit(AdhocPhase(; gauge), corrected),
         adhoc_joint = fit(AdhocPhase(Gustavo.Fring.JointKalmanSmoother(); gauge), corrected),
     )
@@ -39,13 +39,13 @@ end
 
 @testset "gauge and precision invariance" begin
     ps64, _ = _build_fringe_ps(; eltype = ComplexF64, nscans = 4, noise = 0.5)
-    zs = _fit_each_step(ps64, ZeroSumPhase())
+    zs = _fit_each(ps64, ZeroSumPhase())
 
     @testset "baseline products do not depend on the gauge" begin
-        pinned = _fit_each_step(ps64, PinAntenna([3, 1]))
+        pinned = _fit_each(ps64, PinAntenna([3, 1]))
         # The bandpass gauge enters only through a phase prior, which the default model lacks.
-        for step in keys(zs)
-            dphase, dlogamp = _baseline_product_difference(zs[step], pinned[step])
+        for name in keys(zs)
+            dphase, dlogamp = _baseline_product_difference(zs[name], pinned[name])
             @test dphase < 1.0e-6
             @test dlogamp < 1.0e-4
         end
@@ -53,9 +53,9 @@ end
 
     @testset "Float32 visibilities agree with Float64" begin
         ps32, _ = _build_fringe_ps(; eltype = ComplexF32, nscans = 4, noise = 0.5)
-        zs32 = _fit_each_step(ps32, ZeroSumPhase())
-        for step in keys(zs)
-            dphase, dlogamp = _baseline_product_difference(zs[step], zs32[step])
+        zs32 = _fit_each(ps32, ZeroSumPhase())
+        for name in keys(zs)
+            dphase, dlogamp = _baseline_product_difference(zs[name], zs32[name])
             @test dphase < 1.0e-3
             @test dlogamp < 1.0e-5
         end

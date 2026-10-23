@@ -180,13 +180,24 @@ end
 # and no flags are applied.
 _precal(sol, data) = calibrate(sol, data; flag_bad = false, apply_flags = false)
 
-# Each step fit in turn on `data`, with the solutions of the steps before it
-# divided out as `_precal` divides them.
-function _fit_chain(steps, data; kwargs...)
+# The fringe fit of `data`: every scan searched with `search`, then `closure`
+# over all of them.
+_fringe_fit(data, closure = FringeClosure(); search = FringeSearch(), kwargs...) =
+    fit(closure, fit(search, data; kwargs...); kwargs...)
+
+# One fit of a chain: a `FringeClosure` (with the default search) or a
+# `(search, closure)` pair is a fringe fit of the data.
+_fit_one(spec, data; kwargs...) = fit(spec, data; kwargs...)
+_fit_one(closure::FringeClosure, data; kwargs...) = _fringe_fit(data, closure; kwargs...)
+_fit_one((search, closure)::Tuple{FringeSearch, FringeClosure}, data; kwargs...) = _fringe_fit(data, closure; search, kwargs...)
+
+# Each fit in turn on `data`, with the solutions of the ones before it divided
+# out as `_precal` divides them.
+function _fit_chain(specs, data; kwargs...)
     sols = CalibrationSolution[]
-    for st in steps
+    for spec in specs
         isempty(sols) || (data = _precal(last(sols), data))
-        push!(sols, fit(st, data; kwargs...))
+        push!(sols, _fit_one(spec, data; kwargs...))
     end
     return sols
 end

@@ -128,7 +128,7 @@ end
     fixed = CALpf.RandomWalkPrior(; order = 2, σ = 0.01)
     @test FRpf._estimate_hypers(fixed, [y], [ws[1]], [x[1]]) === fixed
     @test FRpf._estimate_hypers(hyper, [Float32.(y)], [Float32.(ws[1])], [x[1]]).σ isa Float32
-    @test_throws "takes no level groups" FRpf._estimate_hypers(hyper, [y], [ws[1]], [x[1]]; level = [1])
+    @test_throws "takes no mean" FRpf._estimate_hypers(hyper, [y], [ws[1]], [x[1]]; mean = [1])
     @test_throws "no block has 2 usable segments" FRpf._estimate_hypers(hyper, [fill(NaN, 150)], [ws[1]], [x[1]])
     @test_throws "RandomWalkPrior σ must be fixed" FRpf._estimate_map(hyper, y, ws[1], x[1])
 end
@@ -162,17 +162,17 @@ end
         @test FRpf._estimate_map(prior, y, w, x) ≈ mvec + K[:, o] * (C \ d) rtol = 1.0e-6
         @test FRpf._random_walk_loglik(y, w, x, m, σ; init) ≈ -(logdet(C) + d' * (C \ d) + length(o) * log(2π)) / 2 rtol = 1.0e-8
         # The level beside the walk is its GLS estimate under the walk's covariance.
-        L = only(FRpf._estimate_levels(prior, [y], [w], [x], [1], 1))
+        L = FRpf._estimate_level(prior, y, w, x)
         @test L ≈ sum(C \ d) / sum(C \ ones(length(o))) rtol = 1.0e-6
         @test all(isnan, FRpf._estimate_map(prior, fill(NaN, n), w, x))
         # A σ hyperprior resolves with the level integrated out and keeps the init.
-        est = FRpf._estimate_hypers(CALpf.RandomWalkPrior(; order = m, σ = LogNormal(log(σ), 1.0), init), [y], [w], [x]; level = [1])
+        est = FRpf._estimate_hypers(CALpf.RandomWalkPrior(; order = m, σ = LogNormal(log(σ), 1.0), init), [y], [w], [x]; mean = [1])
         @test CALpf.is_fixed_hyper(est.σ) && est.init == init
     end
 
     flat = CALpf.RandomWalkPrior(; order = 2, σ = 1.0e-11)
     @test !FRpf._proper_prior(flat) && FRpf._proper_prior(CALpf.RandomWalkPrior(; σ = 0.1, init = Normal(0, 1)))
-    @test_throws "a level is not identifiable" FRpf._estimate_levels(flat, [y], [w], [x], [1], 1)
+    @test_throws "a mean is not identifiable" FRpf._estimate_level(flat, y, w, x)
     @test_throws "needs an init of length 2" CALpf.RandomWalkPrior(; order = 2, σ = 1.0, init = MvNormal(zeros(3), Diagonal(ones(3))))
     @test_throws "got a Normal" CALpf.RandomWalkPrior(; order = 2, σ = 1.0, init = Normal(0, 1))
     @test_throws "must be `nothing`, a Normal or an MvNormal" CALpf.RandomWalkPrior(; σ = 1.0, init = 0.3)
@@ -209,6 +209,50 @@ end
     )
 end
 
+# The CARMA autocovariance at the lags `Δs`, by residues over the distinct
+# autoregressive roots `ar` (with the moving-average roots `ma`), variance `σ2`.
+function _carma_cov(ar, ma, σ2, Δs)
+    a(s) = prod(s - r for r in ar)
+    da(s, k) = prod((s - r for (j, r) in pairs(ar) if j != k); init = one(s))
+    b(s) = prod((1 - s / r for r in ma); init = one(s))
+    c(Δ) = real(sum(b(r) * b(-r) * exp(r * abs(Δ)) / (da(r, k) * a(-r)) for (k, r) in pairs(ar)))
+    return σ2 .* c.(Δs) ./ c(0.0)
+end
+
+@testset "CARMA prior: one block and its hyperparameters" begin
+    rng = Random.Xoshiro(8)
+    n = 40
+    x = collect(range(1.0e9, 1.039e9; length = n))
+    y = 0.3 .* sin.(range(0, 4π; length = n)) .+ 0.05 .* randn(rng, n)
+    y[11] = NaN
+    w = fill(400.0, n)
+    period, scale, ma_scale, σ = 1.0e7, 3.0e7, 2.0e5, 0.3
+    carma = CALpf.CARMAPrior(;
+        ar = (CALpf.ComplexRoots(; period, scale),), ma = (CALpf.RealRoot(; scale = ma_scale),), σ,
+    )
+    # The MAP is the dense posterior mean of the process at those roots.
+    r = complex(-1 / scale, 2π / period)
+    K = [only(_carma_cov([r, conj(r)], [complex(-1 / ma_scale)], σ^2, [a - b])) for a in x, b in x]
+    o = findall(isfinite, y)
+    dense = K[:, o] * ((K[o, o] + Diagonal(inv.(w[o]))) \ y[o])
+    @test FRpf._estimate_map(carma, y, w, x) ≈ dense rtol = 1.0e-8
+    @inferred FRpf._estimate_map(carma, y, w, x)
+
+    # Fixed hyperparameters are kept; a concentrated hyperprior pins its own and
+    # the rest are estimated.
+    @test FRpf._estimate_hypers(carma, [y], [w], [x]) === carma
+    spec = CALpf.CARMAPrior(;
+        ar = (CALpf.ComplexRoots(; period = LogNormal(log(period), 0.01), scale = LogNormal(log(scale), 1.0)),),
+        ma = (CALpf.RealRoot(; scale = ma_scale),), σ = LogNormal(log(0.3), 1.0),
+    )
+    fit = FRpf._estimate_hypers(spec, [y], [w], [x]; mean = [1])
+    @test FRpf._hyper_count(fit) == 0
+    @test only(fit.ar).period ≈ period rtol = 0.03
+    @test only(fit.ma).scale == ma_scale
+    @test 0.1 < fit.σ < 1.0
+    @test_throws "hyperparameters must be fixed" FRpf._estimate_map(spec, y, w, x)
+end
+
 @testset "fitting a block in place" begin
     rng = Random.Xoshiro(12)
     n = 30
@@ -229,7 +273,11 @@ end
     @inferred FRpf._random_walk_loglik(y, w, x, 2, 1.0e-11)
     @inferred FRpf._estimate_hypers(CALpf.RandomWalkPrior(; order = 2, σ = LogNormal(-25.0, 1.0)), [y], [w], [x])
     @inferred FRpf._estimate_hypers(CALpf.OUPrior(; scale = LogNormal(16.0, 1.0), σ = LogNormal(-1.0, 1.0)), [y], [w], [x])
-    @inferred FRpf._estimate_levels(CALpf.OUPrior(; scale = 1.0e7, σ = 0.2), [y], [w], [x], [1], 1)
+    @inferred FRpf._estimate_level(CALpf.OUPrior(; scale = 1.0e7, σ = 0.2), y, w, x)
+    @inferred FRpf._estimate_hypers(
+        CALpf.CARMAPrior(; ar = (CALpf.RealRoot(; scale = LogNormal(16.0, 1.0)), CALpf.ComplexRoots(; period = 1.0e7, scale = LogNormal(17.0, 1.0))), σ = LogNormal(-1.0, 1.0)),
+        [y], [w], [x],
+    )
 end
 
 @testset "hyperparameters estimated over the blocks the caller pools" begin
@@ -249,25 +297,25 @@ end
     # type-II MAP over the blocks, each block's level integrated out.
     ou = CALpf.OUPrior(; scale = LogNormal(log(1.0e7), 1.0), σ = LogNormal(log(0.2), 1.0))
     level = [1, 2, 3]
-    est = FRpf._estimate_hypers(ou, ys, ws, xs; level)
+    est = FRpf._estimate_hypers(ou, ys, ws, xs; mean = level)
     @test CALpf.is_fixed_hyper(est.scale) && CALpf.is_fixed_hyper(est.σ)
     τ_lo, τ_hi = FRpf._group_ou_tau_bounds(xs)
     τ, σ2 = FRpf._map_ou_hypers(
         ys, ws, xs, ou.scale, ou.σ;
-        τ_lo, τ_hi, σ2_seed = FRpf._init_track_var(reduce(vcat, ys), reduce(vcat, ws)), levels = level,
+        τ_lo, τ_hi, σ2_seed = FRpf._init_track_var(reduce(vcat, ys), reduce(vcat, ws)), mean = level,
     )
     @test est.scale ≈ τ && est.σ ≈ sqrt(σ2)
     # Zero-mean, the offsets 1, 2, 3 read as signal and inflate σ.
     @test FRpf._estimate_hypers(ou, ys, ws, xs).σ > 2 * est.σ
     # The resolved prior follows the ripple rather than flattening it.
-    L = FRpf._estimate_levels(est, ys, ws, xs, level, 3)
+    L = FRpf._estimate_mean(est, ys, ws, xs, FRpf._level_design(level, ys))
     @test L ≈ [1, 2, 3] atol = 0.15
     @test std(FRpf._estimate_map(est, ys[1] .- L[1], ws[1], xs[1])) > 0.1
 
     # A block without data does not enter the estimate; with no data at all
     # there is nothing to estimate from.
     empty = fill(NaN, 64)
-    @test FRpf._estimate_hypers(ou, [ys; [empty]], [ws; [ws[1]]], [xs; [xs[1]]]; level = [level; 1]) == est
+    @test FRpf._estimate_hypers(ou, [ys; [empty]], [ws; [ws[1]]], [xs; [xs[1]]]; mean = [level; 1]) == est
     @test_throws "no block carries data" FRpf._estimate_hypers(ou, [empty], ws[1:1], xs[1:1])
 end
 
@@ -285,10 +333,8 @@ end
     b = sum(sum(Σinv(i) * ys[i][usable(i)]) for i in 1:2)
     c = sum(sum(Σinv(i)) for i in 1:2)
     prior = CALpf.OUPrior(; scale = τ, σ = sqrt(σ2))
-    L = FRpf._estimate_levels(prior, ys, ws, xs, [1, 1], 1)
+    L = FRpf._estimate_mean(prior, ys, ws, xs, FRpf._level_design([1, 1], ys))
     @test only(L) ≈ b / c rtol = 1.0e-10
-    # A level no block holds has no estimate.
-    @test isnan(FRpf._estimate_levels(prior, ys, ws, xs, [1, 1], 2)[2])
 
     # REML: the likelihood with the level integrated out under a flat prior.
     rs = [inv.(w) for w in ws]
@@ -305,13 +351,63 @@ end
     @test FRpf._estimate_map(prior, y1, ws[1], xs[1]) ≈ _dense_ou_map(y1, ws[1], xs[1], τ, σ2) rtol = 1.0e-8
 end
 
+@testset "a level per block and a shared delay under a zero-mean OU" begin
+    rng = Random.Xoshiro(9)
+    τ, σ2 = 2.0e7, 0.03
+    xs = [collect(range(1.0e9, 1.06e9; length = 12)), collect(range(1.08e9, 1.14e9; length = 9))]
+    ws = [100.0 .+ 50.0 .* rand(rng, length(x)) for x in xs]
+    x0, Δ = 1.07e9, 7.0e7
+    slope = 3.0
+    ys = [[0.4, -0.9][i] .+ slope .* (xs[i] .- x0) ./ Δ .+ 0.2 .* sin.(xs[i] ./ 1.0e7) .+ randn(rng, length(xs[i])) ./ sqrt.(ws[i]) for i in 1:2]
+    design = [(; cols = FRpf.SVector(i, 3), rows = [FRpf.SVector(1.0, (x - x0) / Δ) for x in xs[i]]) for i in 1:2]
+
+    # Dense GLS and REML over both blocks, each block's covariance K + W⁻¹.
+    Σ = cat((_ou_cov(xs[i], τ, σ2) + Diagonal(inv.(ws[i])) for i in 1:2)...; dims = (1, 2))
+    H = reduce(vcat, [permutedims(Float64[i == 1, i == 2, (x - x0) / Δ]) for i in 1:2 for x in xs[i]])
+    y = reduce(vcat, ys)
+    C = H' * (Σ \ H)
+    β = C \ (H' * (Σ \ y))
+    prior = CALpf.OUPrior(; scale = τ, σ = sqrt(σ2))
+    @test FRpf._estimate_mean(prior, ys, ws, xs, design) ≈ β rtol = 1.0e-8
+    r = y .- H * β
+    reml = -(logdet(Σ) + r' * (Σ \ r) + length(y) * log(2π)) / 2 - logdet(C) / 2
+    @test FRpf._ou_loglik(ys, [inv.(w) for w in ws], xs, design; τ, σ2) ≈ reml rtol = 1.0e-10
+
+    # A level alone is the design of ones.
+    @test FRpf._ou_loglik(ys, [inv.(w) for w in ws], xs, [1, 1]; τ, σ2) ≈
+        FRpf._ou_loglik(ys, [inv.(w) for w in ws], xs, FRpf._level_design([1, 1], ys); τ, σ2)
+
+    # The data must determine the mean.
+    flat = [(; cols = FRpf.SVector(1, 2), rows = fill(FRpf.SVector(1.0, 1.0), length(x))) for x in xs]
+    @test_throws "do not determine the mean" FRpf._estimate_mean(prior, ys, ws, xs, flat)
+end
+
+@testset "branches across blocks follow a shared delay" begin
+    xs = [collect(1.0:10.0), collect(11.0:20.0)]
+    truth = [0.5 .* x for x in xs]
+    ws = [ones(10), ones(10)]
+    lifts() = [copy(truth[1]), truth[2] .+ 2π]
+    # The second block's mean lies 5 rad above the first's, which a shared level
+    # takes for a branch; a shared delay predicts it.
+    delayed = [(; cols = FRpf.SVector(1, 2), rows = [FRpf.SVector(1.0, x / 20) for x in xs[i]]) for i in 1:2]
+    @test FRpf._align_branches!(lifts(), ws, delayed)[2] ≈ truth[2]
+    @test FRpf._align_branches!(lifts(), ws, FRpf._level_design([1, 1], xs))[2] ≈ truth[2] .- 2π
+
+    # Within a block, the filter integrates out a level and slope.
+    model = FRpf.OUModel(5.0, 0.01)
+    wrapped = rem2pi.(2.5 .* xs[1], RoundNearest)
+    rows = [FRpf.SVector(1.0, x / 10) for x in xs[1]]
+    lift = first(FRpf._branch_filter(model, wrapped, fill(1.0e-4, 10), xs[1]; mean = rows).histories).lift
+    @test diff(lift) ≈ fill(2.5, 9)
+end
+
 @testset "a track's prior energy" begin
     rng = MersenneTwister(315)
     n = 20
     x = sort!(1.0e9 .+ 1.0e6 .* (1:n) .+ 3.0e5 .* rand(rng, n))
     y = randn(rng, n)
     track(prior; pieces = [1:n], level = nothing, nlevel = 0) =
-        (; slots = collect(1:n), x, pieces, prior, level, nlevel, active = trues(length(pieces)))
+        (; slots = collect(1:n), x, pieces, prior, level, nlevel, delay = nothing, du = nothing, active = trues(length(pieces)))
     energy(prior; kw...) = FRpf._track_energy(FRpf._track_layout(track(prior; kw...)), prior, y)
 
     # A random walk of order 1 from a flat start: the sum of its increments' energies.
@@ -326,7 +422,7 @@ end
     c = dot(one_, P * y) / dot(one_, P * one_)
     E, L = energy(CALpf.OUPrior(; scale = τ, σ))
     @test E ≈ dot(y .- c, P * (y .- c)) / 2 rtol = 1.0e-10
-    @test L[1] ≈ c rtol = 1.0e-10
+    @test L.levels[1] ≈ c rtol = 1.0e-10
 
     # Levels shared by pieces: each level at the value minimizing the energy.
     pieces = [1:8, 9:14, 15:20]
@@ -339,7 +435,7 @@ end
     Eref = sum(dot(y[p] .- Lref[g], Ps[j] * (y[p] .- Lref[g])) / 2 for (j, (p, g)) in enumerate(zip(pieces, level)))
     E, L = energy(CALpf.OUPrior(; scale = τ, σ); pieces, level, nlevel = 2)
     @test E ≈ Eref rtol = 1.0e-10
-    @test [L[1], L[2]] ≈ Lref rtol = 1.0e-10
+    @test [L.levels[1], L.levels[2]] ≈ Lref rtol = 1.0e-10
 
     # A stiff second-order walk from a flat start, against a Kalman filter in
     # 256-bit arithmetic with a start variance far above any step's.

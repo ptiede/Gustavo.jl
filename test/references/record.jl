@@ -119,9 +119,9 @@ end
 """
     write_solutions(path, sols; attrs)
 
-Write the step solutions `sols` (a NamedTuple in run order) as a Zarr store:
-the shared geometry under `axes`, the gains of every step composed under
-`gains`, and per step (`steps/<i>_<name>`) its own gains, its components'
+Write the solutions `sols` (a NamedTuple in run order) as a Zarr store:
+the shared geometry under `axes`, the gains of every solution composed under
+`gains`, and per solution (`steps/<i>_<name>`) its own gains, its components'
 parameters and its diagnostics. Gains are `V_corr = V / (g_a * conj(g_b))` in
 the MSv4 phase sense.
 """
@@ -139,7 +139,7 @@ function write_solutions(path, sols::NamedTuple; attrs = Dict{String, Any}())
     write_array!(root, "gains", parent(composed_gains(sols)), GAIN_DIMS)
     sg = zgroup(root, "steps")
     for (i, (name, sol)) in enumerate(pairs(sols))
-        g = zgroup(sg, "$(i)_$(name)"; attrs = Dict{String, Any}("step" => sol.step))
+        g = zgroup(sg, "$(i)_$(name)"; attrs = Dict{String, Any}("spec" => sol.spec))
         write_array!(g, "gains", parent(gains(sol)), GAIN_DIMS)
         write_components!(zgroup(g, "components"), sol)
         write_info!(g, "info", sol.info)

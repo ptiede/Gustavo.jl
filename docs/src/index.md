@@ -6,7 +6,7 @@ CurrentModule = Gustavo
 
 Gustavo is a modular VLBI fringe-fitting and station-gain calibration package.
 Data are MSv4: an XRadio.jl `ProcessingSet` of `MeasurementSet`s, each holding
-one spectral window. Gustavo fits calibration steps on them, reading one scan
+one spectral window. Gustavo fits calibration models to them, reading one scan
 group at a time, and applies the solutions to the data.
 
 Gustavo is experimental and unregistered: the API changes freely and without
@@ -53,15 +53,29 @@ ps = open(ProcessingSet, "track.ps.zarr")       # lazy: no visibilities read
 gauge = PinAntenna("AA")                        # reference antenna
 sols = mapsets(groupby(ps, ByScan())) do g      # g: one scan, in memory
     foreach(normalize_by_autocorrelations!, values(g))
-    fr = fit(BaselineFringeFit(; gauge), g)
+    fr = fit(FringeClosure(; gauge), fit(FringeSearch(), g))
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
     ad = fit(AdhocPhase(; gauge), g)
     return (; fr, ad)
 end
 ```
 
-Each solve step takes its own `gauge`, which fixes the station values the data
-leave undetermined. A bandpass is fit over the
+A fringe fit is two fits: `fit(FringeSearch(), g)` measures every baseline's
+delay and rate in each scan of `g`, and `fit(FringeClosure(), dets)` solves the
+station delays and rates those detections determine. Each solve takes its own
+`gauge`, which fixes the station values the data leave undetermined. A model
+whose terms span scans, such as one inter-feed delay for the whole track,
+closes over every scan's detections at once:
+
+```julia
+per_scan = mapsets(groupby(ps, ByScan())) do g
+    foreach(normalize_by_autocorrelations!, values(g))
+    return fit(FringeSearch(), g)
+end
+dets = reduce(vcat, values(per_scan))
+fr = fit(FringeClosure(; model = default_fringe_model(; rel_time = GlobalTime()), gauge), dets)
+```
+ A bandpass is fit over the
 whole track: each scan group is fringe-corrected and averaged over the scan
 (`average(g, ByScan())`, one sample per scan), and the bandpass is fit on the
 averaged groups, so one scan group is in memory at a time. The bandpass
@@ -70,7 +84,7 @@ solution applies to the unaveraged data:
 ```julia
 averaged = mapsets(groupby(ps, ByScan())) do g
     foreach(normalize_by_autocorrelations!, values(g))
-    fr = fit(BaselineFringeFit(; gauge), g)
+    fr = fit(FringeClosure(; gauge), fit(FringeSearch(), g))
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
     return average(g, ByScan())
 end
@@ -79,7 +93,7 @@ bp = fit(Bandpass(; gauge), ProcessingSet(averaged))
 sols = mapsets(groupby(ps, ByScan())) do g
     foreach(normalize_by_autocorrelations!, values(g))
     calibrate!(bp, g; flag_bad = false, apply_flags = false)
-    fr = fit(BaselineFringeFit(; gauge), g)
+    fr = fit(FringeClosure(; gauge), fit(FringeSearch(), g))
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
     return (; fr, ad = fit(AdhocPhase(; gauge), g))
 end
@@ -104,15 +118,16 @@ end
 **Data.** A `ProcessingSet` holds Measurement Sets, each one spectral window
 with dimension-named visibility, weight and flag layers. `fit` groups it by
 scan (`groupby(ps, ByScan())`) and reads one group at a time, so an opened
-store stays on disk until a step reads it. Narrow the data by subsetting the
+store stays on disk until a fit reads it. Narrow the data by subsetting the
 `ProcessingSet` before fitting.
 
-**Solve steps.** A solve step fits one gain model. The built-in steps are
-[`BaselineFringeFit`](@ref) (delay / rate / phase search),
+**Solves.** Each solve fits one gain model. The built-in ones are
+[`FringeClosure`](@ref) (station delay and rate, from the baseline detections
+of a [`FringeSearch`](@ref Gustavo.Fring.FringeSearch)),
 [`Bandpass`](@ref) (time-stable station bandpass), and
 [`AdhocPhase`](@ref) (per-integration atmospheric phase). [`fit`](@ref)
-solves one step on the data it is given and never modifies that data. To fit
-a step on data an earlier solution has corrected, correct the data first,
+solves one on the data it is given and never modifies that data. To fit on
+data an earlier solution has corrected, correct the data first,
 either on data held in memory or inside [`mapsets`](@ref), which reads one
 unit of data (a Measurement Set, or a scan group of a `groupby` result) at a
 time and hands it to a function.
@@ -164,9 +179,10 @@ window; flag a `ProcessingSet` member by member. A range no channel of a
 window falls in selects nothing there. FITSFiles also exports `End`; with it
 loaded, write `DimensionalData.End`.
 
-**Models.** Each solve step separates WHAT it solves — a gain model, built
+**Models.** Each fit separates WHAT it solves — a gain model, built
 from the vocabulary in [Specifying gain models](@ref specifying-models) —
-from HOW it is solved (the step's options, or a pluggable smoother object).
+from HOW it is solved (the specification's options, or a pluggable smoother
+object).
 
 **Verbs.** [`fit`](@ref) solves and returns a
 [`CalibrationSolution`](@ref Gustavo.Calibration.CalibrationSolution) without
@@ -177,15 +193,15 @@ and leaves the data passed to it as it was. `flag_bad = false, apply_flags =
 false` divides out the gains without flagging, as suits data handed to a later
 fit.
 
-**Solutions.** A solution is what one step fit: a list of component fits
+**Solutions.** A solution is what one fit solved: a list of component fits
 (`sol.components`), each a [`ComponentFit`](@ref Gustavo.Calibration.ComponentFit)
-holding its path in the step's model, its `GainComponent` and its parameters as
-a labeled `DimArray` (`c.params`), and the step's diagnostics (`sol.info`).
+holding its path in the fitted model, its `GainComponent` and its parameters as
+a labeled `DimArray` (`c.params`), and the fit's diagnostics (`sol.info`).
 Any selection is itself a solution that applies, plots and differences like
 the whole: `sol[:phase]`, `sol[:phase, :mbd]` or `filter(pred, sol)`.
 [`gains`](@ref Gustavo.Calibration.gains) evaluates a selection's complex
-station gains as a labeled `DimArray`. Steps compose through the data: apply
-one solution with [`calibrate!`](@ref) and fit the next step on the result. [`save_solution`](@ref Gustavo.Calibration.save_solution) /
+station gains as a labeled `DimArray`. Fits compose through the data: apply
+one solution with [`calibrate!`](@ref) and fit the next model on the result. [`save_solution`](@ref Gustavo.Calibration.save_solution) /
 [`load_solution`](@ref Gustavo.Calibration.load_solution) round-trip it through
 a Zarr store, as they do a collection of solutions such as the per-scan fits
 `mapsets` returns (`OrderedDict(k => s.fr for (k, s) in sols)`), keys and order
@@ -197,9 +213,9 @@ Three seams, in increasing scope:
 
 - a new **gain term** — a physical effect in the forward model:
   [Authoring a new gain term](@ref authoring-terms);
-- a new **smoother** behind an existing step — a different way to solve the
+- a new **smoother** behind an existing solver — a different way to solve the
   same model: see
   [`AbstractAdhocSmoother`](@ref Gustavo.Fring.AbstractAdhocSmoother);
-- a new **solve step** — a solver that reads the data through
+- a new **solver** — one that reads the data through
   [`each_group`](@ref Gustavo.each_group):
-  [Authoring a solve step](@ref authoring-steps).
+  [Authoring a solver](@ref authoring-solvers).

@@ -16,23 +16,23 @@
         # only through the relative weighting of the stages that combine
         # baselines (station solve, bandpass, adhoc).
         gauge = PinAntenna(1)
-        steps = (
-            BaselineFringeFit(; gauge), Bandpass(; gauge),
+        specs = (
+            FringeClosure(; gauge), Bandpass(; gauge),
             AdhocPhase(; model = default_adhoc_model(; prior = nothing), gauge),
         )
-        base = let sols = _fit_chain(steps, ps)
+        base = let sols = _fit_chain(specs, ps)
             (sols, _calibrate_chain(sols, ps))
         end
         scaled = Gustavo.materialize(ps)
         foreach(ms -> scale_weights!(ms, ws), values(scaled))
-        fixd = let sols = _fit_chain(steps, scaled)
+        fixd = let sols = _fit_chain(specs, scaled)
             (sols, _calibrate_chain(sols, scaled))
         end
-        bfr, ffr = base[1][1].info, fixd[1][1].info
-        for i in eachindex(bfr.det_snr, ffr.det_snr)
-            s = scale(bfr.det_ant_a[i]) * scale(bfr.det_ant_b[i])
-            @test ffr.det_snr[i] ≈ sqrt(s) * bfr.det_snr[i] rtol = 1.0e-4
-            @test ffr.det_delay[i] ≈ bfr.det_delay[i]
+        for (bd, fd) in zip(fit(FringeSearch(), ps), fit(FringeSearch(), scaled)), (a, b) in lookup(bd, AntennaPair)
+            s = scale(a) * scale(b)
+            cell = AntennaPair(At((a, b)))
+            @test fd.snr[cell] ≈ sqrt(s) .* bd.snr[cell] rtol = 1.0e-4
+            @test fd.delay[cell] ≈ bd.delay[cell]
         end
         # …so the solution only shifts at the level of the re-weighted stages.
         @test all(
