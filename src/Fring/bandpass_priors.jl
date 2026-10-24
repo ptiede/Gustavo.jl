@@ -164,6 +164,14 @@ function _piece_coordinates(::Union{RandomWalkPrior, CARMAPrior}, x)
 end
 _piece_coordinates(::OUPrior, x) = float.(x), 1.0
 
+# The smallest median sample spacing and the largest span of the pieces with
+# coordinates `us` of units `hs`, over those with two samples or more.
+function _piece_extent(us, hs)
+    Δ = minimum(median(abs.(diff(u))) * h for (u, h) in zip(us, hs) if length(u) >= 2)
+    W = maximum(abs(last(u) - first(u)) * h for (u, h) in zip(us, hs) if length(u) >= 2)
+    return Δ, W
+end
+
 # `f(model)` with `model(h)` the resolved `prior`'s state-space model of state
 # dimension `dim` (a chain's, `Val(_statedim(prior))`) on coordinates of unit
 # `h`, in element type `T`.
@@ -246,14 +254,25 @@ function _expected_group_log_prior(model, g, ::Type{T}) where {T}
     if !isnothing(start)
         μ0, P0 = start
         n, m, M = g.start
-        out -= n * logdet(2π * P0) / 2 + tr(P0 \ (M - μ0 * m' - m * μ0' + n * μ0 * μ0')) / 2
+        out -= _gaussian_energy(n, P0, M - μ0 * m' - m * μ0' + n * μ0 * μ0')
     end
     for (Δ, n, V) in g.steps
         A, Q = transition(model, Δ, T)
         G = hcat(SMatrix{D, D, T}(I), -A)
-        out -= n * logdet(2π * Q) / 2 + tr(Q \ (G * V * G')) / 2
+        out -= _gaussian_energy(n, Q, G * V * G')
     end
     return out
+end
+
+# `n` Gaussian samples' negative log density under covariance `Σ`, given their
+# summed second moment `S` about the mean: `n·logdet(2πΣ)/2 + tr(Σ⁻¹S)/2`. A
+# covariance that is singular to rounding, as a CARMA model's is where an MA root
+# cancels an AR root, gives the samples no density: `Inf`.
+function _gaussian_energy(n, Σ, S)
+    T = float(eltype(Σ))
+    C = cholesky(Symmetric(Σ); check = false)
+    issuccess(C) || return T(Inf)
+    return (n * (size(Σ, 1) * log(2T(π)) + logdet(C)) + tr(C \ S)) / 2
 end
 
 # The moments `mom` of `chains` (`_chain_moments`) summed where the prior's terms
@@ -452,6 +471,25 @@ _hyper_specs(f::ComplexRoots) = (f.period, f.scale)
 _hyper_specs(p::CARMAPrior) = (_factor_specs(p.ar)..., _factor_specs(p.ma)..., p.σ)
 _factor_specs(::Tuple{}) = ()
 _factor_specs(fs::Tuple) = (_hyper_specs(first(fs))..., _factor_specs(Base.tail(fs))...)
+
+# The support of the hyperparameters `spec` gives as densities, over their logs,
+# on pieces of sample spacing `Δ` and span `W` (`_piece_extent`): a `CARMAPrior`'s
+# scales lie in `[Δ, W]` and its periods in `[2Δ, W]`, beyond which the samples
+# do not measure them (a shorter period aliases to a longer one).
+_log_hyper_box(spec, Δ, W) = fill((-Inf, Inf), _hyper_count(spec))
+function _log_hyper_box(spec::CARMAPrior, Δ, W)
+    T = float(promote_type(typeof(Δ), typeof(W)))
+    box = NTuple{2, T}[]
+    for f in (spec.ar..., spec.ma...)
+        f isa ComplexRoots && !is_fixed_hyper(f.period) && push!(box, log.((2Δ, W)))
+        is_fixed_hyper(f.scale) || push!(box, log.((Δ, W)))
+    end
+    is_fixed_hyper(spec.σ) || push!(box, (T(-Inf), T(Inf)))
+    return box
+end
+
+_in_box(lθ, box) = all(((x, (lo, hi)),) -> lo <= x <= hi, zip(lθ, box))
+_into_box(lθ, box) = [clamp(x, lo, hi) for (x, (lo, hi)) in zip(lθ, box)]
 
 # `p` with its hyperparameters, in `_hyper_specs` order, replaced by the tuple
 # `values`.

@@ -335,9 +335,12 @@ As for a random walk, the coordinate is first rescaled by its median spacing,
 so a step's ``Q`` is well conditioned however slow the roots are. The prior is
 proper, so a level beside it is estimated, and integrated out for the
 hyperparameters, as for OU, and every hyperparameter given as a density is
-estimated by the same type-II MAP over the logs. The search starts from the
-scales and periods spread evenly in log between one sample spacing and ten
-times the span, and has no bounds: the hyperprior must be proper.
+estimated by the same type-II MAP over the logs. The hyperprior is restricted
+to the hyperparameters the samples measure: a scale between the smallest median
+sample spacing ``\Delta`` and the largest piece's span ``W``, and a period
+between ``2\Delta`` and ``W``, below which it aliases to a longer one. The
+search starts from the scales and periods spread evenly in log over
+``[\Delta, W]``.
 
 **References.**
 B. C. Kelly, A. C. Becker, M. Sobolewska, A. Siemiginowska, and P. Uttley
@@ -592,7 +595,21 @@ largest data curvature, follows the ratio of the objective's actual decrease
 to the model's predicted one (Madsen, Nielsen & Tingleff 2004).
 
 The solve starts each slot at its own gain estimate given every other gain and
-``S``, repeated with ``S`` re-solved (Salvini & Wijnholds 2014). The MAP stops
+``S``, repeated with ``S`` re-solved (Salvini & Wijnholds 2014). A phase
+spectrum ``\rho(\nu)`` added to one feed of every station leaves every
+same-feed product unchanged and turns each product pairing that feed with
+another by ``\pm\rho``. Only those products measure it, and the estimates the
+rounds take are led by the same-feed products, so the rounds leave it where it
+began; a delay there of ``1/B`` across a band ``B`` winds those products a full
+turn, and the MAP would start where their χ² is concave in ``\rho``. Each feed
+after the first is therefore searched for one delay common to every station,
+``\rho = 2\pi\tau(\nu - \bar\nu)``, against the products pairing it with an
+earlier feed: with ``S`` profiled, a product group ``J`` lowers the χ² by
+``|\sum_c e^{\mp i\rho(\nu_c)} \bar u_c r_c|^2 / \sum_c w_c |u_c|^2``, which on
+noise alone is χ² with two degrees of freedom. The delay is applied when the
+best trial's false-alarm probability over the grid is below ``10^{-4}``, and
+the solve warns otherwise. The search works on feed indices, so it is the same
+for circular, linear and mixed feeds. The MAP stops
 when the undamped step would move no gain by more than `tolerance` of its
 standard error from the data, or on a plateau: when an accepted step lowers the
 negative log posterior by less than ``\mathrm{tolerance}^2/2``, what a step of
@@ -615,7 +632,7 @@ mode (Laplace; Tierney & Kadane 1986). Each EM map
    preconditioner's curvature: held-``S``, except on the track constants, which
    keep their prior variance;
 3. maximizes, for each track, its expected log prior density plus its
-   hyperprior over the log hyperparameters,
+   hyperprior over the log hyperparameters, within the hyperprior's support,
 
 ```math
 \psi' = \arg\max_\psi\; \log p(\psi) + \sum_k \Big(-\tfrac12 \log\det(2\pi Q_k)
@@ -645,7 +662,9 @@ would, where ``-\tfrac12 \log\det Q_k`` grows without bound as ``\sigma \to 0``.
 EM converges linearly, slowly where the data barely determine a direction, as
 for the array-wide R–L spectrum, so the maps are accelerated by SQUAREM
 (Varadhan & Roland 2008, scheme S3) over the log hyperparameters. EM stops once
-a SQUAREM cycle moves no log hyperparameter by more than `tolerance`. The
+a SQUAREM cycle moves no gain by more than `tolerance` of its standard error:
+the gains are what the solve is for, and the hyperparameters they no longer
+depend on, which the data barely measure, would take EM many more cycles. The
 hyperparameters start from type-II MAP on each track alone, taking each slot's
 own estimate given every other gain and ``S`` as an independent measurement;
 for a phase track that start is summed over the branch histories.

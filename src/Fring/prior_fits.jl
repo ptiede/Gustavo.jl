@@ -136,13 +136,15 @@ function _estimate_hypers(prior::CARMAPrior, ys, ws, xs; mean = nothing, branche
     )
     problems = [_random_walk_problem(ys[i], ws[i], xs[i]) for i in usable]
     yus = [_masked(ys[i], ws[i]) for i in usable]
-    lo, hi = _group_ou_tau_bounds([xs[i] for i in usable])
+    us = [u for (_, u, _) in problems]
+    Δ, W = _piece_extent(us, last.(problems))
+    box = _log_hyper_box(prior, Δ, W)
     σ0 = sqrt(_init_track_var(reduce(vcat, yus), reduce(vcat, ws[usable])))
     neglp = _CARMANegLogPost(
-        prior, yus, first.(problems), getindex.(problems, 2), last.(problems),
-        isnothing(mean) ? nothing : mean[usable], branches,
+        prior, yus, first.(problems), us, last.(problems),
+        isnothing(mean) ? nothing : mean[usable], branches, box,
     )
-    lθ, _ = _nelder_mead(neglp, _carma_seed(prior, lo, hi, σ0))
+    lθ, _ = _nelder_mead(neglp, _into_box(_carma_seed(prior, Δ, W, σ0), box))
     return _with_log_hypers(prior, lθ)
 end
 
@@ -166,8 +168,8 @@ end
 # set up for the filter (masked values `ys`, variances `rs`, coordinates `us` of
 # unit `hs`): their pooled marginal likelihood (with `mean` integrated out; over
 # the 2π branches, with `branches`) and the hyperprior density over the logs,
-# which is proper and so bounds the search.
-struct _CARMANegLogPost{P, Y, R, U, H, L}
+# restricted to the support the blocks measure, `box` (`_log_hyper_box`).
+struct _CARMANegLogPost{P, Y, R, U, H, L, B}
     prior::P
     ys::Y
     rs::R
@@ -175,9 +177,11 @@ struct _CARMANegLogPost{P, Y, R, U, H, L}
     hs::H
     mean::L
     branches::Bool
+    box::B
 end
 
 function (f::_CARMANegLogPost)(lθ)
+    _in_box(lθ, f.box) || return convert(eltype(lθ), Inf)
     p = _with_log_hypers(f.prior, lθ)
     S = eltype(eltype(f.rs))
     dim = Val(_statedim(f.prior))

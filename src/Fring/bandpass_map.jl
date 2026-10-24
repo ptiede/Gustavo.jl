@@ -611,9 +611,11 @@ once the undamped step moves no slot by `tolerance` of its standard error from
 the data, once an accepted step lowers the objective by less than
 `tolerance²/2` (a plateau), or once no damping lowers it.
 
-Returns `(; converged, stalled, change, worst, iterations, krylov, μ)`: the
-largest weighted change of the last step and its slot, the steps and Krylov
-iterations taken, and the final damping.
+Returns `(; converged, stalled, change, worst, iterations, krylov, μ, objective,
+weights)`: the largest weighted change of the last step and its slot, the steps
+and Krylov iterations taken, the final damping and objective, and each slot's
+data weight at the last linearization, the inverse square of its standard
+error.
 """
 function _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ = 1.0e-3, exact::Bool = false)
     (; cells, fitted, tracks, acting, track_layouts) = ctx
@@ -624,6 +626,7 @@ function _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ 
     change, worst, stalled, converged, near = Inf, 0, false, false, false
     ν, iterations, krylov = 2.0, 0, 0
     O0 = objective(x.amp, x.phase)
+    local lin
     for _ in 1:max_iterations
         iterations += 1
         systems, lin = _profiled_systems(x, ctx, priors, S; exact)
@@ -688,7 +691,7 @@ function _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ 
         near = change < tolerance
         exact |= change < 1
     end
-    return (; converged, stalled, change, worst, iterations, krylov, μ, objective = O0)
+    return (; converged, stalled, change, worst, iterations, krylov, μ, objective = O0, weights = lin.W)
 end
 
 """
@@ -755,15 +758,20 @@ end
 # hyperparameters as densities) with those hyperparameters at the maximum of the
 # chains' expected log prior density under the state moments `mom`
 # (`_chain_moments`) plus the hyperprior, and the largest change of a log
-# hyperparameter.
+# hyperparameter. The hyperprior is restricted to the support the chains'
+# pieces measure (`_log_hyper_box`). It gives the objective a curvature of at
+# least about one per log hyperparameter squared, so agreement to `atol` nats
+# places each log hyperparameter within about `√(2·atol)` of the maximum.
 function _m_step(spec, prior, chains, mom)
     sums = _moment_sums(chains, mom)
+    box = _log_hyper_box(spec, _piece_extent([ch.u for ch in chains], [ch.h for ch in chains])...)
     function f(lθ)
+        _in_box(lθ, box) || return convert(eltype(lθ), Inf)
         v = _expected_log_prior(_with_log_hypers(spec, lθ), sums, eltype(lθ)) + _log_hyperprior(spec, lθ)
         return isfinite(v) ? -v : oftype(v, Inf)
     end
     lθ0 = _log_hypers(spec, prior)
-    lθ1, _ = _nelder_mead(f, lθ0; atol = 1.0e-10)
+    lθ1, _ = _nelder_mead(f, _into_box(lθ0, box); atol = 1.0e-6)
     return _with_log_hypers(spec, lθ1), maximum(abs, lθ1 .- lθ0)
 end
 
@@ -787,7 +795,7 @@ end
 
 """
     _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_iterations, linsolve)
-        -> (; solved, converged, evaluations)
+        -> (; solved, converged, evaluations, unconverged, moved)
 
 The hyperparameters the priors give as densities by MAP-EM, accelerated by
 SQUAREM (Varadhan & Roland 2008, scheme S3) over their logs, written into
@@ -797,17 +805,22 @@ followed by `_em_hypers!`.
 Each cycle takes two EM maps from `ψ₀`, extrapolates along them by the step
 `α = −‖r‖/‖v‖`, bounded by a length that grows after each step it bounds, and
 takes one EM map from there. EM is slow where the data barely determine a
-direction, so a plain EM step understates the distance to its fixed point; the
-cycles stop once one moves no log hyperparameter by more than `tolerance`, or
-after `max_em_iterations` EM maps. `solved` is the MAP at the starting
-hyperparameters, and the result's the MAP at the final ones.
+direction, so a plain EM step understates the distance to its fixed point. The
+cycles stop once one moves no gain by `tolerance` of its standard error, from
+the MAP it starts at to the MAP at the extrapolated hyperparameters (`moved`,
+the largest such change), or after `max_em_iterations` EM maps: the
+hyperparameters the gains no longer depend on are left where EM has taken them.
+`solved` is the MAP at the starting hyperparameters, and the result's the MAP at
+the final ones; `unconverged` counts the EM maps whose MAP stopped at
+`max_iterations`.
 """
 function _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_iterations, linsolve)
     est = _estimated(ctx)
-    evaluations = 0
+    evaluations, unconverged = 0, 0
     function em_map(ψ)
         _set_log_hypers!(priors, ctx, est, ψ)
         solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, solved.μ, exact = true)
+        unconverged += !(solved.converged || solved.stalled)
         _em_hypers!(priors, x, ctx; linsolve, tolerance)
         evaluations += 1
         return _log_hyper_vector(priors, ctx, est)
@@ -817,8 +830,9 @@ function _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_ite
     _em_hypers!(priors, x, ctx; linsolve, tolerance)
     evaluations += 1
     ψ1 = _log_hyper_vector(priors, ctx, est)
-    αmax, converged = 1.0, false
+    αmax, converged, moved = 1.0, false, Inf
     while evaluations + 2 <= max_em_iterations
+        start = map(copy, x)
         ψ2 = em_map(ψ1)
         r, v = ψ1 - ψ0, ψ2 - 2ψ1 + ψ0
         α = norm(v) > 0 ? -norm(r) / norm(v) : -1.0
@@ -827,9 +841,9 @@ function _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_ite
         ψ′ = ψ0 - 2α * r + α^2 * v
         ψ3 = em_map(ψ′)
         bounded && (αmax *= 4)
-        step = maximum(abs, ψ3 - ψ0; init = 0.0)
+        moved, _ = _largest_weighted_change(x.amp .- start.amp, x.phase .- start.phase, solved.weights)
         ψ0 = ψ3
-        if step < tolerance
+        if moved < tolerance
             converged = true
             break
         end
@@ -837,7 +851,7 @@ function _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_ite
     end
     _set_log_hypers!(priors, ctx, est, ψ0)
     solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, solved.μ, exact = true)
-    return (; solved, converged, evaluations)
+    return (; solved, converged, evaluations, unconverged, moved)
 end
 
 # `_posterior_system` of one observable, its structure kept in `cache[obs]` while

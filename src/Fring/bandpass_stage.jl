@@ -498,10 +498,11 @@ windows. Stations may have different models.
 Each MAP solve stops once no gain moves by more than `tolerance` of its standard
 error, or once a step lowers the negative log posterior by less than
 `tolerance²/2` (a plateau, where the posterior is flat along the gains still
-moving), and warns if `max_iterations` steps pass first. The hyperparameters
-are fit to within `tolerance` in their logs, with a warning if
-`max_em_iterations` EM maps pass first. An unconverged solve still depends on
-its starting point.
+moving), and warns if `max_iterations` steps pass first. The hyperparameter
+fit stops once a cycle of it moves no gain by more than `tolerance` of its
+standard error, with a warning if `max_em_iterations` EM maps pass first; the
+hyperparameters the gains no longer depend on are not converged. An
+unconverged solve still depends on its starting point.
 
 Each step of the MAP solve is a linear system over every gain, solved
 matrix-free by `linsolve`, a Krylov method of

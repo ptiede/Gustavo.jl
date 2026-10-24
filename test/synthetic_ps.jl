@@ -31,6 +31,8 @@ keywords always give the same data.
   samples are 30 s apart and scans start `scan_gap` seconds apart, by default
   two samples after the previous one ends.
 - `noise`: σ per visibility sample, against a signal amplitude of 2.5.
+- `different_feed_amplitude`: the signal amplitude of a different-feed product
+  relative to a same-feed one.
 - `weight`: every sample's weight; by default the inverse variance per real
   component, `2 / noise^2`, or `1e3` without noise.
 - `polarizations`: the stored correlation labels.
@@ -52,7 +54,7 @@ keywords always give the same data.
 """
 function _build_fringe_ps(;
         nant = 4, nspw = 2, nchan = 8, ntime = 12, nscans = 1,
-        scan_gap = nothing, noise = nothing,
+        scan_gap = nothing, noise = nothing, different_feed_amplitude = 1.0,
         polarizations = ["RR", "RL", "LR", "LL"], receptors = ("R", "L"),
         ref_freq = 230.0e9, chan_bw = 2.0e6, spw_sep = 1.0e8,
         seed = 1234,
@@ -160,7 +162,7 @@ function _build_fringe_ps(;
                 2π * (delay[a, fa] - delay[bb, fb]) * (f - f0) +
                 2π * (rate[a, fa] - rate[bb, fb]) * (tsec[ti] - t0) +
                 (screen[a, fa, ti, s] - screen[bb, fb, ti, s]) + dbp + ddt
-            z = A0 * exp(dla) * cis(ph)
+            z = A0 * (fa == fb ? 1.0 : different_feed_amplitude) * exp(dla) * cis(ph)
             noise === nothing || (z += noise * complex(randn(rng), randn(rng)) / sqrt(2))
             vis[p, c, bl, ti] = z
         end

@@ -184,6 +184,9 @@ and the moving-average roots raise the spectrum's tail, so that the process is
 
 Every `scale`, `period` and `σ` is a positive number, held fixed, or a
 hyperprior estimated by type-II MAP as for [`OUPrior`](@ref), over their logs.
+An estimated `scale` is confined to between one sample spacing `Δ` and the
+span of the longest piece `W`, and a `period` to `[2Δ, W]`: the samples do not
+measure them beyond.
 """
 struct CARMAPrior{A <: Tuple, M <: Tuple, G} <: AbstractPrior
     ar::A

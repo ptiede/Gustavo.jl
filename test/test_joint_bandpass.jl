@@ -816,6 +816,12 @@ end
         @test all(p -> p isa typeof(spec).name.wrapper && FP._hyper_count(p) == 0, only(amp_priors))
         rep = FP._bandpass_track_report(nothing, nothing; amp_priors = only(amp_priors))
         @test rep.amp_priors === only(amp_priors)
+
+        θ1 = zeros(l.nθ)
+        @test_logs (:warn, r"MAP solves the hyperparameter fit made did not converge in 1 iterations") match_mode = :any FP.solve_joint_bandpass!(
+            θ1, results, geom, FP._bandpass_blocks(setup(l), θ1, :phase), FP._bandpass_blocks(setup(l), θ1, :logamp);
+            gauge = PinAntenna(1), max_iterations = 1,
+        )
     end
 end
 
@@ -934,6 +940,60 @@ end
         # The shape keeps only the ripple.
         @test maximum(abs, shape_φ[1, f, :, 1, a]) < 0.2
     end
+end
+
+# The same-feed products do not see a delay added to the second feed of every
+# station, so only the weak different-feed products measure it, whatever the
+# feeds' basis.
+@testset "JointSmoother: a delay common to every station's second feed" begin
+    nant, nspw, nchan, chan_bw, spw_sep, ref_freq = 5, 4, 32, 4.0e6, 1.28e8, 43.0e9
+    freqs = [ref_freq + (b - 1) * spw_sep + (c - 1) * chan_bw for b in 1:nspw for c in 1:nchan]
+    f0 = sum(freqs) / length(freqs)
+    rng = MersenneTwister(4242)
+    τ = 8.0e-9 .+ 0.5e-9 .* randn(rng, nant)
+    bandpass = zeros(nant, 2, length(freqs))
+    for a in 1:nant, f in 1:2
+        bandpass[a, f, :] .= 0.3 .* sin.(2π .* (freqs .- f0) ./ (60 * chan_bw) .+ 2π * rand(rng))
+    end
+    for a in 1:nant
+        bandpass[a, 2, :] .+= 2π .* τ[a] .* (freqs .- f0)
+    end
+    ou = CAL.OUPrior(; scale = LogNormal(log(4 * chan_bw), 1.0), σ = LogNormal(log(0.1), 1.5))
+    shape = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior = ou)
+    delay = GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = PerFeed())
+    solver = Bandpass(; model = CAL.GainModel(; phase = (; delay, shape)), gauge = PinAntenna(1))
+    build(; kw...) = first(
+        _build_fringe_ps(;
+            nant, nspw, nchan, chan_bw, spw_sep, ref_freq, nscans = 4, noise = 0.25, antenna_gains = false,
+            bandpass, kw...,
+        )
+    )
+    # The largest error of any station's phase between its feeds, about its band mean.
+    function rl_error(sol)
+        g = gains(sol)
+        @test collect(lookup(g, Frequency)) ≈ freqs
+        worst = 0.0
+        for name in lookup(g, AntennaName)
+            a = parse(Int, name[2:end])
+            z = g[Ti = 1, AntennaName = At(name), Feed = At(2)] ./ g[Ti = 1, AntennaName = At(name), Feed = At(1)]
+            e = angle.(z) .- (bandpass[a, 2, :] .- bandpass[a, 1, :])
+            worst = max(worst, maximum(abs, rem2pi.(e .- angle(sum(cis, e)), RoundNearest)))
+        end
+        return worst
+    end
+    # A threaded BLAS adds its own warning to every fit.
+    blas = BLAS.get_num_threads()
+    BLAS.set_num_threads(1)
+    @testset "$basis feeds" for (basis, kw) in (
+            ("circular", (;)),
+            ("linear", (; receptors = ("X", "Y"), polarizations = ["XX", "XY", "YX", "YY"])),
+            ("mixed", (; receptor_order = Dict("A3" => ["X", "Y"], "A4" => ["X", "Y"]))),
+        )
+        sol = @test_logs fit(solver, build(; different_feed_amplitude = 0.03, kw...))
+        @test rl_error(sol) < 0.2
+    end
+    @test_logs (:warn, r"found no delay of feed 2") match_mode = :any fit(solver, build(; different_feed_amplitude = 0.0))
+    BLAS.set_num_threads(blas)
 end
 
 # ── A gauge imposed inside the solve ─────────────────────────────────────────
@@ -1078,6 +1138,9 @@ end
     gtrue = exp.(complex.(0.1 .* randn(rng, nant, 2, 1, nchan), 0.6 .* randn(rng, nant, 2, 1, nchan)))
     # The cross-hand source terms carry ~1e-3 of the parallel hands' information;
     # a step on every gain at once resolves the phase between feeds they measure.
+    # At unit weights they are far below the noise those weights state, so the
+    # start's delay search between the feeds detects nothing.
+    undetected = (:warn, r"found no delay of feed 2")
     S = [(p in (2, 3) ? 0.03 : 1.0) * (0.5 + rand(rng)) * cis(2π * rand(rng)) for _ in 1:4, _ in bl_pairs, p in eachindex(feeds)]
     results = _joint_scan_accumulators(gtrue, S, fill(1, nant, 4), bl_pairs, feeds, geom)
     # Every station's phase between feeds, referenced to its circular band mean.
@@ -1092,7 +1155,7 @@ end
     for gauge in (PinAntenna(1), ZeroSumPhase())
         θ = zeros(l.nθ)
         pb, ab = FP._bandpass_blocks(setup, θ, :phase), FP._bandpass_blocks(setup, θ, :logamp)
-        @test_logs FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge, max_iterations = 30, tolerance = 1.0e-10)
+        @test_logs undetected FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge, max_iterations = 30, tolerance = 1.0e-10)
         φ = only(pb).θ
         @test rl_error([φ[1, f, c, 1, a] for a in 1:nant, f in 1:2, c in 1:nchan]) < 1.0e-8
     end
@@ -1113,7 +1176,7 @@ end
         θ = zeros(lp.nθ)
         pb, ab = FP._bandpass_blocks(setup_p, θ, :phase), FP._bandpass_blocks(setup_p, θ, :logamp)
         plb, alb = FP._bandpass_level_blocks(setup_p, θ, :phase), FP._bandpass_level_blocks(setup_p, θ, :logamp)
-        @test_logs FP.solve_joint_bandpass!(
+        @test_logs undetected FP.solve_joint_bandpass!(
             θ, results, geom, pb, ab; phase_level_blocks = plb, amp_level_blocks = alb,
             gauge, max_iterations = 60, tolerance = 1.0e-10,
         )

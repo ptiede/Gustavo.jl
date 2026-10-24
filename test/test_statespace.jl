@@ -93,6 +93,16 @@ end
     @test_throws "ComplexRoots period must be positive" ComplexRoots(; period = -1.0, scale = 1.0)
 end
 
+@testset "CARMA: an MA root cancelling an AR root gives the states no density" begin
+    prior = CARMAPrior(; ar = (RealRoot(; scale = 10.0), ComplexRoots(; period = 5.0, scale = 0.8)), ma = (RealRoot(; scale = 10.0),), σ = 1.0)
+    model = FRs._carma_model(Val(3), prior, 1.0, Float64)
+    moments = (;
+        h = 1.0, start = (4, zero(FRs.SVector{3, Float64}), FRs.SMatrix{3, 3, Float64}(I)),
+        steps = [(1.0, 10, FRs.SMatrix{6, 6, Float64}(I))],
+    )
+    @test FRs._expected_group_log_prior(model, moments, Float64) == -Inf
+end
+
 @testset "RTS smoother == GP posterior mean; variance shrinks" begin
     rng = MersenneTwister(0x0B0B)
     n = 14

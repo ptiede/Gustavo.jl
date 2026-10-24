@@ -18,7 +18,7 @@ import LinearSolve
 import SelectedInversion
 using OrderedCollections: OrderedDict
 using DensityInterface: logdensityof
-using Distributions: LogNormal
+using Distributions: LogNormal, Chisq, ccdf
 using ..Calibration: ComponentPlan, GeometryWindow,
     _flatten_components, _component_leaf, _feed_node, nfeed_blocks, _block_index, component_is_per_scan,
     _segment_lookup, _frequency_segment_lookup, _time_segment_lookup,

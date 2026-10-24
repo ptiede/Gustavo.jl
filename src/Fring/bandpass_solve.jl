@@ -206,7 +206,11 @@ at the value the prior prefers, and on any other track one slot is held. The
 solve
 
 1. starts every slot at its own estimate given every other gain and `S`,
-   repeated with `S` re-solved (StEFCal-style rounds);
+   repeated with `S` re-solved (StEFCal-style rounds), then searches each feed
+   after the first for one delay common to every station against the products
+   pairing it with an earlier feed, which the same-feed products the rounds
+   follow do not see, and applies it where it is detected
+   (`_align_feed_delays!`);
 2. seeds each prior's hyperparameters by type-II MAP on its track alone, and
    puts each phase track on the 2π branches most probable under it
    (`_choose_branches!`), once: the data are fringe-corrected, so phase steps
@@ -224,7 +228,7 @@ The MAP stops once the undamped step moves no gain by `tolerance` of its
 standard error from the data, once an accepted step lowers the objective by less
 than `tolerance²/2`, or once no damping lowers it, with a warning if that step
 would have moved a gain by `tolerance` or more. EM stops once a SQUAREM cycle
-moves no log hyperparameter by more than `tolerance`. Each warns when it runs out
+moves no gain by `tolerance` of its standard error. Each warns when it runs out
 of iterations (`max_iterations` per MAP, `max_em_iterations` EM maps); an
 unconverged solve still depends on its starting point. The passes over the data
 run on `executor`. docs/src/priors.md ("The bandpass posterior") derives each
@@ -371,6 +375,13 @@ function solve_joint_bandpass!(
         χ2, χ2_before = _profiled_chi2(gains_of(ℓ, φ), cells, executor), χ2
         χ2_before - χ2 < 1.0e-5 * χ2 && break
     end
+    if fitted.phase && geom.nfeed > 1
+        compid, _, _ = _joint_bandpass_graph(data, layout, ids)
+        _align_feed_delays!(
+            φ, ℓ, cells, [I[2] for (_, I) in slot], [segs[k].x[I[3]] for (k, I) in slot],
+            compid, pinned, track_pins.phase, tracks.phase,
+        )
+    end
 
     # Each acting track's prior with its hyperparameters resolved, seeded by
     # type-II MAP on the track alone from every slot's own estimate, and each
@@ -405,10 +416,12 @@ function solve_joint_bandpass!(
     )
     x = (; phase = φ, amp = ℓ)
     solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve)
-    em_converged = true
+    em_converged, em_unconverged, em_moved = true, 0, 0.0
     if !isempty(_estimated(ctx))
+        em_unconverged = !(solved.converged || solved.stalled)
         em = _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_iterations, linsolve)
-        solved, em_converged = em.solved, em.converged
+        solved, em_converged, em_moved = em.solved, em.converged, em.moved
+        em_unconverged += em.unconverged
     end
     (; converged, stalled, change, worst) = solved
     free_amp = fitted.amp ? _split_free_amplitudes!(ℓ, jl.slot_pairs[measured], free.amp .| track_pins.amp, tracks.amp) : NamedTuple[]
@@ -443,8 +456,12 @@ function solve_joint_bandpass!(
             "their phase is held more than π/2 from their data, by a phase prior or the gauge, so the " *
             "amplitude that fits them best is zero. Give the amplitude a prior."
     end
-    em_converged || @warn "the joint bandpass hyperparameters did not converge in $max_em_iterations EM " *
-        "iterations; raise `JointSmoother(; max_em_iterations)`"
+    em_converged || @warn "the joint bandpass hyperparameter fit stopped at $max_em_iterations EM " *
+        "iterations with its last cycle still moving a gain by $em_moved of its standard error, against " *
+        "a tolerance of $tolerance; raise `JointSmoother(; max_em_iterations)`"
+    em_unconverged > 0 && @warn "$em_unconverged of the joint bandpass MAP solves the hyperparameter fit " *
+        "made did not converge in $max_iterations iterations, so the hyperparameters were fit to " *
+        "unconverged gains; raise `JointSmoother(; max_iterations)`"
     stalled || converged || @warn "the joint bandpass solve did not converge in " *
         "$max_iterations iterations: the last step moved a gain by $change of its standard error$location, " *
         "against a tolerance of $tolerance; raise `JointSmoother(; max_iterations)`"
@@ -499,6 +516,80 @@ function solve_joint_bandpass!(
     delay_writers = [_joint_level_writer(delay[a], delays[a]) for a in 1:nant]
     _write_joint_bandpass!(phase_blocks, amp_blocks, gains, layout, level_writers, delay_writers)
     return (; phase = results[1], amp = results[2])
+end
+
+# The false-alarm probability under which `_align_feed_delays!` takes a feed's
+# delay as detected.
+const _FEED_DELAY_PFA = 1.0e-4
+
+# Adding one phase spectrum `ρ(ν)` to feed `f` of every station leaves every
+# same-feed product unchanged and turns each product pairing `f` with another
+# feed by `±ρ`, so only those products measure it. For each feed `f` after the
+# first, in turn, this searches one delay `τ`, `ρ = 2πτ(ν − ν̄)` over the slot
+# frequencies `ν`, against the products pairing `f` with an earlier feed. With
+# `S` profiled, a group `J` lowers the χ² by `|Σ_c e^{∓iρ(ν_c)} conj(u_c) r_c|²
+# / Σ_c w_c|u_c|²`, `u = g_a·conj(g_b)`, which on noise alone is χ² with two
+# degrees of freedom, since the weights are inverse variances per real
+# component. The trial delays span `±1/(2δν)` in steps of `1/(4B)`, over the
+# band `B` and the smallest spacing `δν` of the frequencies, so the best one is
+# within `π/8` of the peak's phase at the band's edges. A peak whose
+# false-alarm probability over those trials is below `_FEED_DELAY_PFA` is
+# applied to `φ`, less a constant per component of the gauge graph (`component`)
+# that keeps its `pinned` slot and a constant per track that keeps its `held`
+# slot: the same-feed products and `S` see neither. Otherwise the feed's delay
+# is left where it is, with a warning.
+function _align_feed_delays!(φ, ℓ, cells::BandpassCells, feed, ν, component, pinned, held, tracks)
+    for f in 2:maximum(feed)
+        freqs = sort!(unique(ν[n] for n in eachindex(ν, feed) if feed[n] == f))
+        length(freqs) > 1 || continue
+        column = Dict(v => i for (i, v) in pairs(freqs))
+        g = exp.(complex.(ℓ, φ))
+        groups = Vector{ComplexF64}[]
+        for rng in cells.ranges
+            fa, fb = feed[cells.na[first(rng)]], feed[cells.nb[first(rng)]]
+            ((fa == f && fb < f) || (fb == f && fa < f)) || continue
+            y = zeros(ComplexF64, length(freqs))
+            den = 0.0
+            for k in rng
+                a, b = cells.na[k], cells.nb[k]
+                u = g[a] * conj(g[b])
+                v = conj(u) * cells.r[k]
+                fa == f ? (y[column[ν[a]]] += v) : (y[column[ν[b]]] += conj(v))
+                den += cells.w[k] * abs2(u)
+            end
+            den > 0 && push!(groups, y ./ sqrt(den))
+        end
+        isempty(groups) && continue
+        Y = reduce(hcat, groups)
+        ν̄ = sum(freqs) / length(freqs)
+        spacing = 1 / (4 * (last(freqs) - first(freqs)))
+        n = ceil(Int, 1 / (2 * minimum(diff(freqs))) / spacing)
+        τs = (-n:n) .* spacing
+        power = zeros(length(τs))
+        for trials in Iterators.partition(eachindex(τs), 256)
+            power[trials] .= vec(sum(abs2, cis.(-2π .* τs[trials] .* (freqs .- ν̄)') * Y; dims = 2))
+        end
+        best = argmax(power)
+        pfa = -expm1(length(τs) * log1p(-ccdf(Chisq(2 * size(Y, 2)), power[best])))
+        if pfa > _FEED_DELAY_PFA
+            @warn "the joint bandpass found no delay of feed $f common to every station in the " *
+                "$(size(Y, 2)) groups of products pairing it with an earlier feed: the best of " *
+                "$(length(τs)) trial delays has false-alarm probability $pfa. The solve keeps the " *
+                "delay the data start with, and may stall short of the right one if that is far off."
+            continue
+        end
+        shift = [feed[m] == f ? 2π * τs[best] * (ν[m] - ν̄) : 0.0 for m in eachindex(ν, feed)]
+        keep = Dict(component[m] => shift[m] for m in eachindex(shift, pinned) if pinned[m] && !iszero(component[m]))
+        for m in eachindex(shift, component)
+            shift[m] -= get(keep, component[m], 0.0)
+        end
+        for t in tracks
+            h = findfirst(m -> held[m], t.slots)
+            isnothing(h) || (shift[t.slots] .-= shift[t.slots[h]])
+        end
+        φ .+= shift
+    end
+    return φ
 end
 
 # The log-amplitude directions neither the data nor the priors determine,

@@ -98,6 +98,10 @@ include("test_noise_convention.jl")
 include("test_adhoc_phase.jl")
 include("test_gauge_invariance.jl")
 
+# The whole chain on a synthetic track: a feed-common fringe fit, the bandpass,
+# the track closure and ad hoc phasing leave each scan and product flat.
+include("test_synthetic_chain.jl")
+
 # Fringe diagnostics + Makie plot stubs (Phase 8).
 include("test_fringe_diagnostics.jl")
 
