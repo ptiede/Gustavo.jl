@@ -1,0 +1,218 @@
+# ── Solver protocol ──────────────────────────────────────────────────────────
+#
+# The hooks an `AbstractSolver` implements are defined below; docs/src/authoring_solvers.md
+# walks through writing a solver. Run-wide resources (schedulers, progress) live on the `ExecutionConfig` passed
+# to `fit`; anything that changes what a solver solves, its gauge included,
+# lives on the solver.
+
+"""
+    AbstractSolver
+
+A solve of one gain model (bandpass estimation, adhoc phasing, …) that reads
+the data itself. A solver declares its model components
+with [`model_components`](@ref) and fits them in [`solve`](@ref), reading the
+data with [`each_group`](@ref).
+"""
+abstract type AbstractSolver end
+
+"""
+    model_components(solver::AbstractSolver, spec) -> GainModel
+
+The [`GainModel`](@ref) `solver` solves. `spec = (; geom)` carries the data
+geometry (with the run's `antennas`) the solver may consult (e.g. to resolve an
+`:auto` option). Default: no components.
+"""
+model_components(solver::AbstractSolver, spec) = GainModel()
+
+"""
+    supports_antenna_heterogeneity(solver::AbstractSolver) -> Bool
+
+Whether `solver` handles a gain model whose component signatures differ
+across stations. Default `false`: the runner then rejects a heterogeneous
+compiled model aimed at the solver
+([`Calibration.require_antenna_uniform`](@ref)), naming the differing
+components and their per-station signatures, so an undeclared solver never
+receives θ blocks it would silently leave unsolved.
+
+A solver that declares `true` must write its solve as a loop over the station
+blocks the layout supplies — [`Calibration.antenna_blocks`](@ref) — rather
+than assuming one rectangular `(…, nant)` leaf per component. A solver whose
+solving is delegated to a pluggable object forwards this question to it, so
+the generic also answers for those objects — [`Bandpass`](@ref) asks its
+smoother.
+"""
+supports_antenna_heterogeneity(solver::AbstractSolver) = false
+
+"""
+    solution_name(solver::AbstractSolver) -> Symbol
+
+The capability this solver contributes (`:fringe`, `:bandpass`, `:adhoc`, …):
+names its solution (`sol.name`) and labels its progress-callback stage.
+Default: `:nothing`.
+"""
+solution_name(solver::AbstractSolver) = :nothing
+
+"""
+    solver_gauge(solver::AbstractSolver) -> Union{Nothing, AbstractGauge}
+
+The gauge this solver fixes its undetermined station values with. `fit` resolves
+its station codes against the run's antenna table into `ctx.gauge`. Default:
+`nothing`, for a solver with no gauge freedom.
+"""
+solver_gauge(solver::AbstractSolver) = nothing
+
+"""
+    solve(solver::AbstractSolver, ctx::SolveContext) -> NamedTuple
+
+Fit `solver`'s own model: fill `ctx.θ` and return the solver's diagnostics, which
+become `sol.info`. The data are read
+with [`each_group`](@ref), once per pass the solve needs; a solve that
+iterates (a residual re-search, say) calls it once per round. The runner adds
+`t_pass`, the solve's wall time, and `timing`, each scan group's decode and
+work seconds summed over the solver's passes.
+
+Every `AbstractSolver` must define a method.
+"""
+function solve end
+
+solve(solver::AbstractSolver, ctx) = throw(
+    ArgumentError(
+        "$(nameof(typeof(solver))) does not define `Gustavo.solve(::$(nameof(typeof(solver))), ctx)`, " *
+            "which fits the solver's θ and returns its diagnostics NamedTuple.",
+    ),
+)
+
+# ── The solve context ────────────────────────────────────────────────────────
+
+"""
+    SolveContext
+
+What a solver's [`solve`](@ref) works with: its own compiled model
+(`model`, `layout`, and `θ`, the flat parameter vector over `layout`, which
+`solve` fills; a component's block is `reshape(view(θ, plan.range),
+plan.shape)`), the data geometry `geom` (its `antennas` are the run's station
+table), the solver's `gauge` with station codes resolved (`nothing` for a
+solver whose [`solver_gauge`](@ref) is `nothing`), `nant`, and the scan groups of the
+data (`groupby(ps, ByScan())`).
+"""
+const _PassTiming = @NamedTuple{decode::Vector{Float64}, work::Vector{Float64}}
+
+struct SolveContext{
+        M <: GainModel, L <: ParameterLayout, V <: AbstractVector{Float64},
+        GA <: Union{Nothing, AbstractGauge}, G <: AbstractDict, X <: ExecutionConfig,
+    }
+    model::M
+    layout::L
+    geom::DataGeometry
+    θ::V
+    gauge::GA
+    nant::Int
+    groups::G
+    sizes::Vector{Int}
+    exec::X
+    stage::Symbol
+    passes::Vector{_PassTiming}
+end
+
+"""
+    each_group(f, ctx::SolveContext) -> Vector
+
+Read each scan group of the solver's data and return `f(group)` for every
+group, in group order. `group` is a `ProcessingSet` of in-memory Measurement
+Sets, one per spectral window of the scan. Groups run on the run's outer scheduler, heaviest first, and the
+progress callback is told of each.
+
+`f` may run concurrently across groups, so it must not write shared state
+other than θ slots belonging to its own scan; it returns its scan's
+contribution instead, and the caller combines the returned values.
+"""
+function each_group(f::F, ctx::SolveContext) where {F}
+    out = _map_groups(ctx.groups, ctx.sizes, ctx.exec; stage = ctx.stage) do group
+        ta = time_ns()
+        data = _read_group(group, inner_executor(ctx.exec))
+        tb = time_ns()
+        r = f(data)
+        (; decode = (tb - ta) / 1.0e9, work = (time_ns() - tb) / 1.0e9, r)
+    end
+    push!(ctx.passes, (; decode = Float64[o.decode for o in out], work = Float64[o.work for o in out]))
+    return map(o -> o.r, out)
+end
+
+# One scan group read into memory, each Measurement Set by `readms`.
+function _read_group(group::XRadio.ProcessingSet, executor, readms = read)
+    named = collect(pairs(group))
+    # Typed `tmap`: the untyped form rejects `GreedyScheduler`.
+    members = tmap(XRadio.MeasurementSet, named; scheduler = executor) do (_, ms)
+        readms(ms)
+    end
+    return XRadio.ProcessingSet(
+        OrderedDict{Symbol, XRadio.MeasurementSet}(first.(named) .=> members),
+        copy(DimensionalData.metadata(group)),
+    )
+end
+
+# ── Group scheduling ─────────────────────────────────────────────────────────
+
+const _PROGRESS_LOCK = ReentrantLock()
+
+_report_progress(::Nothing, stage, done, total) = nothing
+function _report_progress(cb, stage, done, total)
+    lock(_PROGRESS_LOCK) do
+        try
+            cb(stage, Int(done), Int(total))
+        catch err
+            @warn "progress callback failed" stage err maxlog = 1
+        end
+    end
+    return nothing
+end
+
+# `work(group)` over `groups` (their values) on the outer scheduler, heaviest
+# first by `sizes`, with the results in group order and
+# `(stage, done, total)` reported to the run's progress callback.
+function _map_groups(work::F, groups, sizes, exec::ExecutionConfig; stage::Symbol) where {F}
+    items = collect(values(groups))
+    total = length(items)
+    progress = exec.progress
+    _report_progress(progress, stage, 0, total)
+    done = Threads.Atomic{Int}(0)
+    function wrapped(group)
+        r = work(group)
+        _report_progress(progress, stage, Threads.atomic_add!(done, 1) + 1, total)
+        return r
+    end
+    return _scheduled_map(wrapped, items, sizes; executor = outer_executor(exec))
+end
+
+# Largest-first parallel map: run `work` over `items` on `executor`, dispatching
+# the largest item (by `sizes`) first so the long poles start immediately.
+# Results in `items` order. A failed worker rethrows after the other workers
+# drain the queue. `executor` is used exactly as configured — how many items run
+# at once is its decision.
+#
+# Each backend fills an `Any` sink and returns `map(identity, sink)`: `work`'s
+# return type is not known before it runs, and tasks write their slots
+# concurrently, so the sink has to admit any value; `map` then recovers the
+# concrete element type for whatever consumes the pass.
+function _scheduled_map(work::F, items, sizes; executor = SerialScheduler()) where {F}
+    length(items) == length(sizes) || throw(
+        DimensionMismatch("items and sizes must match: $(length(items)) vs $(length(sizes))"),
+    )
+    Base.require_one_based_indexing(items, sizes)
+    return _scheduled_map(executor, work, items, sizes)
+end
+
+# With one worker the dispatch order cannot matter.
+_scheduled_map(::SerialScheduler, work::F, items, sizes) where {F} = map(work, items)
+
+# `GreedyScheduler` is the one that keeps largest-first meaningful under uneven
+# sizes — it hands each task the next group off the queue — where a chunking
+# scheduler assigns groups to tasks up front. A backend with different
+# task-lifetime needs adds its own method on its executor type.
+function _scheduled_map(sched::Scheduler, work::F, items, sizes) where {F}
+    out = Vector{Any}(undef, length(items))
+    tforeach(sortperm(sizes; rev = true); scheduler = sched) do k
+        out[k] = work(items[k])
+    end
+    return map(identity, out)
+end
