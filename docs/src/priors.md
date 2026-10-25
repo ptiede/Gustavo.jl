@@ -611,9 +611,13 @@ best trial's false-alarm probability over the grid is below ``10^{-4}``, and
 the solve warns otherwise. The search works on feed indices, so it is the same
 for circular, linear and mixed feeds. The MAP stops
 when the undamped step would move no gain by more than `tolerance` of its
-standard error from the data, or on a plateau: when an accepted step lowers the
-negative log posterior by less than ``\mathrm{tolerance}^2/2``, what a step of
-`tolerance` standard errors would. Where a slot's phase is held more than
+standard error from the data. The latent states are unknowns of the MAP beside
+the gains: they start at their optimum given the gains and move with each step,
+so the prior energy compared between steps is a sum of whitened innovations at
+given states, free of the rounding of a solve as stiff as the stiffest prior.
+Each step's Krylov solve starts at the current point, so its initial residual
+is the gradient and its stopping rule, a tenth of that residual, bounds the
+step's error relative to the step. Where a slot's phase is held more than
 ``\pi/2`` from its own data, by a phase prior or the gauge, the amplitude that
 fits it best is zero; without an amplitude prior the posterior then has no
 mode, and the solve warns.

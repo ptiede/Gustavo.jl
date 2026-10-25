@@ -1232,7 +1232,7 @@ end
     σφ = 1 / sqrt(4 * 4 * 50.0 * 0.25)
     @test maximum(abs, rem2pi.(φ_default[:, :, 1:(nant - 1)] .- φ_tight[:, :, 1:(nant - 1)], RoundNearest)) < 0.1σφ
 
-    @test_logs (:warn, r"did not converge in 2 iterations: the last step moved a gain by .* of its standard error \(A\d, feed \d, frequency segment \d+, time segment 1\)") solve(max_iterations = 2)
+    @test_logs (:warn, r"did not converge in 2 iterations: the last step moved a gain by .* of its standard error \(A\d, feed \d, frequency segment \d+, time segment 1\)") match_mode = :any solve(max_iterations = 2)
 end
 
 # ── Band-referenced products ──────────────────────────────────────────────────
@@ -1302,7 +1302,7 @@ end
         # amplitude is zero: the posterior has no mode and the solve says so,
         # with the phases still a smooth track the data pull on.
         prior = CAL.RandomWalkPrior(; order = 2, σ = sqrt(3 / (2 * 1.0e6^3)))
-        φp = @test_logs (:warn, r"has no mode for the amplitude") match_mode = :any solve(
+        φp = @test_logs (:warn, r"no mode for (the|their) amplitude") match_mode = :any solve(
             1, 1, ZeroSumPhase(), geom, results; prior, max_iterations = 100,
         )
         @test all(isfinite, φp)

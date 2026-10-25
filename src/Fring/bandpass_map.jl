@@ -490,87 +490,100 @@ end
 const _FORCING = 0.1
 
 """
-    _profiled_step(sys, c, profile, tracks, λ, linsolve; abstol, z0 = nothing) -> (; z, x′, model, iterations, P, K)
+    _profiled_step(s, tracks, λ, linsolve; abstol, z0 = _current_unknowns(s.sys)) -> (; z, x′, decrease, iterations, P, K)
 
-One damped Newton step of the profiled objective for the system `sys`
-(`_posterior_system`, assembled with constant `c`): the minimum over its
+One damped Newton step of the profiled objective for the system `s` of one
+observable (`_profiled_systems`): the minimum over its
 unknowns of the held-`S` quadratic plus the profile's correction (exact or
 Gauss–Newton, as `profile` holds), plus `λ/2·‖x′ − x‖²` over the free slots.
 It is solved by `linsolve`, a Krylov method of LinearSolve.jl, preconditioned by
-`ProfilePreconditioner` over the constants of `tracks`, from `z0`, the unknowns
-at the current slots (the last step's), or else from the preconditioner's own
-solution. Started at the current point, the initial residual is the
-objective's gradient, and the solve stops once the residual in the
-preconditioned norm, which measures the error in the step's own standard
-errors, falls below `abstol` or a tenth of its start (an inexact Newton step;
-Eisenstat & Walker 1996). Returns the unknowns, the new slot values, the
-undamped model's value there, the Krylov iterations taken, the
-preconditioner, and the damped system it factors.
+`ProfilePreconditioner` over the constants of `tracks`, from the current point
+`z0`, by default the free slots with the latent unknowns at their optimum given
+them (`_current_unknowns`). There the initial residual is the objective's
+negative gradient (`_step_residual`), and the solve stops once the residual in the preconditioned norm, which
+measures the error in the step's own standard errors, falls below `abstol` or a
+tenth of its start (an inexact Newton step; Eisenstat & Walker 1996). Returns
+the unknowns, the new slot values, the decrease the undamped model predicts,
+the Krylov iterations taken, the preconditioner, and the damped system it
+factors. The decrease is `−gᵀδ − δᵀ(A − λ)δ/2` from the gradient `g` and the
+increment `δ`: the model's own values are differences of terms of the order
+of the stiffest prior's curvature, and lose the decrease to rounding.
 """
-function _profiled_step(sys, c, profile, tracks, λ, linsolve; abstol, z0 = nothing)
-    K, h, _ = _reduce!(sys, c, λ)
+function _profiled_step(s, tracks, λ, linsolve; abstol, z0 = _current_unknowns(s.sys))
+    (; sys) = s
+    K, _, _ = _reduce!(sys, s.c, λ)
     F = _refactor!(sys, K)
     nf = length(sys.xf)
     P = ProfilePreconditioner(F, _coarse_space(sys, tracks, λ)...)
-    A = ProfiledCurvature(K, profile)
-    rhs = copy(h)
-    view(rhs, 1:nf) .+= _profile_apply!(zeros(nf), profile, sys.xf)
-    z = isnothing(z0) ? ldiv!(similar(rhs), P, rhs) : copy(z0)
-    residual = rhs - mul!(similar(rhs), A, z)
+    A = ProfiledCurvature(K, s.profile)
+    z = copy(z0)
+    residual = _step_residual(s, z)
     sol = LinearSolve.solve(LinearSolve.LinearProblem(A, residual), linsolve; Pl = P, abstol, reltol = _FORCING, maxiters = 10 * size(K, 1))
     LinearSolve.SciMLBase.successful_retcode(sol.retcode) || error(
         "the profiled bandpass step did not converge: $(nameof(typeof(linsolve))) returned $(sol.retcode) " *
             "after $(sol.iters) iterations",
     )
-    z .+= sol.u
+    δ = sol.u
+    z .+= δ
     x′ = copy(sys.x)
     x′[sys.free] .= view(z, 1:nf)
-    d = view(z, 1:nf) .- sys.xf
-    (; layout) = sys
-    model = dot(z, layout.K * z) / 2 - dot(layout.h, z) + c + dot(d, _profile_apply!(zeros(nf), profile, d)) / 2
-    return (; z, x′, model, iterations = sol.iters, P, K)
+    decrease = _predicted_decrease(A, residual, δ, (1:nf,), (λ,))
+    return (; z, x′, decrease, iterations = sol.iters, P, K)
+end
+
+# The negative gradient of system `s`'s objective at the unknowns `z`, whose
+# slots are at their current values: the data's `b` on the slots less the
+# priors' gradient (`_prior_gradient`).
+function _step_residual(s, z)
+    r = -_prior_gradient(s.sys.layout, s.priors, z)
+    view(r, eachindex(s.sys.bf)) .+= s.sys.bf
+    return r
 end
 
 """
-    _joint_step(φ, ℓ, tracks, λ, linsolve; abstol, z0 = nothing) -> (; z, x′, model, iterations)
+    _joint_step(φ, ℓ, tracks, λ, linsolve; abstol, z0) -> (; z, x′, decrease, iterations)
 
 `_profiled_step` over both observables at once, with the exact Hessian's cross
 block between them (`JointCurvature`): `φ` and `ℓ` are the observables' systems
-(`_profiled_systems`), `tracks` their acting tracks and `λ` their dampings, as
-`(; phase, amp)`, and `z0` the unknowns at the current slots as `(; phase, amp)`.
+(`_profiled_systems`), `tracks` their acting tracks, `λ` their dampings and
+`z0` their unknowns at the current point, as `(; phase, amp)`.
 Away from the mode, where the model leaves residuals as large as the signal, the
 cross block is as large as the diagonal ones.
 """
-function _joint_step(φ, ℓ, tracks, λ, linsolve; abstol, z0 = nothing)
-    Kφ, hφ, _ = _reduce!(φ.sys, φ.c, λ.phase)
-    Kℓ, hℓ, _ = _reduce!(ℓ.sys, ℓ.c, λ.amp)
+function _joint_step(φ, ℓ, tracks, λ, linsolve; abstol, z0 = map(s -> _current_unknowns(s.sys), (; phase = φ, amp = ℓ)))
+    Kφ, _, _ = _reduce!(φ.sys, φ.c, λ.phase)
+    Kℓ, _, _ = _reduce!(ℓ.sys, ℓ.c, λ.amp)
     Pφ = ProfilePreconditioner(_refactor!(φ.sys, Kφ), _coarse_space(φ.sys, tracks.phase, λ.phase)...)
     Pℓ = ProfilePreconditioner(_refactor!(ℓ.sys, Kℓ), _coarse_space(ℓ.sys, tracks.amp, λ.amp)...)
     nφ = size(Kφ, 1)
     A = JointCurvature(Kφ, Kℓ, φ.profile, ℓ.profile)
     P = BlockPreconditioner(Pφ, Pℓ, nφ)
-    rhs = [hφ; hℓ]
-    _joint_apply!(view(rhs, 1:nφ), view(rhs, (nφ + 1):length(rhs)), φ.profile, ℓ.profile, φ.sys.xf, ℓ.sys.xf)
-    z = isnothing(z0) ? ldiv!(similar(rhs), P, rhs) : [z0.phase; z0.amp]
-    residual = rhs - mul!(similar(rhs), A, z)
-    sol = LinearSolve.solve(LinearSolve.LinearProblem(A, residual), linsolve; Pl = P, abstol, reltol = _FORCING, maxiters = 10 * length(rhs))
+    z = [z0.phase; z0.amp]
+    residual = [_step_residual(φ, z0.phase); _step_residual(ℓ, z0.amp)]
+    sol = LinearSolve.solve(LinearSolve.LinearProblem(A, residual), linsolve; Pl = P, abstol, reltol = _FORCING, maxiters = 10 * length(z))
     LinearSolve.SciMLBase.successful_retcode(sol.retcode) || error(
         "the profiled bandpass step did not converge: $(nameof(typeof(linsolve))) returned $(sol.retcode) " *
             "after $(sol.iters) iterations",
     )
-    z .+= sol.u
+    δ = sol.u
+    z .+= δ
     zφ, zℓ = view(z, 1:nφ), view(z, (nφ + 1):length(z))
-    nfφ, nfℓ = length(φ.sys.xf), length(ℓ.sys.xf)
-    dφ, dℓ = zφ[1:nfφ] .- φ.sys.xf, zℓ[1:nfℓ] .- ℓ.sys.xf
-    cφ, cℓ = _joint_apply!(zeros(nfφ), zeros(nfℓ), φ.profile, ℓ.profile, dφ, dℓ)
-    held(s, z) = dot(z, s.sys.layout.K * z) / 2 - dot(s.sys.layout.h, z) + s.c
-    model = held(φ, zφ) + held(ℓ, zℓ) + (dot(dφ, cφ) + dot(dℓ, cℓ)) / 2
+    decrease = _predicted_decrease(A, residual, δ, (1:length(φ.sys.xf), nφ .+ (1:length(ℓ.sys.xf))), (λ.phase, λ.amp))
     x′(s, z) = (x = copy(s.sys.x); x[s.sys.free] .= view(z, eachindex(s.sys.xf)); x)
-    return (; z = (; phase = collect(zφ), amp = collect(zℓ)), x′ = (; phase = x′(φ, zφ), amp = x′(ℓ, zℓ)), model, iterations = sol.iters)
+    return (; z = (; phase = collect(zφ), amp = collect(zℓ)), x′ = (; phase = x′(φ, zφ), amp = x′(ℓ, zℓ)), decrease, iterations = sol.iters)
+end
+
+# The decrease of the quadratic with curvature `A`, less the damping `λs[i]` on
+# the unknowns `slots[i]`, along the increment `δ` from a point where its
+# negative gradient is `residual`.
+function _predicted_decrease(A, residual, δ, slots, λs)
+    damping = sum(((s, λ),) -> λ * sum(abs2, view(δ, s)), zip(slots, λs))
+    return dot(residual, δ) - (dot(δ, mul!(similar(δ), A, δ)) - damping) / 2
 end
 
 # Each observable's MAP system at the gains `x` (`(; phase, amp)` slot values):
-# `(; sys, c, profile, scale)`, `scale` its largest data curvature, or `nothing`
+# `(; sys, c, profile, scale, priors)`, `scale` its largest data curvature and
+# `priors` its tracks' resolved priors, or `nothing`
 # where the observable is not fit, with the linearization `lin`, `S` re-solved.
 # `ctx` is the solve's fixed structure (built in `solve_joint_bandpass!`), and
 # `exact` chooses the profile's curvature.
@@ -589,7 +602,7 @@ function _profiled_systems(x, ctx, priors, S; exact)
         sys = _cached_system!(ctx.systems, obs, H[obs], b[obs], x[obs], moving, tracks[obs][acting[obs]], key)
         c = _assemble!(sys.layout, priors[obs])
         profile = Profile(g, S, cells, obs === :phase ? -1 : 1, moving, exact, ctx.executor)
-        return (; sys, c, profile, scale)
+        return (; sys, c, profile, scale, priors = priors[obs])
     end
     return systems, lin
 end
@@ -598,8 +611,13 @@ end
     _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ = 1e-3, exact = false) -> NamedTuple
 
 The MAP of the gains `x` (`(; phase, amp)` slot values, updated in place) under
-the resolved `priors`, by Levenberg–Marquardt on the profiled objective: χ²/2
-with `S` at its optimum plus the acting tracks' prior energy. Each step is
+the resolved `priors`, by Levenberg–Marquardt on an objective over the slots
+and the tracks' latent unknowns: χ²/2 with `S` at its optimum plus the acting
+tracks' prior energy at those unknowns (`_prior_energy`). The latent unknowns
+start at their optimum given the slots (`_current_unknowns`) and move with
+each step, so the energies compared are sums of whitened innovations at given
+states; re-minimizing over the states for each trial would perturb them by the
+rounding of a solve as stiff as the stiffest prior. Each step is
 `_profiled_step`, damped by `μ` times the largest data curvature of its
 observable, with `μ` following how well the step's model predicted the
 objective's decrease (Madsen, Nielsen & Tingleff 2004, §3.2). The steps take
@@ -608,69 +626,76 @@ error, or by fewer than ten while the objective falls by more than 1.5 times
 the model's prediction, and the exact Hessian from then on; with `exact`, a
 start already in the mode's basin, from the first step. The solve stops
 once the undamped step moves no slot by `tolerance` of its standard error from
-the data, once an accepted step lowers the objective by less than
-`tolerance²/2` (a plateau), or once no damping lowers it.
+the data, or once no damping lowers the objective. The undamped step is checked
+after a step that moves no slot by `tolerance` or lowers the objective by less
+than `tolerance²/2`.
 
 Returns `(; converged, stalled, change, worst, iterations, krylov, μ, objective,
-weights)`: the largest weighted change of the last step and its slot, the steps
-and Krylov iterations taken, the final damping and objective, and each slot's
+weights)`: the largest weighted change of the last step, undamped where no
+damping lowered the objective, and its slot, the steps and Krylov iterations
+taken, the damping of the last accepted step, the final objective, and each slot's
 data weight at the last linearization, the inverse square of its standard
 error.
 """
 function _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ = 1.0e-3, exact::Bool = false)
-    (; cells, fitted, tracks, acting, track_layouts) = ctx
+    (; cells, fitted, tracks, acting) = ctx
     S = zeros(ComplexF64, length(cells.ranges))
-    energy(obs, v) = sum((first(_track_energy(track_layouts[obs][i], priors[obs][j], v)) for (j, i) in pairs(acting[obs])); init = 0.0)
-    objective(ℓ, φ) = _profiled_chi2(exp.(complex.(ℓ, φ)), cells, ctx.executor) / 2 + energy(:phase, φ) + energy(:amp, ℓ)
+    observables = (; phase = :phase, amp = :amp)
+    energy(systems, z) = sum(obs -> isnothing(systems[obs]) ? 0.0 : _prior_energy(systems[obs].sys.layout, priors[obs], z[obs]), keys(observables))
+    objective(systems, x, z) = _profiled_chi2(exp.(complex.(x.amp, x.phase)), cells, ctx.executor) / 2 + energy(systems, z)
     abstol = tolerance / 10
     change, worst, stalled, converged, near = Inf, 0, false, false, false
     ν, iterations, krylov = 2.0, 0, 0
-    O0 = objective(x.amp, x.phase)
+    O0, z, layout_of_z = Inf, nothing, nothing
+    μ_accepted = μ
     local lin
     for _ in 1:max_iterations
         iterations += 1
         systems, lin = _profiled_systems(x, ctx, priors, S; exact)
-        z0 = map(obs -> _warm_start(ctx, obs, systems[obs]), (; phase = :phase, amp = :amp))
+        free = map(s -> isnothing(s) ? nothing : copy(s.sys.free), systems)
+        if free != layout_of_z
+            z = map(s -> isnothing(s) ? nothing : _current_unknowns(s.sys), systems)
+            layout_of_z = free
+            O0 = objective(systems, x, z)
+        end
         function propose(μ)
             if exact && all(fitted)
                 λ = map(s -> μ * s.scale, systems)
-                acting_tracks = map(obs -> tracks[obs][acting[obs]], (; phase = :phase, amp = :amp))
-                step = _joint_step(
-                    systems.phase, systems.amp, acting_tracks, λ, linsolve;
-                    abstol, z0 = any(isnothing, z0) ? nothing : z0,
-                )
+                acting_tracks = map(obs -> tracks[obs][acting[obs]], observables)
+                step = _joint_step(systems.phase, systems.amp, acting_tracks, λ, linsolve; abstol, z0 = z)
                 krylov += step.iterations
-                return step.x′, step.model, step.z
+                return step.x′, step.decrease, step.z
             end
-            steps = map((:phase, :amp)) do obs
+            steps = map(keys(observables)) do obs
                 s = systems[obs]
-                isnothing(s) && return (x′ = x[obs], model = 0.0, iterations = 0, z = nothing)
-                return _profiled_step(s.sys, s.c, s.profile, tracks[obs][acting[obs]], μ * s.scale, linsolve; abstol, z0 = z0[obs])
+                isnothing(s) && return (x′ = x[obs], decrease = 0.0, iterations = 0, z = nothing)
+                return _profiled_step(s, tracks[obs][acting[obs]], μ * s.scale, linsolve; abstol, z0 = z[obs])
             end
             krylov += steps[1].iterations + steps[2].iterations
-            return (; phase = steps[1].x′, amp = steps[2].x′), steps[1].model + steps[2].model, (; phase = steps[1].z, amp = steps[2].z)
+            return (; phase = steps[1].x′, amp = steps[2].x′), steps[1].decrease + steps[2].decrease, (; phase = steps[1].z, amp = steps[2].z)
         end
         if near
             x1, _, _ = propose(eps())
             change, worst = _largest_weighted_change(x1.amp .- x.amp, x1.phase .- x.phase, lin.W)
             change < tolerance && (converged = true; break)
         end
-        E0 = energy(:phase, x.phase) + energy(:amp, x.amp)
         accepted, decrease = false, Inf
         while isfinite(μ)
             x1, predicted, z1 = propose(μ)
             change, worst = _largest_weighted_change(x1.amp .- x.amp, x1.phase .- x.phase, lin.W)
             _within_rounding(x1.amp, x.amp) && _within_rounding(x1.phase, x.phase) && break
-            O1 = objective(x1.amp, x1.phase)
+            O1 = objective(systems, x1, z1)
             # The objective is known to its rounding.
             if O1 <= O0 + 16 * eps(abs(O0))
-                ρ = (O0 - O1) / (E0 - predicted)
+                ρ = (O0 - O1) / predicted
                 decrease = O0 - O1
                 x.amp .= x1.amp
                 x.phase .= x1.phase
-                foreach(obs -> _keep_warm!(ctx, obs, systems[obs], z1[obs]), (:phase, :amp))
-                O0 = O1
-                μ = max(μ * max(1 / 3, 1 - (2ρ - 1)^3), eps())
+                z, O0 = z1, O1
+                # A step accepted at the objective's rounding can have `ρ ≤ 0`; it
+                # doubles `μ`, as a rejection does.
+                μ = max(μ * max(1 / 3, 1 - (2 * max(ρ, 0) - 1)^3), eps())
+                μ_accepted = μ
                 exact |= ρ > 1.5 && change < 10
                 ν = 2.0
                 accepted = true
@@ -679,19 +704,21 @@ function _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ 
             μ *= ν
             ν *= 2
         end
-        # A step lowers the objective by about half its squared change in
-        # standard errors, so one too small for that to exceed the objective's
-        # rounding cannot be verified, and ending there is not a stall.
+        # No damping lowers the objective. A step lowers it by about half its
+        # squared change in standard errors, so an undamped step too small for
+        # that to exceed the objective's rounding cannot be verified, and
+        # ending there is not a stall.
         if !accepted
+            x1, _, _ = propose(eps())
+            change, worst = _largest_weighted_change(x1.amp .- x.amp, x1.phase .- x.phase, lin.W)
             stalled = change >= tolerance && change^2 / 2 > 16 * eps(abs(O0))
             converged = !stalled
             break
         end
-        decrease < tolerance^2 / 2 && (converged = true; break)
-        near = change < tolerance
+        near = change < tolerance || decrease < tolerance^2 / 2
         exact |= change < 1
     end
-    return (; converged, stalled, change, worst, iterations, krylov, μ, objective = O0, weights = lin.W)
+    return (; converged, stalled, change, worst, iterations, krylov, μ = μ_accepted, objective = O0, weights = lin.W)
 end
 
 """
@@ -716,10 +743,7 @@ function _em_hypers!(priors, x, ctx; linsolve, tolerance)
         isnothing(s) && continue
         estimating = [k for (k, i) in pairs(acting[obs]) if _hyper_count(tracks[obs][i].prior) > 0]
         isempty(estimating) && continue
-        step = _profiled_step(
-            s.sys, s.c, s.profile, tracks[obs][acting[obs]], 0.0, linsolve;
-            abstol = tolerance / 10, z0 = _warm_start(ctx, obs, s),
-        )
+        step = _profiled_step(s, tracks[obs][acting[obs]], 0.0, linsolve; abstol = tolerance / 10)
         cov = _covariance(step.P, step.K)
         for k in estimating
             chains = s.sys.chains[k]
@@ -807,8 +831,8 @@ Each cycle takes two EM maps from `ψ₀`, extrapolates along them by the step
 takes one EM map from there. EM is slow where the data barely determine a
 direction, so a plain EM step understates the distance to its fixed point. The
 cycles stop once one moves no gain by `tolerance` of its standard error, from
-the MAP it starts at to the MAP at the extrapolated hyperparameters (`moved`,
-the largest such change), or after `max_em_iterations` EM maps: the
+the MAP it starts at to the converged MAP at the extrapolated hyperparameters
+(`moved`, the largest such change), or after `max_em_iterations` EM maps: the
 hyperparameters the gains no longer depend on are left where EM has taken them.
 `solved` is the MAP at the starting hyperparameters, and the result's the MAP at
 the final ones; `unconverged` counts the EM maps whose MAP stopped at
@@ -843,7 +867,7 @@ function _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_ite
         bounded && (αmax *= 4)
         moved, _ = _largest_weighted_change(x.amp .- start.amp, x.phase .- start.phase, solved.weights)
         ψ0 = ψ3
-        if moved < tolerance
+        if moved < tolerance && solved.converged
             converged = true
             break
         end
@@ -877,6 +901,7 @@ function _update_system(sys, data, H, b, x)
     Hf = H[free, free]
     sys.x .= x
     sys.xf .= view(x, free)
+    sys.bf .= view(b, free)
     fill!(layout.base, 0.0)
     for (p, v) in zip(data, nonzeros(Hf))
         layout.base[p] += v
@@ -888,13 +913,3 @@ function _update_system(sys, data, H, b, x)
     c0 = dot(sys.xf, Hx) / 2 + dot(view(b, free), sys.xf)
     return merge(sys, (; layout = merge(layout, (; c0))))
 end
-
-# The unknowns of the last accepted step of observable `obs`, which hold the
-# current slots, while its system `s` keeps their layout; `nothing` otherwise.
-function _warm_start(ctx, obs, s)
-    isnothing(s) && return nothing
-    w = get(ctx.warm, obs, nothing)
-    return isnothing(w) || w.free != s.sys.free ? nothing : w.z
-end
-
-_keep_warm!(ctx, obs, s, z) = isnothing(s) || isnothing(z) || (ctx.warm[obs] = (; free = copy(s.sys.free), z = copy(z)))

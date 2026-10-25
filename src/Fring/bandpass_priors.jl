@@ -141,6 +141,44 @@ function _add_chain!(Kv, h, t, model)
     return c
 end
 
+# The prior energy of chain `t` (`_chain_terms`) under `model` at the unknowns
+# `u`: half the squared whitened residual of its start and of each transition's
+# innovation `s_k − A·s_{k−1}`. Each term is small where `Q` is, so no large
+# terms cancel. A covariance singular to rounding gives no density: `Inf`.
+function _chain_energy(t, model, u)
+    T = eltype(u)
+    D = statedim(model)
+    E = zero(T)
+    start = initial(model, T)
+    if !isnothing(start)
+        μ0, P0 = start
+        E += _whitened_energy(_term_rows(t.start, u, Val(D)) - μ0, P0)
+    end
+    step = nothing
+    for (k, term) in pairs(t.steps)
+        step = _transition(model, t.u[k + 1] - t.u[k], T, step)
+        _, A, Q = step
+        s = _term_rows(term, u, Val(2D))
+        E += _whitened_energy(s[SOneTo(D)] - A * s[SVector{D}((D + 1):(2D))], Q)
+    end
+    return E
+end
+
+# The state rows `s` of `term` at the unknowns `u`.
+function _term_rows(term, u, ::Val{R}) where {R}
+    s = MVector{R}(term.base)
+    for (p, j, α) in term.entries
+        s[p] += α * u[j]
+    end
+    return SVector(s)
+end
+
+function _whitened_energy(e, Σ)
+    C = cholesky(Symmetric(Σ); check = false)
+    issuccess(C) || return oftype(float(eltype(e)), Inf)
+    return sum(abs2, C.L \ e) / 2
+end
+
 # Adds `½sᵀWs` over `term`'s state rows `s`, less `μ`, to K's stored values
 # `Kv` and to `h`, and returns its constant.
 function _add_term!(Kv, h, term, W::SMatrix{R, R}, μ) where {R}
@@ -359,19 +397,85 @@ end
 _mean_values(mean, u) = map(m -> Dict(g => u[j] for (g, j) in m), mean)
 
 # A track's prior energy at the slot values `x`, minimized over its latent states
-# and mean, and that mean (`_mean_values`); `tl` is its `_track_layout`.
+# and mean, and that mean (`_mean_values`); `tl` is its `_track_layout`. The
+# energy is summed from the chains' whitened innovations at the minimizing
+# unknowns (`_chain_energy`), not as `c − hᵀK⁻¹h/2`: a stiff prior makes both of
+# those of order `‖K‖` and leaves their difference to rounding.
 function _track_energy(tl, prior, x)
     (; layout) = tl
-    c = _assemble!(_fix_slots!(layout, x), (prior,))
-    isempty(layout.h) && return c, _mean_values(tl.mean, Float64[])
-    F = tl.factor[]
-    if isnothing(F) || !isequal(tl.prior[], prior)
-        F = isnothing(F) ? cholesky(Symmetric(layout.K)) : cholesky!(F, Symmetric(layout.K))
-        tl.factor[] = F
-        tl.prior[] = prior
+    _assemble!(_fix_slots!(layout, x), (prior,))
+    u = zeros(length(layout.h))
+    if !isempty(u)
+        F = tl.factor[]
+        if isnothing(F) || !isequal(tl.prior[], prior)
+            F = isnothing(F) ? cholesky(Symmetric(layout.K)) : cholesky!(F, Symmetric(layout.K))
+            tl.factor[] = F
+            tl.prior[] = prior
+        end
+        u = F \ layout.h
     end
-    u = F \ layout.h
-    return c - dot(layout.h, u) / 2, _mean_values(tl.mean, u)
+    return _prior_energy(layout, (prior,), u), _mean_values(tl.mean, u)
+end
+
+# The gradient of `_chain_energy` over the unknowns, added into `g`: each term's
+# innovation, through `Q⁻¹`, carried back onto its rows. It matches the energy
+# as evaluated to its rounding, unlike `K·u − h`, whose `Gᵀ·Q⁻¹·G` carries a
+# rounding error of the order of the stiffest term's curvature.
+function _chain_gradient!(g, t, model, u)
+    T = eltype(u)
+    D = statedim(model)
+    start = initial(model, T)
+    if !isnothing(start)
+        μ0, P0 = start
+        _add_rows!(g, t.start, cholesky(Symmetric(P0)) \ (_term_rows(t.start, u, Val(D)) - μ0))
+    end
+    step = nothing
+    for (k, term) in pairs(t.steps)
+        step = _transition(model, t.u[k + 1] - t.u[k], T, step)
+        _, A, Q = step
+        s = _term_rows(term, u, Val(2D))
+        w = cholesky(Symmetric(Q)) \ (s[SOneTo(D)] - A * s[SVector{D}((D + 1):(2D))])
+        _add_rows!(g, term, vcat(w, -A' * w))
+    end
+    return g
+end
+
+# Adds the gradient `r` over `term`'s state rows onto the unknowns in `g`.
+function _add_rows!(g, term, r)
+    for (p, j, α) in term.entries
+        g[j] += α * r[p]
+    end
+    return g
+end
+
+# The gradient of `_prior_energy` at the unknowns `u`.
+function _prior_gradient(lay, priors, u)
+    g = zeros(length(u))
+    for (ts, prior) in zip(lay.terms, priors)
+        isempty(ts) && continue
+        _with_piece_models(prior, first(ts).dim, Float64) do model
+            foreach(t -> _chain_gradient!(g, t, model(t.h), u), ts)
+        end
+    end
+    return g
+end
+
+# The prior energy of the chains of `lay` under the resolved `priors` (one per
+# track) at the unknowns `u`, summed over the chains (`_chain_energy`).
+function _prior_energy(lay, priors, u)
+    E = 0.0
+    for (ts, prior) in zip(lay.terms, priors)
+        isempty(ts) && continue
+        E += _with_piece_models(prior, first(ts).dim, Float64) do model
+            # A loop, as in `_assemble!`.
+            out = 0.0
+            for t in ts
+                out += _chain_energy(t, model(t.h), u)
+            end
+            out
+        end
+    end
+    return E
 end
 
 """
@@ -405,7 +509,7 @@ function _posterior_system(H, b, x, free, tracks, key)
         c = dot(xf, Hx) / 2 + dot(b[free], xf), nf,
     )
     return (;
-        layout, chains = first.(built), means = last.(built), x = Float64.(x), free, xf,
+        layout, chains = first.(built), means = last.(built), x = Float64.(x), free, xf, bf = Float64.(b[free]),
         damped = copy(layout.K), hλ = zeros(n), key = keys,
         factor = Ref{Union{Nothing, CHOLMOD.Factor{Float64, Int}}}(nothing),
     )
@@ -427,6 +531,18 @@ function _reduce!(sys, c, λ)
 end
 
 _factor(K, key; check = true) = cholesky(Symmetric(K); perm = sortperm(key), check)
+
+# The unknowns of `sys` at its current point: the free slots at their values and
+# the latent unknowns at the minimum of the quadratic as last assembled given
+# them.
+function _current_unknowns(sys)
+    (; layout, xf, key) = sys
+    nf = length(xf)
+    L = (nf + 1):size(layout.K, 1)
+    isempty(L) && return copy(xf)
+    rhs = layout.h[L] .- layout.K[L, 1:nf] * xf
+    return [xf; _factor(layout.K[L, L], key[L]) \ rhs]
+end
 
 # Factors `K` into `sys`'s factorization, reusing its symbolic analysis.
 function _refactor!(sys, K)

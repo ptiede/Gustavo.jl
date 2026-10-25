@@ -33,7 +33,7 @@ using Statistics: median, mean
 using LinearAlgebra
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nnz, nzrange, nonzeros, rowvals, CHOLMOD
 import Graphs
-using StaticArrays: SMatrix, SVector, StaticVector
+using StaticArrays: SMatrix, SVector, MVector, SOneTo, StaticVector
 
 include("Fring/search.jl")
 include("Fring/stationize.jl")

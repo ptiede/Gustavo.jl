@@ -495,12 +495,11 @@ time. Beside a shape under a proper prior, the phase may also take a
 delay over each of its frequency segments, which must hold whole spectral
 windows. Stations may have different models.
 
-Each MAP solve stops once no gain moves by more than `tolerance` of its standard
-error, or once a step lowers the negative log posterior by less than
-`tolerance²/2` (a plateau, where the posterior is flat along the gains still
-moving), and warns if `max_iterations` steps pass first. The hyperparameter
-fit stops once a cycle of it moves no gain by more than `tolerance` of its
-standard error, with a warning if `max_em_iterations` EM maps pass first; the
+Each MAP solve stops once the undamped step would move no gain by more than
+`tolerance` of its standard error, and warns if `max_iterations` steps pass
+first. The hyperparameter fit stops once a cycle of it moves no gain by more
+than `tolerance` of its standard error, from one converged MAP to the next,
+with a warning if `max_em_iterations` EM maps pass first; the
 hyperparameters the gains no longer depend on are not converged. An
 unconverged solve still depends on its starting point.
 

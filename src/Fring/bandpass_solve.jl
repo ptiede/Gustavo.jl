@@ -313,7 +313,9 @@ function solve_joint_bandpass!(
     # A held slot is fixed, not measured: a track held throughout gives its prior
     # nothing to act on.
     known = (; phase = hasdata .& .!pinned, amp = hasdata)
-    cells = BandpassCells(r, w, jl.edge, jl.slot_pairs; nchunks = Threads.nthreads())
+    # A fixed chunk count keeps the sums' order, and so the result, independent
+    # of the thread count.
+    cells = BandpassCells(r, w, jl.edge, jl.slot_pairs; nchunks = 16)
     npairs = length(jl.slot_pairs)
     weight = _slot_weights(cells, nslots)
     track_pins = (; phase = falses(nslots), amp = falses(nslots))
@@ -412,7 +414,7 @@ function solve_joint_bandpass!(
     Hφ, hpos = _curvature_pattern(jl.slot_pairs, nslots)
     ctx = (;
         cells, nslots, npairs, fitted, free, filled, tracks, acting, track_layouts, key, Hφ, Hℓ = copy(Hφ), hpos,
-        executor, systems = Dict{Symbol, Any}(), warm = Dict{Symbol, Any}(),
+        executor, systems = Dict{Symbol, Any}(),
     )
     x = (; phase = φ, amp = ℓ)
     solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve)
@@ -443,18 +445,29 @@ function solve_joint_bandpass!(
         "is too stiff for the data, which can drive a gain's amplitude toward zero."
     # Where a slot's phase is held more than π/2 from its own data — by a phase
     # prior or the gauge — the amplitude that fits it best is zero, and without an
-    # amplitude prior the posterior has no mode: its log-amplitude runs off.
-    if fitted.amp && (stalled || converged)
+    # amplitude prior the posterior has no mode: its log-amplitude runs off, and
+    # the solve stops at `max_iterations`.
+    if fitted.amp
         final = linearized(ℓ, φ)
         unpriored = free.amp .& .!filled.amp
         for t in tracks.amp, (j, p) in pairs(t.pieces)
             t.active[j] && (unpriored[t.slots[p]] .= false)
         end
         modeless = [n for n in findall(unpriored) if final.W[n] > 0 && real(1 + final.c[n] / final.W[n]) <= 0]
-        isempty(modeless) || @warn "the joint bandpass posterior has no mode for the amplitude of " *
-            "$(length(modeless)) gain slots, e.g.$(_slot_description(geom, loc, slot[first(modeless)]...)): " *
-            "their phase is held more than π/2 from their data, by a phase prior or the gauge, so the " *
-            "amplitude that fits them best is zero. Give the amplitude a prior."
+        if !isempty(modeless)
+            example = _slot_description(geom, loc, slot[first(modeless)]...)
+            if stalled || converged
+                @warn "the joint bandpass posterior has no mode for the amplitude of $(length(modeless)) " *
+                    "gain slots, e.g.$example: their phase is held more than π/2 from their data, by a phase " *
+                    "prior or the gauge, so the amplitude that fits them best is zero. Give the amplitude a prior."
+            else
+                @warn "at the last iterate of the unconverged joint bandpass solve, $(length(modeless)) gain " *
+                    "slots, e.g.$example, have no amplitude optimum: their phase is more than π/2 from their " *
+                    "data, so the amplitude that fits them best is zero. Where a phase prior or the gauge holds " *
+                    "them there, the posterior has no mode for their amplitude and the solve cannot converge; " *
+                    "give the amplitude a prior."
+            end
+        end
     end
     em_converged || @warn "the joint bandpass hyperparameter fit stopped at $max_em_iterations EM " *
         "iterations with its last cycle still moving a gain by $em_moved of its standard error, against " *
