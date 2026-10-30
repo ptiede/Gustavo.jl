@@ -149,8 +149,10 @@ node per freedom, as that pin.
 This is a numerical starting point, not the gauge itself: unwrapping propagates
 relative phases outward from a real node, which a zero-sum constraint does not
 supply. The default takes the first station of [`gauge_antenna_order`](@ref)
-present in `f` (its node of the lowest feed index), else the node with the most
-row weight.
+with a node of `f` that carries row weight (its such node of the lowest feed
+index), else the node with the most row weight. A node without weight has no
+data to hold the freedom's value; pinned, it would leave the value to whatever
+else couples to that node.
 """
 function gauge_anchor(g::AbstractGauge, f::GaugeFreedom)
     # The lowest feed, so a station's reported values stay referenced to the
@@ -158,7 +160,7 @@ function gauge_anchor(g::AbstractGauge, f::GaugeFreedom)
     for a in gauge_antenna_order(g)
         best = 0
         for i in eachindex(f.nodes, f.antenna, f.feed)
-            f.antenna[i] == a && (best == 0 || f.feed[i] < f.feed[best]) && (best = i)
+            f.antenna[i] == a && f.weight[i] > 0 && (best == 0 || f.feed[i] < f.feed[best]) && (best = i)
         end
         best == 0 || return f.nodes[best]
     end

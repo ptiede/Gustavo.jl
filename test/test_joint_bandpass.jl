@@ -247,18 +247,28 @@ function _joint_scan_accumulators(g, S, tseg, bl_pairs, feeds, geom)
     end
 end
 
-# The pinned gain slots of a joint solve's phase gauge, as `(block, (ant, feed,
-# channel, time segment))` positions; empty for a gauge imposed as constraints.
-function _joint_pins(geom, blocks, results, tseg, gauge)
+# The pinned and the held gain slots of a joint solve's phase frame without
+# priors, each as `(block, (ant, feed, channel, time segment))` positions.
+function _joint_frame(geom, blocks, results, tseg, gauge)
     nant = length(geom.antennas)
     fseg, cells = FP._antenna_freq_segments(blocks, nant)
     r, w = FP._reduce_all_scans(results, cells)
     data = (; w, ends = FP._cell_nodes(r, geom.antennas, PerFeed()))
-    layout = (; loc = FP._block_locations(blocks, nant), tseg, fseg)
+    loc = FP._block_locations(blocks, nant)
+    layout = (; loc, tseg, fseg)
     gains = [FP._block_gains(b, geom, ComplexF64) for b in blocks]
-    FP._joint_bandpass_gauge!(gains, data, layout, blocks, gauge)
-    return Set((k, Tuple(I)) for (k, st) in pairs(gains) for I in findall(parent(st.pinned)))
+    ids = FP._gain_slot_ids(gains)
+    slot = [(k, Tuple(I)) for (k, idk) in pairs(ids) for I in CartesianIndices(idk)]
+    tracks = NamedTuple[]
+    for (a, (k, ai)) in pairs(loc), f in 1:geom.nfeed, ts in unique(filter(!iszero, tseg[a, :]))
+        iszero(k) || push!(tracks, (; slots = vec(ids[k][ai, f, :, ts]), pieces = UnitRange{Int}[], active = Bool[], prior = nothing))
+    end
+    holds = falses(length(slot))
+    FP._joint_bandpass_gauge!(gains, data, layout, blocks, gauge, _ -> tracks, holds)
+    pins = Set((k, Tuple(I)) for (k, st) in pairs(gains) for I in findall(parent(st.pinned)))
+    return (; pins, holds = Set(slot[findall(holds)]))
 end
+_joint_pins(args...) = _joint_frame(args...).pins
 
 @testset "JointSmoother: a reference-free pin anchors the best-measured antenna" begin
     nant, nchan = 4, 6
@@ -280,6 +290,81 @@ end
     end
     @test _joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(Int[])) ==
         Set([(1, (2, 1, 1, 1)), (1, (2, 2, 1, 1))])
+end
+
+@testset "JointSmoother: a pin in a window without data solves nothing" begin
+    nant, nchan = 4, 8
+    geom = CAL.DataGeometry(; nfeed = 2,
+        times = collect(0.0:3.0), scan_of_time = collect(1:4),
+        channel_freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6),
+        spw_of_chan = repeat([1, 2]; inner = nchan ÷ 2),
+        scan_names = ["No00$i" for i in 1:4], spw_names = ["A", "B"],
+        antennas = ["A$i" for i in 1:nant],
+    )
+    comp = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed())
+    l = CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = comp), logamp = (; bandpass = comp)), geom.antennas, geom)
+    s = (; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase), logamp = FP._bandpass_paths(l.plantree, :logamp)))
+    rng = MersenneTwister(61)
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    g = exp.(complex.(0.1 .* randn(rng, nant, 2, 1, nchan), 0.5 .* randn(rng, nant, 2, 1, nchan)))
+    S = [cis(2π * rand(rng)) for _ in 1:4, _ in bl_pairs, _ in 1:2]
+    results = _joint_scan_accumulators(g, S, fill(1, nant, 4), bl_pairs, [(1, 1), (2, 2)], geom)
+    # Window B is flagged throughout, so no station can anchor its phase.
+    for r in results
+        r.wl[:, :, 5:8] .= 0
+        r.rl[:, :, 5:8] .= 0
+    end
+    θ = fill(7.0, l.nθ)
+    pb, ab = FP._bandpass_blocks(s, θ, :phase), FP._bandpass_blocks(s, θ, :logamp)
+    status = [FP._block_status_array(b, geom) for b in pb]
+    fits = FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1), max_iterations = 100, tolerance = 1.0e-10)
+    FP._record_track_fits!(status, nothing, fits.phase)
+    @test _joint_pins(geom, pb, results, fill(1, nant, 4), PinAntenna(1)) ==
+        Set((1, (1, f, c, 1)) for f in 1:2 for c in 1:nchan)
+    for f in 1:2
+        @test only(status)[1, f, 1, 1] == FP.TrackSolved
+        @test only(status)[1, f, 2, 1] == FP.TrackNoData
+        @test all(==(7.0), only(pb).θ[1, f, 5:8, 1, 1])
+        @test all(iszero, only(pb).θ[1, f, 1:4, 1, 1])
+    end
+end
+
+@testset "JointSmoother: a fallback reference holds its constant where no prior acts" begin
+    # The reference has no data in channel 3, so A2 is pinned there. Without a
+    # prior, that pin fixes only the sum of A2's constant and channel 3's common
+    # phase, so A2 also holds a slot in a channel A1 pins. With a prior, the
+    # prior sees channel 3's common phase, and the pin alone fixes A2's constant.
+    nant, nchan = 4, 6
+    geom = _seg_geometry(nchan)
+    rng = MersenneTwister(17)
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    g = exp.(complex.(0.1 .* randn(rng, nant, 2, 1, nchan), 0.5 .* randn(rng, nant, 2, 1, nchan)))
+    S = [cis(2π * rand(rng)) for _ in 1:4, _ in bl_pairs, _ in 1:2]
+    results = _joint_scan_accumulators(g, S, fill(1, nant, 4), bl_pairs, [(1, 1), (2, 2)], geom)
+    for r in results, (bi, (a, _)) in pairs(bl_pairs)
+        a == 1 || continue
+        r.wl[bi, :, 3] .= 0
+        r.rl[bi, :, 3] .= 0
+    end
+    model(prior) = CAL.GainModel(;
+        phase = (; bandpass = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)),
+    )
+    setup(l) = (; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase)))
+
+    l = CAL.plan_parameters(model(nothing), geom.antennas, geom)
+    blocks = FP._bandpass_blocks(setup(l), zeros(l.nθ), :phase)
+    frame = _joint_frame(geom, blocks, results, fill(1, nant, 4), PinAntenna(1))
+    @test frame.pins == Set((1, (a, f, c, 1)) for f in 1:2 for (a, c) in push!([(1, c) for c in 1:nchan if c != 3], (2, 3)))
+    @test sort([(a, f) for (_, (a, f, _, _)) in frame.holds]) == [(a, f) for a in 2:nant for f in 1:2]
+    @test all(c != 3 for (_, (a, _, c, _)) in frame.holds if a == 2)
+
+    l = CAL.plan_parameters(model(CAL.OUPrior(; scale = 4.0e6, σ = 0.5)), geom.antennas, geom)
+    θ = zeros(l.nθ)
+    pb = FP._bandpass_blocks(setup(l), θ, :phase)
+    fits = FP.solve_joint_bandpass!(θ, results, geom, pb, NamedTuple[]; gauge = PinAntenna(1), max_iterations = 100, tolerance = 1.0e-8)
+    held = Dict((f.track.a, f.track.feed) => f.track.held for f in fits.phase)
+    @test all(iszero(held[(a, f)]) for a in 1:2 for f in 1:2)
+    @test all(held[(a, f)] > 0 for a in 3:nant for f in 1:2)
 end
 
 @testset "JointSmoother: each antenna's own time segments in one ALS" begin
@@ -1113,14 +1198,19 @@ end
         @test antenna_mean_spread(zs) < 1.0e-8
     end
 
-    @testset "each gauge holds one slot per freedom" begin
-        # Without a prior every (feed, channel) is a freedom. A pin holds the
-        # reference's slot in each; a zero sum holds a well-measured one and
-        # reaches the zero sum by a shift after the solve.
+    @testset "each gauge pins what the holds leave" begin
+        # Without a prior every (feed, channel) is a freedom and every track
+        # holds one slot. A pin holds the reference's slot in each channel, which
+        # also fixes the reference's constant; a zero sum pins all channels but
+        # one, which the holds fix, and reaches the zero sum by a shift after the
+        # solve.
         blocks = FP._bandpass_blocks(setup(layout()), zeros(layout().nθ), :phase)
-        pins = _joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(1))
-        @test pins == Set((1, (1, f, c, 1)) for f in 1:2 for c in 1:nchan)
-        @test length(_joint_pins(geom, blocks, results, fill(1, nant, 4), ZeroSumPhase())) == 2 * nchan
+        pin = _joint_frame(geom, blocks, results, fill(1, nant, 4), PinAntenna(1))
+        @test pin.pins == Set((1, (1, f, c, 1)) for f in 1:2 for c in 1:nchan)
+        @test sort([(a, f) for (_, (a, f, _, _)) in pin.holds]) == [(a, f) for a in 2:nant for f in 1:2]
+        zs = _joint_frame(geom, blocks, results, fill(1, nant, 4), ZeroSumPhase())
+        @test length(zs.pins) == 2 * (nchan - 1)
+        @test sort([(a, f) for (_, (a, f, _, _)) in zs.holds]) == [(a, f) for a in 1:nant for f in 1:2]
     end
 
 end

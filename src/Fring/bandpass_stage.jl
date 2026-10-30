@@ -139,7 +139,8 @@ function _validate_mean(name, comps)
             "Bandpass model group `$name`: the shape $(component_label(shape)) beside a " *
                 "mean needs a zero-mean OUPrior or CARMAPrior, or a RandomWalkPrior with an `init`, to " *
                 "separate the two. Without a prior the shape absorbs the mean, and a " *
-                "random walk without an init leaves its own level free.",
+                "random walk without an init leaves its own level free, and from order 2 its " *
+                "slope, which a delay cannot be told apart from.",
         ),
     )
     return nothing

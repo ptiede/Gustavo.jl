@@ -33,6 +33,15 @@ _row(g, comp = GCOMP, T = Float64) = vec(first(CALg.gauge_constraints(g, CALg.Ga
     @test _row(PinAntenna([9, 3, 2])) == [0, 0, 1, 0, 0, 0, 0, 0]
     @test _row(PinAntenna([4, 2])) == [0, 1, 0, 0, 0, 0, 0, 0]
 
+    # A reference node without data does not hold the freedom: its station's
+    # other feed does, else the next reference.
+    gap(weight) = CALg.GaugeFreedom(;
+        nodes = [1, 2, 3, 6], antenna = [1, 2, 3, 2], feed = [1, 1, 1, 2], scan = zeros(Int, 4),
+        component = fill((:phase, :x), 4), observable = fill(:phase, 4), direction = ones(4), weight,
+    )
+    @test CALg.gauge_anchor(PinAntenna(2), gap([10.0, 0, 3, 4])) == 6
+    @test CALg.gauge_anchor(PinAntenna([2, 3]), gap([10.0, 0, 3, 0])) == 3
+
     # With no listed reference present, the best-OBSERVED node carries the gauge.
     @test _row(PinAntenna([4])) == [1, 0, 0, 0, 0, 0, 0, 0]
 

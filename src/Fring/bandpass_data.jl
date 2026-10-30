@@ -162,22 +162,28 @@ function _joint_bandpass_graph(data, layout, ids)
 end
 
 """
-    _joint_bandpass_gauge!(gains, data, layout, blocks, gauge; tracks = []) -> Union{Nothing, NamedTuple}
+    _joint_bandpass_gauge!(gains, data, layout, blocks, gauge, phase_tracks, track_pins) -> (; tracks, pinned, meet)
 
-Impose `gauge` on the phase of a joint bandpass solve, over every gain slot's
-phase `φ`, numbered by `_gain_slot_ids`. Under `PinAntenna` there is one
-[`GaugeFreedom`](@ref) per connected component and the reference's slot in
-each is held at zero: the reference's whole track is zero, and the priors act
-on every other track relative to it. Under any other gauge the freedoms are
-the shifts that neither the data nor the priors of `tracks` (the phase tracks,
-`_bandpass_tracks`) see (`_gauge_directions`): the solve holds one
-well-measured slot per freedom at zero (`_gauge_pins`), and afterwards moves
-along the freedoms onto the constraints `C·φ = d` the gauge gives
-(`_meet_gauge!`), which this returns as `(; rows, d, freedoms)`: `rows[j]` the
+Fix the phase frame of a joint bandpass solve over every gain slot's phase `φ`,
+numbered by `_gain_slot_ids`: impose `gauge` and hold the band constant of each
+phase track. `phase_tracks(known)` builds the phase tracks (`_bandpass_tracks`)
+given the slots with data no pin fixes; they are returned with their holds
+(`_hold_phase_constants!`), the held slots marked in `track_pins` and the pinned
+ones in `pinned` and in the `pinned` layer of `gains`. A held or pinned slot's
+amplitude is solved like any other slot's.
+
+Under `PinAntenna` there is one [`GaugeFreedom`](@ref) per connected component
+and the reference's slot in each is pinned at zero: the reference's track is
+zero wherever it has data, and the priors act on every other track relative to
+it. In a component where the reference has no data, the next reference with
+data is pinned (`gauge_anchor`), and the reference's slot there is filled by
+its prior. `meet` is then `nothing`. Under any other gauge the freedoms are the
+shifts that neither the data nor the priors of the tracks see
+(`_gauge_directions`): the solve pins what the holds leave of them, and
+afterwards moves along the freedoms onto the constraints `C·φ = d` the gauge
+gives (`_meet_gauge!`). `meet` is `(; rows, d, freedoms)`: `rows[j]` the
 `(slot, coefficient)` pairs of row `j` and `freedoms[k]` the slots of freedom
-`k` with their shift. When the held slots are the constraints themselves, as
-under a pin, it returns `nothing`. Held slots are marked in the `pinned` layer
-of `gains`; a held slot's amplitude is solved like any other slot's.
+`k` with their shift.
 
 Only the phase is a gauge freedom. Multiplying the gains of a set of nodes by a
 shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)` on every
@@ -196,7 +202,7 @@ line in frequency under a delay. A pin settles the spectrum by the
 reference's data: the reference's bandpass is zero by definition, and its
 structure appears, sign flipped, on every other track, where their priors act
 on it. A prior on the reference's own track has nothing left to act on, so a
-fully held track takes no part in the prior fit. Other gauges leave the
+fully pinned track takes no part in the prior fit. Other gauges leave the
 spectrum to the priors: only the shifts every prior is blind to are freedoms,
 each fixed by a projection onto its shift being zero (under a zero sum, of
 every slot). Along such a freedom the data and the priors are unchanged, so
@@ -219,7 +225,7 @@ wherever each connected group of baselines has an odd loop; see
 `_split_free_amplitudes!` for a group without one) and biasing every other
 station through the inconsistency.
 """
-function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge; tracks = [])
+function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge, phase_tracks, track_pins)
     T = real(eltype(first(gains).g))
     ids = _gain_slot_ids(gains)
     compid, ncomp, nodew = _joint_bandpass_graph(data, layout, ids)
@@ -229,60 +235,151 @@ function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge; tracks = [])
     for (n, c) in pairs(compid)
         iszero(c) || push!(members[c], n)
     end
-    # A pin holds the reference's track at zero in every component; any other
-    # gauge fixes only the shifts the priors leave free.
+    function along(comps, shift)
+        nodes = reduce(vcat, members[comps])
+        at = Dict(zip(comps, shift))
+        return (nodes, [at[compid[n]] for n in nodes])
+    end
+    function system(freedoms)
+        fs = map(freedoms) do (nodes, direction)
+            GaugeFreedom(;
+                nodes, antenna = [blocks[slot[n][1]].antennas[slot[n][2][1]] for n in nodes],
+                feed = [slot[n][2][2] for n in nodes], scan = zeros(Int, length(nodes)),
+                component = [blocks[slot[n][1]].plan.path for n in nodes], observable = fill(:phase, length(nodes)),
+                direction = T.(direction), weight = nodew[nodes],
+            )
+        end
+        C, d = _bandpass_gauge_system(gauge, GaugeFreedoms{T}(fs, length(compid)))
+        Cs = sparse(C)
+        rows = [Tuple{Int, T}[] for _ in axes(Cs, 1)]
+        for n in axes(Cs, 2), i in nzrange(Cs, n)
+            iszero(nonzeros(Cs)[i]) || push!(rows[rowvals(Cs)[i]], (n, nonzeros(Cs)[i]))
+        end
+        return rows, d
+    end
+    pinned = falses(length(compid))
     reference = _gauge_for(gauge, first(blocks).plan.path) isa PinAntenna
-    directions = reference ? [([c], [1.0]) for c in 1:ncomp] : _gauge_directions(compid, ncomp, tracks)
-    freedoms = map(directions) do (comps, shift)
-        cn = reduce(vcat, members[comps])
-        along = Dict(zip(comps, shift))
-        GaugeFreedom(;
-            nodes = cn, antenna = [blocks[slot[n][1]].antennas[slot[n][2][1]] for n in cn],
-            feed = [slot[n][2][2] for n in cn], scan = zeros(Int, length(cn)),
-            component = [blocks[slot[n][1]].plan.path for n in cn], observable = fill(:phase, length(cn)),
-            direction = T[along[compid[n]] for n in cn], weight = nodew[cn],
-        )
+    if reference
+        rows, _ = system([along([c], [1.0]) for c in 1:ncomp])
+        foreach(row -> pinned[first(only(row))] = true, rows)
     end
-    C, d = _bandpass_gauge_system(gauge, GaugeFreedoms{T}(freedoms, length(compid)))
-    Cs = sparse(C)
-    rows = [Tuple{Int, T}[] for _ in axes(Cs, 1)]
-    for n in axes(Cs, 2), i in nzrange(Cs, n)
-        iszero(nonzeros(Cs)[i]) || push!(rows[rowvals(Cs)[i]], (n, nonzeros(Cs)[i]))
-    end
-    pins = all(j -> length(rows[j]) == 1 && iszero(d[j]), eachindex(rows, d)) ?
-        [first(only(row)) for row in rows] : _gauge_pins(freedoms, compid, nodew)
-    for n in pins
+    tracks = phase_tracks((nodew .> 0) .& .!pinned)
+    natural = [along(comps, shift) for (comps, shift) in _gauge_directions(compid, ncomp, tracks)]
+    tracks = _hold_phase_constants!(pinned, track_pins, tracks, natural, nodew; reference)
+    for n in findall(pinned)
         k, I = slot[n]
         gains[k].pinned[I] = true
     end
-    length(pins) == length(rows) && all(j -> rows[j] == [(pins[j], one(T))], eachindex(rows)) && return nothing
-    return (; rows, d, freedoms = [(f.nodes, f.direction) for f in freedoms])
+    reference && return (; tracks, pinned, meet = nothing)
+    rows, d = system(natural)
+    return (; tracks, pinned, meet = (; rows, d, freedoms = natural))
 end
 
-# The slots the solve holds at zero to fix the gauge `freedoms`: one per
-# freedom, chosen by a pivoted QR of their shifts over the slots any
-# correlation touches, each weighted by the square root of its row weight
-# `nodew`, so that holding them fixes every freedom on well-measured slots. The
-# gauge asked for is reached afterwards by a shift along the freedoms
-# (`_meet_gauge!`), so the choice changes no result, only the path to it.
-function _gauge_pins(freedoms, compid, nodew)
-    pins = Int[]
-    for group in _freedom_blocks(freedoms)
-        fs = freedoms[group]
-        nodes = first(fs).nodes
-        N = reduce(hcat, [f.direction for f in fs]) .* sqrt.(nodew[nodes])
-        F = qr(Matrix(N'), ColumnNorm())
-        append!(pins, nodes[F.p[1:length(fs)]])
+# Each phase track with the band constant `S` absorbs held, and the slots that
+# fix what the holds leave of the freedoms `natural` (`(slots, shift)`) marked
+# in `pinned`. Along a freedom `f`, with each track `t` also moved by a constant
+# `α_t`, slot `n` of `t` moves by `f_n + α_t`, which neither the data nor the
+# priors see; one constant on every slot with each `α_t` its negative moves
+# nothing. A track's hold sets its `α_t` to minus its held slot's `f_n` (marked
+# in `track_pins`) or, under a proper prior acting on it, minus its held level's
+# share of `f` (`held`), leaving `f_n − ℓ_t(f)`. The pins fix that. Within a
+# block of freedoms sharing slots, a pivoted QR of `f_n − ℓ_t(f)` over the slots
+# whose track is held in the block, each weighted by `√nodew`, picks them; it
+# leaves the block's constant, which the holds do not see. Across blocks, in
+# order of `nodew`, each slot is pinned that ties its track's constant to a
+# block's not yet tied to it, so the pins and holds form a spanning forest over
+# the tracks and blocks, and only the shift that moves nothing is left. Under a
+# pin on the reference (`reference`), a track is held only where its pins leave
+# its constant free, and nothing else is pinned.
+function _hold_phase_constants!(pinned, track_pins, tracks, natural, nodew; reference)
+    blocks = _freedom_blocks(natural)
+    nblock = length(blocks)
+    block = zeros(Int, length(pinned))
+    for (b, js) in pairs(blocks)
+        block[first(natural[first(js)])] .= b
     end
-    return pins
+    track = zeros(Int, length(pinned))
+    for (i, t) in pairs(tracks)
+        track[t.slots] .= i
+    end
+    root = collect(1:(nblock + length(tracks)))
+    function find(i)
+        while root[i] != i
+            i = root[i] = root[root[i]]
+        end
+        return i
+    end
+    ties(n) = !iszero(track[n]) && !iszero(block[n]) && find(nblock + track[n]) != find(block[n])
+    tie!(n) = (root[find(nblock + track[n])] = find(block[n]))
+    foreach(n -> ties(n) && tie!(n), findall(pinned))
+
+    hold_block = zeros(Int, length(tracks))
+    held = map(eachindex(tracks)) do i
+        t = tracks[i]
+        j = findfirst(t.active)
+        if !isnothing(j) && _proper_prior(t.prior)
+            piece = t.slots[t.pieces[j]]
+            n = piece[findfirst(n -> !iszero(block[n]), piece)]
+            ties(n) || return merge(t, (; held = 0))
+            tie!(n)
+            hold_block[i] = block[n]
+            return merge(t, (; held = _level_group(t, t.prior, j)))
+        end
+        measured = sort!([n for n in t.slots if nodew[n] > 0 && !pinned[n]]; by = n -> nodew[n], rev = true)
+        h = findfirst(ties, measured)
+        if !isnothing(h)
+            n = measured[h]
+            track_pins[n] = true
+            tie!(n)
+            hold_block[i] = block[n]
+        end
+        return merge(t, (; held = 0))
+    end
+    reference && return held
+
+    for (b, js) in pairs(blocks)
+        length(js) > 1 || continue
+        nodes = first(natural[first(js)])
+        shifts = reduce(hcat, [last(natural[j]) for j in js])
+        at = Dict(n => i for (i, n) in pairs(nodes))
+        share = Dict{Int, Vector{Float64}}()
+        rows = [i for (i, n) in pairs(nodes) if !iszero(track[n]) && hold_block[track[n]] == b && !track_pins[n]]
+        isempty(rows) && continue
+        V = similar(shifts, length(rows), length(js))
+        for (r, i) in pairs(rows)
+            t = held[track[nodes[i]]]
+            V[r, :] .= shifts[i, :] .- get!(() -> _held_share(t, shifts, at, track_pins), share, track[nodes[i]])
+        end
+        F = qr(permutedims(V .* sqrt.(nodew[nodes[rows]])), ColumnNorm())
+        R = abs.(diag(F.R))
+        foreach(p -> pinned[nodes[rows[p]]] = true, F.p[1:count(>(first(R) * sqrt(eps())), R)])
+    end
+    measured = sort!([n for n in eachindex(nodew) if nodew[n] > 0 && !pinned[n] && !track_pins[n]]; by = n -> nodew[n], rev = true)
+    for n in measured
+        ties(n) || continue
+        pinned[n] = true
+        tie!(n)
+    end
+    return held
 end
 
-# The indices of `freedoms` grouped by the slots they move: the freedoms of one
-# block share them.
+# The share of the freedoms `shifts` (over the slots `at` numbers) track `t`'s
+# hold takes up: its held slot's shift, or, under a held level, that level's
+# coefficient in the shift its prior's mean takes up (`_mean_basis`).
+function _held_share(t, shifts, at, track_pins)
+    iszero(t.held) && return shifts[at[t.slots[findfirst(n -> track_pins[n], t.slots)]], :]
+    (; slots, B, cols) = _mean_basis(t)
+    inside = [i for i in eachindex(slots) if haskey(at, slots[i])]
+    coefficients = B[inside, :] \ shifts[[at[slots[i]] for i in inside], :]
+    return coefficients[searchsortedfirst(cols, t.held), :]
+end
+
+# The indices of `freedoms`, each `(slots, shift)`, grouped by the slots they
+# move: the freedoms of one block share them.
 function _freedom_blocks(freedoms)
     groups = Dict{Vector{Int}, Vector{Int}}()
-    for (j, f) in pairs(freedoms)
-        push!(get!(groups, f.nodes, Int[]), j)
+    for (j, (nodes, _)) in pairs(freedoms)
+        push!(get!(groups, nodes, Int[]), j)
     end
     return sort!(collect(values(groups)); by = first)
 end

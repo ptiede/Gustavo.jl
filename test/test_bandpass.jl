@@ -301,6 +301,9 @@ end
             Bandpass(; model = GainModel(; logamp = (; delay, shape)), gauge = PinAntenna(1)), nothing,
         )
         @test_throws "needs a zero-mean OUPrior" pair(; delay, shape = _bpc(CAL.ChannelBlocks(1)))
+        @test_throws "which a delay cannot be told apart from" pair(;
+            delay, shape = _bpc(CAL.ChannelBlocks(1); prior = CAL.RandomWalkPrior(; order = 2, σ = 0.1)),
+        )
         @test_throws "one is the shape" pair(; a = shape, b = _bpc(CAL.ChannelBlocks(2)))
         @test_throws "one is the shape" pair(; a = level, b = _bpc(CAL.GlobalFrequency()))
         @test_throws "the level GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectralWindow()" *

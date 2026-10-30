@@ -203,7 +203,8 @@ The solve maximizes the posterior of the gains: χ²/2 of the visibilities with
 energy. `S` absorbs a constant on any (station, feed, time segment) track, which
 the data therefore cannot measure: a proper prior acting on the track holds it
 at the value the prior prefers, and on any other track one slot is held. The
-solve
+gauge's pins fix only what those holds leave of the shifts above, so the MAP
+is unique. The solve
 
 1. starts every slot at its own estimate given every other gain and `S`,
    repeated with `S` re-solved (StEFCal-style rounds), then searches each feed
@@ -302,31 +303,28 @@ function solve_joint_bandpass!(
     end
     any(hasdata) || throw(ArgumentError("solve_joint_bandpass!: no gain slot has data to fit."))
     fitted = (; phase = !isempty(phase_blocks), amp = !isempty(amp_blocks))
-    # The gauge fixes phases; a solve that holds every phase at zero has none to
-    # fix. Its freedoms are the shifts the priors acting on the data do not see.
-    gauge_state = fitted.phase ?
-        _joint_bandpass_gauge!(
-            gains, data, layout, blocks, gauge;
-            tracks = _bandpass_tracks(fits, :phase, ids, loc, layout.present, geom.nfeed, hasdata),
-        ) : nothing
-    pinned = [gains[k].pinned[I] for (k, I) in slot]
-    # A held slot is fixed, not measured: a track held throughout gives its prior
-    # nothing to act on.
-    known = (; phase = hasdata .& .!pinned, amp = hasdata)
     # A fixed chunk count keeps the sums' order, and so the result, independent
     # of the thread count.
     cells = BandpassCells(r, w, jl.edge, jl.slot_pairs; nchunks = 16)
     npairs = length(jl.slot_pairs)
     weight = _slot_weights(cells, nslots)
     track_pins = (; phase = falses(nslots), amp = falses(nslots))
-    tracks = map((; phase = :phase, amp = :amp)) do obs
-        fitted[obs] || return NamedTuple[]
-        gauge_pins = obs === :phase ? pinned : falses(nslots)
-        return [
-            _hold_track_constant!(track_pins[obs], t, gauge_pins, hasdata, weight)
-                for t in _bandpass_tracks(fits, obs, ids, loc, layout.present, geom.nfeed, known[obs])
-        ]
-    end
+    # The gauge fixes phases; a solve that holds every phase at zero has none to
+    # fix. A pinned slot is fixed, not measured: a track pinned throughout gives
+    # its prior nothing to act on.
+    frame = fitted.phase ?
+        _joint_bandpass_gauge!(
+            gains, data, layout, blocks, gauge,
+            known -> _bandpass_tracks(fits, :phase, ids, loc, layout.present, geom.nfeed, known), track_pins.phase,
+        ) : (; tracks = NamedTuple[], pinned = falses(nslots), meet = nothing)
+    pinned = frame.pinned
+    tracks = (;
+        phase = frame.tracks,
+        amp = fitted.amp ? [
+                _hold_track_constant!(track_pins.amp, t, hasdata, weight)
+                for t in _bandpass_tracks(fits, :amp, ids, loc, layout.present, geom.nfeed, hasdata)
+            ] : NamedTuple[],
+    )
     # A slot moves where it has data, or where a prior acting on its track fills it.
     function movable(obs)
         out = fitted[obs] .& hasdata
@@ -354,8 +352,8 @@ function solve_joint_bandpass!(
     # difference across the band decoheres `S` and with it a single round's
     # estimates. Every slot moves at once, so every second round takes the mean
     # of the last two, which keeps the rounds from oscillating (Salvini &
-    # Wijnholds 2014). `S` absorbs a constant on any track, which nothing else
-    # holds, so each round takes each amplitude track's band mean out.
+    # Wijnholds 2014). `S` absorbs a constant on any track, so each round takes
+    # the band mean out of each amplitude track no held slot fixes.
     χ2 = _profiled_chi2(gains_of(ℓ, φ), cells, executor)
     for round in 1:max_iterations
         lin = linearized(ℓ, φ)
@@ -370,6 +368,7 @@ function solve_joint_bandpass!(
         end
         if fitted.amp
             for t in tracks.amp
+                any(n -> track_pins.amp[n], t.slots) && continue
                 moved = [n for n in t.slots if free.amp[n]]
                 isempty(moved) || (ℓ[moved] .-= sum(view(ℓ, moved)) / length(moved))
             end
@@ -481,28 +480,29 @@ function solve_joint_bandpass!(
 
     # The pins fix the freedoms inside the solve; the gauge asked for is a shift
     # along them, which neither the data nor the priors see.
-    isnothing(gauge_state) || _meet_gauge!(φ, (; gauge_state.rows, d = Float64.(gauge_state.d)), gauge_state.freedoms)
+    isnothing(frame.meet) || _meet_gauge!(φ, (; frame.meet.rows, d = Float64.(frame.meet.d)), frame.meet.freedoms)
+    # A pinned slot is valid where data or a prior would determine it.
+    valid = (; phase = free.phase .| track_pins.phase .| (pinned .& movable(:phase)), amp = free.amp .| track_pins.amp)
     for (n, (k, I)) in pairs(slot)
         gk = gains[k]
         gk.g[I] = exp(complex(ℓ[n], φ[n]))
         gk.φ[I] = φ[n]
-        gk.phase_valid[I] = free.phase[n] || track_pins.phase[n] || (fitted.phase && pinned[n])
-        gk.amp_valid[I] = free.amp[n] || track_pins.amp[n]
+        gk.phase_valid[I] = valid.phase[n]
+        gk.amp_valid[I] = valid.amp[n]
     end
     levels = [(; phase = _level_values(phase_level[a]), amp = _level_values(amp_level[a])) for a in 1:nant]
     delays = [_level_values(delay[a]) for a in 1:nant]
     solved = (; phase = φ, amp = ℓ)
     results = map((:phase, :amp)) do obs
         x = solved[obs]
-        valid = obs === :phase ? free.phase .| track_pins.phase .| (fitted.phase .& pinned) : free.amp .| track_pins.amp
         prior_of = zeros(Int, length(tracks[obs]))
         prior_of[acting[obs]] = eachindex(acting[obs])
         map(eachindex(tracks[obs])) do i
             t = tracks[obs][i]
             j = prior_of[i]
             status = map(t.pieces) do p
-                all(pinned[t.slots[p]]) && obs === :phase && return TrackSolved
-                return _band_track_status([valid[n] ? x[n] : NaN for n in t.slots[p]], flat_span)
+                obs === :phase && all(pinned[t.slots[p]]) && return any(valid.phase[t.slots[p]]) ? TrackSolved : TrackNoData
+                return _band_track_status([valid[obs][n] ? x[n] : NaN for n in t.slots[p]], flat_span)
             end
             if !(isnothing(t.level) && isnothing(t.delay)) && any(t.active)
                 _, mean = _track_energy(track_layouts[obs][i], priors[obs][j], x)
@@ -547,10 +547,12 @@ const _FEED_DELAY_PFA = 1.0e-4
 # band `B` and the smallest spacing `δν` of the frequencies, so the best one is
 # within `π/8` of the peak's phase at the band's edges. A peak whose
 # false-alarm probability over those trials is below `_FEED_DELAY_PFA` is
-# applied to `φ`, less a constant per component of the gauge graph (`component`)
-# that keeps its `pinned` slot and a constant per track that keeps its `held`
-# slot: the same-feed products and `S` see neither. Otherwise the feed's delay
-# is left where it is, with a warning.
+# applied to `φ`, less a constant per track that keeps its `held` slot and then
+# a constant per component of the gauge graph (`component`) that keeps a
+# `pinned` slot: the same-feed products and `S` see neither. Under a pin that
+# slot is the reference's; any other pin or hold fixes only a shift nothing
+# sees, so moving it changes no result. Otherwise the feed's delay is left where
+# it is, with a warning.
 function _align_feed_delays!(φ, ℓ, cells::BandpassCells, feed, ν, component, pinned, held, tracks)
     for f in 2:maximum(feed)
         freqs = sort!(unique(ν[n] for n in eachindex(ν, feed) if feed[n] == f))
@@ -592,13 +594,13 @@ function _align_feed_delays!(φ, ℓ, cells::BandpassCells, feed, ν, component,
             continue
         end
         shift = [feed[m] == f ? 2π * τs[best] * (ν[m] - ν̄) : 0.0 for m in eachindex(ν, feed)]
-        keep = Dict(component[m] => shift[m] for m in eachindex(shift, pinned) if pinned[m] && !iszero(component[m]))
-        for m in eachindex(shift, component)
-            shift[m] -= get(keep, component[m], 0.0)
-        end
         for t in tracks
             h = findfirst(m -> held[m], t.slots)
             isnothing(h) || (shift[t.slots] .-= shift[t.slots[h]])
+        end
+        keep = Dict(component[m] => shift[m] for m in eachindex(shift, pinned) if pinned[m] && !iszero(component[m]))
+        for m in eachindex(shift, component)
+            shift[m] -= get(keep, component[m], 0.0)
         end
         φ .+= shift
     end
@@ -682,23 +684,13 @@ _prior_projectors(t) = [(slots, I - B * pinv(B)) for (slots, B) in _prior_null_b
 
 # The shifts of track `t`'s slots its prior does not see, as `(slots, B)` with
 # the columns of `B` spanning them over `slots`: under a proper prior its mean
-# over the active pieces (`_mean_designs`), which it is profiled over; under a
+# over the active pieces (`_mean_basis`), which it is profiled over; under a
 # flat-start walk a polynomial of degree below its order on each active piece.
 function _prior_null_bases(t)
     active = [(j, p) for (j, p) in pairs(t.pieces) if t.active[j]]
     isempty(active) && return Tuple{Vector{Int}, Matrix{Float64}}[]
     if _proper_prior(t.prior)
-        design = _mean_designs(t, t.prior)
-        cols = sort!(unique(c for (j, _) in active for c in design[j].cols))
-        slots = reduce(vcat, [t.slots[p] for (_, p) in active])
-        B = zeros(length(slots), length(cols))
-        r = 0
-        for (j, p) in active, i in eachindex(p)
-            r += 1
-            for (c, h) in zip(design[j].cols, design[j].rows[i])
-                B[r, searchsortedfirst(cols, c)] = h
-            end
-        end
+        (; slots, B) = _mean_basis(t)
         return [(slots, B)]
     end
     return map(active) do (_, p)
@@ -708,6 +700,25 @@ function _prior_null_bases(t)
         iszero(scale) || (v ./= scale)
         (t.slots[p], [x^k for x in v, k in 0:(_statedim(t.prior) - 1)])
     end
+end
+
+# The design of track `t`'s mean under a proper prior over the slots of its
+# active pieces (`_mean_designs`): `B[i, c]` the coefficient of mean unknown
+# `cols[c]` (a level group, then each delay group after them) at `slots[i]`.
+function _mean_basis(t)
+    active = [(j, p) for (j, p) in pairs(t.pieces) if t.active[j]]
+    design = _mean_designs(t, t.prior)
+    cols = sort!(unique(c for (j, _) in active for c in design[j].cols))
+    slots = reduce(vcat, [t.slots[p] for (_, p) in active])
+    B = zeros(length(slots), length(cols))
+    r = 0
+    for (j, p) in active, i in eachindex(p)
+        r += 1
+        for (c, h) in zip(design[j].cols, design[j].rows[i])
+            B[r, searchsortedfirst(cols, c)] = h
+        end
+    end
+    return (; slots, B, cols)
 end
 
 # Record a joint solve's track fits (`solve_joint_bandpass!`) into one array per

@@ -332,7 +332,13 @@ once per distinct step. The start is the stationary covariance, from the
 Lyapunov equation ``F P + P F^\top + g g^\top = 0``, solved after rescaling the
 coordinate by the roots' geometric mean magnitude, where ``F`` is of order one.
 As for a random walk, the coordinate is first rescaled by its median spacing,
-so a step's ``Q`` is well conditioned however slow the roots are. The prior is
+so a step is of order one. A step's ``Q`` is still nearly singular where the
+roots are slow against it, ``|r_k|\Delta \ll 1``: the state then evolves almost
+deterministically over the step, and ``Q^{-1}`` is large along the directions
+it barely moves. The MAP therefore takes the prior energy and its gradient from
+the whitened innovations ``L^{-1}(s_k - A s_{k-1})``, ``Q = L L^\top``, rather
+than from the assembled quadratic, whose entries carry the rounding of
+``Q^{-1}``. The prior is
 proper, so a level beside it is estimated, and integrated out for the
 hyperparameters, as for OU, and every hyperparameter given as a density is
 estimated by the same type-II MAP over the logs. The hyperprior is restricted
@@ -518,6 +524,78 @@ with ``\hat S(g)`` the closed-form least-squares source term for the gains and
 \chi^2_J(g) = \sum_c \frac{|r_c|^2}{w_c} - \frac{\big|\sum_c \bar u_c r_c\big|^2}{\sum_c w_c |u_c|^2}.
 ```
 
+### [What the data leave free](@id bandpass-gauge)
+
+Two kinds of phase shift leave every ``\chi^2_J`` unchanged:
+
+- **The gauge.** A phase added to every slot of a connected component of the
+  correlation graph cancels from ``g_a S \bar g_b`` on every correlation in it.
+  Where the stations share one segmentation, the components are the array's
+  (frequency segment, time segment) cells, so the shift is a phase spectrum
+  common to every station.
+- **The band constants.** ``S_J`` is frequency-flat, so a constant ``\alpha_t``
+  added to every slot of one (station, feed, time segment) track ``t`` is
+  absorbed by the ``S_J`` of its correlations.
+
+A proper prior along frequency sees a common spectrum, except the part its
+track's mean takes up: a constant under a level, and a line in frequency under
+a delay. Let ``F`` be the common shifts every prior is blind to. That is one
+constant per set of components the priors join, plus a line under a delay, and
+one constant per component where no prior acts. A shift ``f \in F``, with track
+constants ``\alpha``, moves slot ``n`` of track ``t`` by
+
+```math
+\delta\phi_n = f_n + \alpha_t,
+```
+
+which neither the data nor the priors see. One constant on every slot, with
+every ``\alpha_t`` its negative, moves nothing, so a connected set of ``T``
+tracks has ``|F| + T - 1`` such directions. The MAP is unique only when the
+solve fixes each of them, and nothing more. It does so in two parts
+(`_joint_bandpass_gauge!`):
+
+1. **Each track holds its band constant.** Under a proper prior acting on the
+   track, the track's level is held at zero, and the prior sets the constant
+   through the mean it is profiled over. Any other track holds its
+   best-measured slot at zero. A hold sets ``\alpha_t = -\ell_t(f)``, with
+   ``\ell_t(f)`` the held level's share of ``f`` or ``f`` at the held slot, and
+   leaves ``f_n - \ell_t(f)``.
+2. **The gauge pins what the holds leave.** Within a set of components that
+   the priors join, a pivoted QR of ``f_n - \ell_t(f)``, weighted by each slot's
+   data, picks the pins. Across those sets, the pins tie each track's constant
+   to every set it reaches, best-measured slots first, so that the pins and
+   holds form a spanning forest over the tracks and sets. That makes
+   ``|F| - 1`` pins per connected set: none under a level alone, one (for the
+   line) under a delay, and one per component but one where no prior acts.
+
+After the MAP, a shift along ``F`` meets the gauge asked for; under
+`ZeroSumPhase`, that is a zero mean over the slots along each freedom. Neither
+the data nor the priors see the shift, so the pins choose only the solve's path,
+not its result.
+
+`PinAntenna` pins more than ``F``: the reference's slot in every component. The
+reference's bandpass is zero by definition, the other tracks' priors act on
+their bandpasses relative to it, and the reference's track, fixed throughout,
+takes no part in the hyperparameter fit. A track is then held only where its
+pins leave its constant free, so the reference holds nothing. Where the
+reference has no data in a component, the next reference with data is pinned
+there instead (`gauge_anchor`). Whether that station also holds its constant
+depends on the priors:
+
+- **With a prior,** the prior sees a jump in the common phase at that
+  component, so the pin alone fixes the station's constant. Holding its level
+  as well would pull its bandpass toward a zero mean that nothing measures.
+- **Without a prior,** nothing ties the common phase in that component to the
+  other components. The pin fixes only the sum of that phase and the station's
+  constant, so the station also holds a slot in a component the reference
+  pins. Without that hold, the common phase in the component would be
+  undetermined, and the published phases there would depend on where the solve
+  started.
+
+Any direction left unfixed makes the MAP objective flat along it: the curvature
+is singular there, and the solution along that direction is whatever the start
+gives.
+
 ### The prior as a sparse quadratic
 
 A state-space prior's energy over a track, written over its states rather than
@@ -672,14 +750,6 @@ depend on, which the data barely measure, would take EM many more cycles. The
 hyperparameters start from type-II MAP on each track alone, taking each slot's
 own estimate given every other gain and ``S`` as an independent measurement;
 for a phase track that start is summed over the branch histories.
-
-A pin holds the reference's track at zero in every cell of the gauge: the
-reference's bandpass is zero by definition, the other tracks' priors act on
-their bandpasses relative to it, and the held track takes no part in the
-hyperparameter fit. Any other gauge leaves the common phase to the priors, which
-set all of it but the part the tracks' means take up; along those shifts neither
-the data nor any prior changes, so holding one slot per shift is exact, and the
-gauge is reached afterwards by a shift along them (`_joint_bandpass_gauge!`).
 
 ### Branches
 

@@ -765,12 +765,11 @@ function _slot_weights(cells::BandpassCells, nslots)
     return out
 end
 
-# Track `t` with the constant `S` absorbs held: by a gauge pin on one of its
-# slots; else by its first acting level group (`held`) under a proper prior,
-# which the prior then sets; else by its slot of most data `weight`, marked in
-# `pins`. `held` is `0` where no level group holds it.
-function _hold_track_constant!(pins, t, gauge_pins, hasdata, weight)
-    any(n -> gauge_pins[n], t.slots) && return merge(t, (; held = 0))
+# Amplitude track `t` with the constant `S` absorbs held: by its first acting
+# level group (`held`) under a proper prior, which the prior then sets; else by
+# its slot of most data `weight`, marked in `pins`. `held` is `0` where no level
+# group holds it. Phase tracks are held by `_hold_phase_constants!`.
+function _hold_track_constant!(pins, t, hasdata, weight)
     j = findfirst(t.active)
     !isnothing(j) && _proper_prior(t.prior) && return merge(t, (; held = _level_group(t, t.prior, j)))
     measured = [n for n in t.slots if hasdata[n]]
@@ -879,13 +878,14 @@ function _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_ite
 end
 
 # `_posterior_system` of one observable, its structure kept in `cache[obs]` while
-# the free slots are unchanged and its values rewritten for the curvature `H`,
-# the gradient `b` and the slot values `x`: the prior terms' pattern and the
+# the free slots and the fixed slots' values are unchanged and its values
+# rewritten for the curvature `H`, the gradient `b` and the free slots' values
+# `x`: the prior terms' pattern, their constants from the fixed slots and the
 # factor's symbolic analysis carry over. `H` keeps one sparsity pattern
 # throughout (`_curvature_pattern`).
 function _cached_system!(cache, obs, H, b, x, free, tracks, key)
     entry = get(cache, obs, nothing)
-    if isnothing(entry) || entry.sys.free != free
+    if isnothing(entry) || entry.sys.free != free || any(n -> !free[n] && entry.sys.x[n] != x[n], eachindex(x, free))
         sys = _posterior_system(H, b, x, free, tracks, key)
         Is, Js, _ = findnz(H[free, free])
         cache[obs] = (; sys, data = [_position(sys.layout.K, i, j) for (i, j) in zip(Is, Js)])
