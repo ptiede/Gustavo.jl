@@ -342,6 +342,35 @@ _is_gap(A, k, b) = all(
     A.flag[p, c, b, k] && iszero(A.weight[p, c, b, k]) for p in A.pol, c in axes(A.vis, 2)
 )
 
+# Fills the random-group columns `cols` from row `row + 1` on with the records
+# `scan.keep` names, and returns the last row written. A separate method so the
+# loop specializes on the column and array types.
+function _write_records!(cols, row, scan, number, place)
+    (; data, date, uu, vv, ww, baseline, inttim) = cols
+    T = eltype(data)
+    for (k, b) in scan.keep
+        row += 1
+        t = scan.times[k]
+        # The Julian Date of the day's 0h UT, and the fraction of that day.
+        day = floor(JD_UNIX_EPOCH + t / 86400 - 0.5) + 0.5
+        date[row, 1] = day
+        date[row, 2] = t / 86400 - (day - JD_UNIX_EPOCH)
+        uu[row], vv[row], ww[row] = (scan.uvw[i, b, k] / _C_LIGHT for i in 1:3)
+        a1, a2 = scan.names[b]
+        baseline[row] = _encode_aips_baseline(number[a1], number[a2])
+        inttim[row] = scan.integration[b, k]
+        for (w, A) in pairs(scan.arrays), c in axes(A.vis, 2), (p, q) in pairs(A.pol)
+            f, i = place(w, c)
+            flagged, wt, v = A.flag[q, c, b, k], A.weight[q, c, b, k], A.vis[q, c, b, k]
+            gap = flagged && iszero(wt)
+            data[row, 1, p, f, i] = gap ? zero(T) : real(v)
+            data[row, 2, p, f, i] = gap ? zero(T) : imag(v)
+            data[row, 3, p, f, i] = flagged ? -abs(wt) : wt
+        end
+    end
+    return row
+end
+
 function Gustavo.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = false)
     ispath(path) && !overwrite && throw(
         ArgumentError("write_uvfits: $path exists; pass `overwrite = true` to replace it")
@@ -401,29 +430,9 @@ function Gustavo.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = 
                 )
             )
         end
-        integration = _integration_times(ref)
-        names = XRadio.baselines(ref)
         start = row + 1
-        for (k, b) in s.keep
-            row += 1
-            t = s.times[k]
-            # The Julian Date of the day's 0h UT, and the fraction of that day.
-            day = floor(JD_UNIX_EPOCH + t / 86400 - 0.5) + 0.5
-            date[row, 1] = day
-            date[row, 2] = t / 86400 - (day - JD_UNIX_EPOCH)
-            uu[row], vv[row], ww[row] = (uvw[i, b, k] / _C_LIGHT for i in 1:3)
-            a1, a2 = names[b]
-            baseline[row] = _encode_aips_baseline(number[a1], number[a2])
-            inttim[row] = integration[b, k]
-            for (w, A) in pairs(s.arrays), c in axes(A.vis, 2), (p, q) in pairs(A.pol)
-                f, i = layout.place(w, c)
-                flagged, wt, v = A.flag[q, c, b, k], A.weight[q, c, b, k], A.vis[q, c, b, k]
-                gap = flagged && iszero(wt)
-                data[row, 1, p, f, i] = gap ? zero(T) : real(v)
-                data[row, 2, p, f, i] = gap ? zero(T) : imag(v)
-                data[row, 3, p, f, i] = flagged ? -abs(wt) : wt
-            end
-        end
+        scan = (; s.keep, s.times, s.arrays, uvw, names = XRadio.baselines(ref), integration = _integration_times(ref))
+        row = _write_records!((; data, date, uu, vv, ww, baseline, inttim), row, scan, number, layout.place)
         kept_times = [s.times[k] for (k, _) in s.keep]
         half = maximum(inttim[start:row]) / 2
         lo, hi = minimum(kept_times) - half, maximum(kept_times) + half

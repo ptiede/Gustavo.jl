@@ -291,13 +291,13 @@ end
 
 const _C_LIGHT = 299792458.0
 
-function Gustavo.load_uvfits(path; element_type::Union{Nothing, Type} = nothing)
+function Gustavo.load_uvfits(path; element_type::Union{Nothing, Type} = nothing, gap = 10.0)
     isnothing(element_type) || element_type <: AbstractFloat || throw(
         ArgumentError(
             "load_uvfits: element_type must be a real float type, got $(element_type)",
         ),
     )
-    return _read_uvfits(path, element_type)
+    return _read_uvfits(path, element_type, gap)
 end
 
 # Slack on the NX window match. The DATE PTYPE's sub-day fraction is Float32,
@@ -305,7 +305,9 @@ end
 # it belongs to can disagree by that much after a round trip.
 const _NX_TIME_TOL_SECONDS = 1.0e-2
 
-function _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
+# Each record's NX row, 0 where it lies in no window. A record within `slack[i]`
+# seconds of a window's edge belongs to that window.
+function _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper, slack)
     nrec = length(obs_time)
     rows = zeros(Int, nrec)
     isempty(nx_lower) && return rows
@@ -313,39 +315,25 @@ function _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
     perm = sortperm(nx_lower)
     lower_s = nx_lower[perm]
     upper_s = nx_upper[perm]
-    center_s = (lower_s .+ upper_s) ./ 2
 
-    @inbounds for i in eachindex(obs_time)
+    for i in eachindex(obs_time, slack)
         t = obs_time[i]
         pos = searchsortedlast(lower_s, t)
 
         assigned = 0
         if 1 <= pos <= length(lower_s)
-            lo = lower_s[pos] - _NX_TIME_TOL_SECONDS
-            hi = upper_s[pos] + _NX_TIME_TOL_SECONDS
+            lo = lower_s[pos] - slack[i]
+            hi = upper_s[pos] + slack[i]
             if lo <= t <= hi
                 assigned = perm[pos]
             end
         end
         if assigned == 0 && pos + 1 <= length(lower_s)
-            lo = lower_s[pos + 1] - _NX_TIME_TOL_SECONDS
-            hi = upper_s[pos + 1] + _NX_TIME_TOL_SECONDS
+            lo = lower_s[pos + 1] - slack[i]
+            hi = upper_s[pos + 1] + slack[i]
             if lo <= t <= hi
                 assigned = perm[pos + 1]
             end
-        end
-
-        if assigned == 0
-            best_j = clamp(pos, 1, length(center_s))
-            best_d = abs(t - center_s[best_j])
-            for j in max(1, pos - 2):min(length(center_s), pos + 2)
-                d = abs(t - center_s[j])
-                if d < best_d
-                    best_d = d
-                    best_j = j
-                end
-            end
-            assigned = perm[best_j]
         end
 
         rows[i] = assigned
@@ -353,7 +341,20 @@ function _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
     return rows
 end
 
-const _SCAN_GAP_SECONDS = 60.0
+# Give each unassigned record (row 0) the NX row of the time-nearest assigned
+# record, when that record lies within `gap` seconds.
+function _join_nearest_nx_scan!(rows, obs_time, gap)
+    inside = findall(!iszero, rows)
+    isempty(inside) && return rows
+    order = inside[sortperm(obs_time[inside])]
+    t_in = obs_time[order]
+    for i in findall(iszero, rows)
+        k = searchsortedfirst(t_in, obs_time[i])
+        near = argmin(j -> abs(t_in[j] - obs_time[i]), filter(in(eachindex(t_in)), [k - 1, k]))
+        abs(t_in[near] - obs_time[i]) <= gap && (rows[i] = rows[order[near]])
+    end
+    return rows
+end
 
 # Each record's scan, numbered from 1 in time order, a new scan starting where
 # more than `gap` seconds pass between consecutive record times.
@@ -364,7 +365,7 @@ function _scans_at_gaps(obs_time, gap)
 end
 
 function _assign_records_to_nx_rows(
-        obs_time, nx_lower, nx_upper;
+        obs_time, nx_lower, nx_upper, slack;
         nx_start_vis = nothing, nx_end_vis = nothing,
     )
     nrec = length(obs_time)
@@ -382,7 +383,7 @@ function _assign_records_to_nx_rows(
         end
         complete && all(!=(0), rows) && return rows
     end
-    return _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper)
+    return _assign_records_to_nx_rows_by_time(obs_time, nx_lower, nx_upper, slack)
 end
 
 _is_lazy_random(data) = data isa FITSFiles.LazyStructuredData && data.hdu_type === FITSFiles.Random
@@ -449,7 +450,7 @@ function _visibility_units(cards, path)
     return string(u)
 end
 
-function _read_uvfits(path, element_type)
+function _read_uvfits(path, element_type, gap)
     fid = FITSFiles.fits(path)
     primary_hdu = fid[1]
     cards = primary_hdu.cards
@@ -546,10 +547,10 @@ function _read_uvfits(path, element_type)
     # word for word), stated in light-seconds where MSv4 states meters.
     uvw_raw = hcat(_col(dt, "UU"), _col(dt, "VV"), _col(dt, "WW"))
 
-    # Without an NX table, a scan ends where more than `_SCAN_GAP_SECONDS` pass
+    # Without an NX table, a scan ends where more than `gap` seconds pass
     # between consecutive times, as `XRadio.fitsidi2msv4` splits them.
     record_nx_row, nx_freqid, nx_subarray = if isnothing(nx)
-        _scans_at_gaps(obs_time, _SCAN_GAP_SECONDS), Int32[], Int32[]
+        _scans_at_gaps(obs_time, gap), Int32[], Int32[]
     else
         # Materialize the NX columns up front: they come back as lazy
         # `DiskArrays`-backed broadcasts. Each NX row defines one MSv4 partition.
@@ -571,13 +572,46 @@ function _read_uvfits(path, element_type)
         nx_end_vis = hasproperty(nx, Symbol("END VIS")) ?
             collect(getproperty(nx, Symbol("END VIS"))) : nothing
 
-        # Prefer explicit NX record ranges when present: they're exact and avoid
-        # an O(nrecord * nscan) nearest-center search on large files. Fall back to
-        # time-based assignment for files that omit START/END VIS.
+        # Prefer explicit NX record ranges when present: they're exact. Fall back
+        # to time-based assignment for files that omit START/END VIS or whose
+        # ranges miss records. NX windows can end one accumulation period short
+        # of the records they index, so a record within its own integration
+        # time of a window belongs to it.
+        slack = _NX_TIME_TOL_SECONDS .+ (isnothing(inttim) ? zeros(length(obs_time)) : inttim)
         rows = _assign_records_to_nx_rows(
-            obs_time, nx_lower, nx_upper;
+            obs_time, nx_lower, nx_upper, slack;
             nx_start_vis = nx_start_vis, nx_end_vis = nx_end_vis,
         )
+        # A record outside every NX scan continues the NX scan whose records
+        # lie within `gap` seconds of it; the rest get scans of their
+        # own, split at gaps as without an NX table, numbered after the NX rows.
+        outside = findall(iszero, rows)
+        if !isempty(outside)
+            span = Dates.unix2datetime.(extrema(obs_time[outside]))
+            noutside = length(outside)
+            _join_nearest_nx_scan!(rows, obs_time, gap)
+            outside = findall(iszero, rows)
+            nextra = 0
+            if !isempty(outside)
+                allequal(nx_freqid) && allequal(nx_subarray) || throw(
+                    ArgumentError(
+                        "load_uvfits: $(length(outside)) records of $(path) fall outside every NX scan, " *
+                            "and the NX rows name several frequency setups or subarrays to choose from"
+                    )
+                )
+                extra = _scans_at_gaps(obs_time[outside], gap)
+                rows[outside] .= length(nx_time) .+ extra
+                nextra = maximum(extra)
+                if !isempty(nx_time)
+                    append!(nx_freqid, fill(first(nx_freqid), nextra))
+                    append!(nx_subarray, fill(first(nx_subarray), nextra))
+                end
+            end
+            @warn "load_uvfits: $noutside of $(length(rows)) records of $(path), from $(span[1]) " *
+                "to $(span[2]), fall outside every scan of the NX table; $(noutside - length(outside)) " *
+                "continue an NX scan within `gap` = $gap s and the other $(length(outside)) " *
+                "form $nextra further scans, split where more than $gap s pass"
+        end
         rows, nx_freqid, nx_subarray
     end
 
@@ -590,7 +624,7 @@ function _read_uvfits(path, element_type)
     elseif hasproperty(dt, :FREQID)
         round.(Int32, collect(getproperty(dt, :FREQID)))
     elseif length(nx_freqid) > 0
-        Int32[r == 0 ? Int32(1) : nx_freqid[r] for r in record_nx_row]
+        nx_freqid[record_nx_row]
     else
         ones(Int32, length(obs_time))
     end
@@ -618,16 +652,15 @@ function _read_uvfits(path, element_type)
     record_subarray_index::Vector{Int32} = if hasproperty(dt, :SUBARRAY)
         round.(Int32, collect(getproperty(dt, :SUBARRAY)))
     elseif length(nx_subarray) > 0
-        Int32[r == 0 ? Int32(1) : nx_subarray[r] for r in record_nx_row]
+        nx_subarray[record_nx_row]
     else
         ones(Int32, length(obs_time))
     end
 
     # One Measurement Set per (NX scan, spectral window, subarray), in the
-    # order the records first name them. Records in no NX scan are dropped.
+    # order the records first name them.
     groups = OrderedDict{Tuple{Int, Int, Int}, Vector{Int}}()
     for i in eachindex(obs_time)
-        record_nx_row[i] == 0 && continue
         key = (record_nx_row[i], Int(record_spw_index[i]), Int(record_subarray_index[i]))
         push!(get!(Vector{Int}, groups, key), i)
     end

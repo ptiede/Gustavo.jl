@@ -1,5 +1,5 @@
 """
-    load_uvfits(path; element_type = nothing) -> XRadio.ProcessingSet
+    load_uvfits(path; element_type = nothing, gap = 10.0) -> XRadio.ProcessingSet
 
 Load an AIPS random-groups UVFITS file as an `XRadio.ProcessingSet` holding one
 Measurement Set per (scan, FQ row, subarray), keyed
@@ -7,7 +7,10 @@ Measurement Set per (scan, FQ row, subarray), keyed
 `sub_<n>` segment appears only when the file carries more than one AN table, and
 each subarray's Measurement Set takes its antennas from its own. The scans are
 the rows of the NX table; a file without one is split into scans where more
-than 60 s pass between consecutive record times, as `XRadio.fitsidi2msv4` does.
+than `gap` seconds pass between consecutive record times, the rule
+`XRadio.fitsidi2msv4` applies. A record outside every NX scan joins the NX scan
+whose records lie within `gap` seconds of it; the rest are split into further
+scans by the same rule, numbered after the NX rows, with a warning.
 Each baseline is stored in one order, the lower antenna number first: a record
 whose BASELINE names the higher one first is conjugated, its `uvw` negated and
 its cross-hand products swapped (`RL` with `LR`).

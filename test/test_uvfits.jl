@@ -63,13 +63,51 @@ end
         end
     end
 
-    @testset "without an NX table, scans split at time gaps over 60 s" begin
-        nonx = load_uvfits(first(uvfits_fixture(; scans = nothing)))
+    # The fixture's times lie 10 s apart within a scan and 90 s apart between
+    # scans, so these tests set `gap` clear of both.
+    @testset "without an NX table, scans split at time gaps over `gap`" begin
+        nonx = load_uvfits(first(uvfits_fixture(; scans = nothing)); gap = 30)
         @test collect(keys(nonx)) == collect(keys(ps))
         for (m, n) in zip(ps, nonx)
             @test isequal(parent(m[:visibility]), parent(n[:visibility]))
             @test collect(m[:scan_name]) == collect(n[:scan_name])
         end
+    end
+
+    @testset "a record within its integration time of an NX window belongs to it" begin
+        _, base = uvfits_fixture()
+        t0 = minimum(base.times)
+        # Scan 1's second time lies 5 s past its window, inside its 8 s INTTIM.
+        edge = first(uvfits_fixture(; scans = [(t0 - 5, t0 + 5), (t0 + 95, t0 + 115)]))
+        near = @test_nowarn load_uvfits(edge)
+        @test collect(keys(near)) == collect(keys(ps))
+        for (m, n) in zip(ps, near)
+            @test collect(m[:scan_name]) == collect(n[:scan_name])
+        end
+    end
+
+    @testset "records outside the NX table continue a scan within `gap`, else form new ones" begin
+        _, base = uvfits_fixture()
+        t0 = minimum(base.times)
+        # Only the first time of scan 1 lies in the table, with 1 s integrations;
+        # its second time is 10 s on, and scan 2 starts 90 s after that.
+        short = first(uvfits_fixture(; scans = [(t0 - 5, t0 + 5)], inttim = fill(1.0, length(base.times))))
+        cut = @test_logs (:warn, r"8 of 11 records .* 2 continue an NX scan .* other 6 form 1 further scans") load_uvfits(short; gap = 30)
+        @test collect(keys(cut)) == collect(keys(ps))
+        for (m, n) in zip(ps, cut)
+            @test isequal(parent(m[:visibility]), parent(n[:visibility]))
+            @test collect(m[:scan_name]) == collect(n[:scan_name])
+        end
+        # With `gap` under 10 s, each later time is a scan of its own.
+        fine = @test_logs (:warn, r"0 continue an NX scan .* other 8 form 3 further scans") load_uvfits(short; gap = 5)
+        @test length(fine) == 4
+        @test sort([only(unique(collect(ms[:scan_name]))) for ms in fine]) == ["1", "2", "3", "4"]
+    end
+
+    @testset "`gap` sets where a file without an NX table splits its scans" begin
+        nonx = first(uvfits_fixture(; scans = nothing))
+        @test length(load_uvfits(nonx; gap = 30)) == 2
+        @test length(load_uvfits(nonx; gap = 5)) == 4
     end
 
     @testset "axes" begin

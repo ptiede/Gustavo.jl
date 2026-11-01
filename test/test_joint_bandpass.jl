@@ -292,7 +292,7 @@ _joint_pins(args...) = _joint_frame(args...).pins
         Set([(1, (2, 1, 1, 1)), (1, (2, 2, 1, 1))])
 end
 
-@testset "JointSmoother: a pin in a window without data solves nothing" begin
+@testset "JointSmoother: a window without data solves nothing" begin
     nant, nchan = 4, 8
     geom = CAL.DataGeometry(; nfeed = 2,
         times = collect(0.0:3.0), scan_of_time = collect(1:4),
@@ -309,7 +309,8 @@ end
     g = exp.(complex.(0.1 .* randn(rng, nant, 2, 1, nchan), 0.5 .* randn(rng, nant, 2, 1, nchan)))
     S = [cis(2π * rand(rng)) for _ in 1:4, _ in bl_pairs, _ in 1:2]
     results = _joint_scan_accumulators(g, S, fill(1, nant, 4), bl_pairs, [(1, 1), (2, 2)], geom)
-    # Window B is flagged throughout, so no station can anchor its phase.
+    # Window B is flagged throughout, so its slots are in no component and none
+    # is pinned.
     for r in results
         r.wl[:, :, 5:8] .= 0
         r.rl[:, :, 5:8] .= 0
@@ -320,13 +321,30 @@ end
     fits = FP.solve_joint_bandpass!(θ, results, geom, pb, ab; gauge = PinAntenna(1), max_iterations = 100, tolerance = 1.0e-10)
     FP._record_track_fits!(status, nothing, fits.phase)
     @test _joint_pins(geom, pb, results, fill(1, nant, 4), PinAntenna(1)) ==
-        Set((1, (1, f, c, 1)) for f in 1:2 for c in 1:nchan)
+        Set((1, (1, f, c, 1)) for f in 1:2 for c in 1:4)
     for f in 1:2
         @test only(status)[1, f, 1, 1] == FP.TrackSolved
         @test only(status)[1, f, 2, 1] == FP.TrackNoData
         @test all(==(7.0), only(pb).θ[1, f, 5:8, 1, 1])
         @test all(iszero, only(pb).θ[1, f, 1:4, 1, 1])
     end
+end
+
+@testset "JointSmoother: cross-hands without weight leave each feed its own pin" begin
+    nant, nchan = 4, 6
+    geom = _seg_geometry(nchan)
+    comp = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed())
+    l = CAL.plan_parameters(CAL.GainModel(; phase = (; bandpass = comp)), geom.antennas, geom)
+    blocks = FP._bandpass_blocks((; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase))), zeros(l.nθ), :phase)
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    g = ones(ComplexF64, nant, 2, 1, nchan)
+    S = ones(ComplexF64, 4, length(bl_pairs), 4)
+    results = _joint_scan_accumulators(g, S, fill(1, nant, 4), bl_pairs, [(1, 1), (1, 2), (2, 1), (2, 2)], geom)
+    for r in results
+        r.wl[:, 2:3, :] .= 0
+    end
+    @test _joint_pins(geom, blocks, results, fill(1, nant, 4), PinAntenna(1)) ==
+        Set((1, (1, f, c, 1)) for f in 1:2 for c in 1:nchan)
 end
 
 @testset "JointSmoother: a fallback reference holds its constant where no prior acts" begin

@@ -121,8 +121,9 @@ end
 
 # The phase-gauge graph of a joint bandpass solve: one node per gain slot —
 # (station, feed, that station's own frequency segment, its own time segment) —
-# one edge per (scan, station pair, feed pair, refinement cell) correlation,
-# joining its two ends in the segments they are in for that scan and that cell.
+# one edge per (scan, station pair, feed pair, refinement cell) correlation of
+# nonzero weight, joining its two ends in the segments they are in for that
+# scan and that cell.
 # `nodew[n]` sums the data weights of the correlations touching node `n`, the
 # score the gauge falls back to when choosing an anchor.
 #
@@ -134,7 +135,7 @@ end
 # would be over-constrained by any pin that fixed its whole track.
 #
 # `ids` numbers the slots (`_gain_slot_ids`); `compid[n]` is `0` for a slot no
-# correlation touches.
+# weighted correlation touches.
 function _joint_bandpass_graph(data, layout, ids)
     (; w, ends) = data
     (; loc, tseg, fseg) = layout
@@ -150,6 +151,7 @@ function _joint_bandpass_graph(data, layout, ids)
         (iszero(ta) || iszero(tb)) && continue
         (ka, ia), (kb, ib) = loc[a], loc[b]
         for cell in axes(fseg, 2)
+            iszero(w[si, bi, p, cell]) && continue
             na = ids[ka][ia, fa, fseg[a, cell], ta]
             nb = ids[kb][ib, fb, fseg[b, cell], tb]
             push!(edges, (na, nb))
@@ -264,7 +266,7 @@ function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge, phase_tracks
         foreach(row -> pinned[first(only(row))] = true, rows)
     end
     tracks = phase_tracks((nodew .> 0) .& .!pinned)
-    natural = [along(comps, shift) for (comps, shift) in _gauge_directions(compid, ncomp, tracks)]
+    natural = _gauge_directions(compid, members, tracks)
     tracks = _hold_phase_constants!(pinned, track_pins, tracks, natural, nodew; reference)
     for n in findall(pinned)
         k, I = slot[n]
@@ -343,7 +345,7 @@ function _hold_phase_constants!(pinned, track_pins, tracks, natural, nodew; refe
         shifts = reduce(hcat, [last(natural[j]) for j in js])
         at = Dict(n => i for (i, n) in pairs(nodes))
         share = Dict{Int, Vector{Float64}}()
-        rows = [i for (i, n) in pairs(nodes) if !iszero(track[n]) && hold_block[track[n]] == b && !track_pins[n]]
+        rows = [i for (i, n) in pairs(nodes) if nodew[n] > 0 && !iszero(track[n]) && hold_block[track[n]] == b && !track_pins[n]]
         isempty(rows) && continue
         V = similar(shifts, length(rows), length(js))
         for (r, i) in pairs(rows)
@@ -384,28 +386,32 @@ function _freedom_blocks(freedoms)
     return sort!(collect(values(groups)); by = first)
 end
 
-# The phase shifts of the joint-bandpass graph's components that neither the
-# data nor the priors of `tracks` see, as `(components, shift)`: one value per
-# component, moving every slot of it. The data see none. Track `t`'s prior sees
-# every shift but those whose values on its slots lie in its null space
+# The phase shifts that neither the data nor the priors of `tracks` see, as
+# `(slots, shift)`. The data see no shift that is constant on each component of
+# the joint-bandpass graph (`members` its slots). Track `t`'s prior sees every
+# shift but those whose values on its slots lie in its null space
 # (`_prior_null_bases`). A component no prior acts on is its own freedom; the
 # rest are joined into blocks by the tracks that cross them. In a block, with
 # `D` the count of prior-bearing slots in each component and `U` the
 # orthonormal null bases carried onto the components, the freedoms are the
 # shifts `g` with `(D − UUᵀ)g = 0`, i.e. `g = D⁻¹Uy` for `y` an eigenvector of
-# `UᵀD⁻¹U` with eigenvalue one, the largest it has.
-function _gauge_directions(compid, ncomp, tracks)
+# `UᵀD⁻¹U` with eigenvalue one, the largest it has. A slot no data reach moves
+# with its track: by `B_out·c` where `B_in·c` is the shift of the track's slots
+# in the block.
+function _gauge_directions(compid, members, tracks)
+    ncomp = length(members)
     D = zeros(ncomp)
     columns = Tuple{Vector{Int}, Vector{Float64}}[]
+    bases = Tuple{Vector{Int}, Matrix{Float64}, Vector{Int}}[]
     links = Graphs.SimpleGraph(ncomp)
     for t in tracks, (slots, B) in _prior_null_bases(t)
         inside = findall(!iszero, compid[slots])
         isempty(inside) && continue
+        push!(bases, (slots, B, inside))
         comps = compid[slots[inside]]
-        B = B[inside, :]
         foreach(k -> D[k] += 1, comps)
         foreach(i -> Graphs.add_edge!(links, comps[1], comps[i]), eachindex(comps))
-        F = svd(B)
+        F = svd(B[inside, :])
         for j in 1:count(>(first(F.S) * length(slots) * eps()), F.S)
             push!(columns, (comps, F.U[:, j]))
         end
@@ -413,7 +419,7 @@ function _gauge_directions(compid, ncomp, tracks)
     out = Tuple{Vector{Int}, Vector{Float64}}[]
     for block in Graphs.connected_components(links)
         if all(k -> iszero(D[k]), block)
-            foreach(k -> push!(out, ([k], [1.0])), block)
+            foreach(k -> push!(out, (members[k], ones(length(members[k])))), block)
             continue
         end
         at = Dict(k => i for (i, k) in pairs(block))
@@ -422,11 +428,22 @@ function _gauge_directions(compid, ncomp, tracks)
         for (j, (comps, q)) in pairs(mine), (k, v) in zip(comps, q)
             U[at[k], j] += v
         end
+        crossing = [b for b in bases if haskey(at, compid[b[1][first(b[3])]])]
+        nodes = reduce(vcat, members[block])
+        unreached = [n for (slots, _, _) in crossing for n in slots if iszero(compid[n])]
         Dinv = Diagonal(inv.(D[block]))
         E = eigen(Symmetric(U' * Dinv * U))
         for j in findall(>=(1 - sqrt(eps())), E.values)
             g = Dinv * U * E.vectors[:, j]
-            push!(out, (block, g ./ maximum(abs, g)))
+            g ./= maximum(abs, g)
+            shift = Dict(n => g[at[compid[n]]] for n in nodes)
+            for (slots, B, inside) in crossing
+                c = B[inside, :] \ [g[at[compid[n]]] for n in slots[inside]]
+                for i in eachindex(slots)
+                    iszero(compid[slots[i]]) && (shift[slots[i]] = dot(view(B, i, :), c))
+                end
+            end
+            push!(out, ([nodes; unreached], [shift[n] for n in [nodes; unreached]]))
         end
     end
     return out
