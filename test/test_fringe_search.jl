@@ -568,7 +568,8 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
     V = inject_fringe(freqs, times, f0, t0; delay = 13.7e-9, rate = 6.0e-3, phase = -0.9)
     W = ones(Float64, size(V))
     d_probe = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0; opts = probe)
-    d_full = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0; opts = FR.FringeSearch(algorithm = FR.FullGrid())
+    d_full = FR.baseline_fringe_search(
+        FR.fringe_plane(V, W, freqs, times), f0, t0; opts = FR.FringeSearch(algorithm = FR.FullGrid())
     )
     @test d_probe.delay == d_full.delay
     @test d_probe.snr == d_full.snr

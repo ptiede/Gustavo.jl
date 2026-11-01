@@ -65,7 +65,8 @@ solve_named!(θ, scans, comps; kw...) = FR.solve_antenna_systems!(θ, scans, com
 # The station model these tests are written against: one column per (station,
 # feed) for each of delay and rate, over a single scan.
 function perfeed_scan_layout(nant)
-    geom = CALs.DataGeometry(; nfeed = 2,
+    geom = CALs.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.PerFeed())
@@ -358,7 +359,7 @@ end
     nant = 4
     bl = all_baselines(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    rng = MersenneTwister(0x212)
+    rng = MersenneTwister(0x0212)
     τ, ṙ = 1.0e-9 .* randn(rng, nant, 2), 1.0e-3 .* randn(rng, nant, 2)
     D = inject_detections(bl, pols, τ, ṙ)
     # Station 4's detections are all noise peaks: rows in the system, none accepted.
@@ -501,7 +502,8 @@ end
     D1 = scan_det(1; mixed_feeds = true)
     D2 = scan_det(2; mixed_feeds = false)     # weak scan: different-feed products undetected
 
-    geom = CALs.DataGeometry(; nfeed = 2,
+    geom = CALs.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 1.0, 2.0, 100.0, 101.0, 102.0],
         scan_of_time = [1, 1, 1, 2, 2, 2],
         channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
@@ -709,7 +711,8 @@ end
         s2 = poisoned_scan(nant; seed = 0x42)                   # poisoned
         # `scan_of_time` is what gives `PerScan` two distinct segments, so the
         # two scans land in separate θ columns.
-        geom = CALs.DataGeometry(; nfeed = 2,
+        geom = CALs.DataGeometry(;
+            nfeed = 2,
             times = [0.0, 1.0, 100.0, 101.0], scan_of_time = [1, 1, 2, 2],
             channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
         )
@@ -761,7 +764,8 @@ end
 # stacked QR rounds differently than the per-block ones.
 @testset "Stationize: per-scan solves ≡ the pooled block-diagonal system" begin
     nant, ref = 5, 1
-    geom = CALs.DataGeometry(; nfeed = 2,
+    geom = CALs.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 1.0, 100.0, 101.0, 200.0, 201.0], scan_of_time = [1, 1, 2, 2, 3, 3],
         channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
@@ -813,7 +817,8 @@ end
 # Delay and rate on a SharedFeeds model: one column per station, fed by every
 # product whatever feeds it relates.
 function sharedfeeds_scan_layout(nant)
-    geom = CALs.DataGeometry(; nfeed = 2,
+    geom = CALs.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 1.0, 2.0], channel_freqs = [1.0e9], t0 = 0.0, f0 = 1.0e9,
     )
     mk(term) = CALs.GainComponent(term; Ti = CALs.PerScan(), Frequency = CALs.GlobalFrequency(), Feed = CALs.SharedFeeds())
@@ -853,7 +858,7 @@ end
 end
 
 @testset "Stationize: the selected inverse matches the inverse on the factor's pattern" begin
-    rng = MersenneTwister(0x5e1)
+    rng = MersenneTwister(0x05e1)
     n = 40
     B = FR.sparse(randn(rng, n, n) .* (rand(rng, n, n) .< 0.08) + 2I)
     H = transpose(B) * B

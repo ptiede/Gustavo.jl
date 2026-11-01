@@ -300,4 +300,3 @@ function term_eval end
     xa = getproperty(x, DimensionalData.name(A))
     return xa * evalpoly(xa, p.coeffs)
 end
-

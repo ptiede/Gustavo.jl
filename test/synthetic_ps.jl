@@ -172,10 +172,10 @@ function _build_fringe_ps(;
     end
 
     return XRadio.ProcessingSet(sets), (;
-        delay, rate, phi,
-        screen = nscans == 1 ? reshape(screen, nant, nfeed, ntime) : screen,
-        bandpass, amp_bandpass, dtec, f0, t0_sec = t0, bl_pairs, polarizations, feeds,
-    )
+            delay, rate, phi,
+            screen = nscans == 1 ? reshape(screen, nant, nfeed, ntime) : screen,
+            bandpass, amp_bandpass, dtec, f0, t0_sec = t0, bl_pairs, polarizations, feeds,
+        )
 end
 
 # A copy of `data` with `sol` divided out: a degenerate gain leaves the sample,

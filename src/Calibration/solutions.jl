@@ -495,11 +495,11 @@ function DataGeometry(ps::XRadio.ProcessingSet; f0 = nothing, t0 = nothing)
     isempty(ps) && throw(ArgumentError("the processing set holds no Measurement Sets"))
     pieces = [
         (;
-                freqs = Float64.(XRadio.frequencies(ms)), spw = XRadio.spectralwindow(ms),
-                width = _channel_width(ms),
-                times = Float64.(XRadio.times(ms)), scans = _scan_labels(ms),
-                active = Set{String}(Iterators.flatten(XRadio.baselines(ms))),
-            ) for ms in ps
+            freqs = Float64.(XRadio.frequencies(ms)), spw = XRadio.spectralwindow(ms),
+            width = _channel_width(ms),
+            times = Float64.(XRadio.times(ms)), scans = _scan_labels(ms),
+            active = Set{String}(Iterators.flatten(XRadio.baselines(ms))),
+        ) for ms in ps
     ]
     antennas = String[]
     for ms in ps, name in XRadio.antennas(ms)

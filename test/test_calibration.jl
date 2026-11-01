@@ -17,7 +17,8 @@ const CAL = Gustavo.Calibration
 
 @testset "Calibration segmentation ids" begin
     # 5 times across 2 scans; 6 channels across 2 spws.
-    geom = CAL.DataGeometry(; nfeed = 2,
+    geom = CAL.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 0.1, 0.2, 1.0, 1.1],
         scan_of_time = [7, 7, 7, 9, 9],          # arbitrary labels → dense-ranked
         channel_freqs = collect(1.0:6.0) .* 1.0e9,
@@ -58,7 +59,8 @@ const CAL = Gustavo.Calibration
 
     # A name vector names every segment or none; a partial one would silently
     # label the wrong segment when a foreign grid is placed against it.
-    @test_throws "must name every segment or be empty" CAL.DataGeometry(; nfeed = 2,
+    @test_throws "must name every segment or be empty" CAL.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 1.0], scan_of_time = [1, 2], channel_freqs = [1.0e9],
         scan_names = ["only-one"],
     )
@@ -66,7 +68,8 @@ end
 
 @testset "Materialization and segment_ranges" begin
     # 4 channels: a gap-separated pair of groups, in 3 spws.
-    geom = CAL.DataGeometry(; nfeed = 2,
+    geom = CAL.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 1.0],
         channel_freqs = [1.0e9, 1.1e9, 1.2e9, 5.0e9],
         spw_of_chan = [1, 1, 2, 3],
@@ -93,7 +96,8 @@ end
     @test CAL.segment_ranges(CAL.FreqGroups([1:1, 2:4]), geom) == [1:1, 2:4]
 
     # A segmentation whose segments interleave has no range form.
-    inter = CAL.DataGeometry(; nfeed = 2,
+    inter = CAL.DataGeometry(;
+        nfeed = 2,
         times = [0.0], channel_freqs = [1.0e9, 1.1e9, 1.2e9], spw_of_chan = [1, 2, 1],
     )
     @test_throws "no contiguous channel range" CAL.segment_ranges(
@@ -119,14 +123,16 @@ end
 
 @testset "Placement on a foreign grid" begin
     # Solve grid: 2 scans × 2 epochs, 2 spws × 3 channels.
-    solve = CAL.DataGeometry(; nfeed = 2,
+    solve = CAL.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 0.1, 1.0, 1.1], scan_of_time = [7, 7, 9, 9],
         channel_freqs = [1.0, 1.1, 1.2, 2.0, 2.1, 2.2] .* 1.0e9,
         spw_of_chan = [3, 3, 3, 4, 4, 4],
         scan_names = ["No001", "No002"], spw_names = ["A", "B"],
     )
     # The same scans and spws, sampled three times as finely in time.
-    fine = CAL.DataGeometry(; nfeed = 2,
+    fine = CAL.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 0.05, 0.1, 1.0, 1.05, 1.1], scan_of_time = [1, 1, 1, 2, 2, 2],
         channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
         scan_names = ["No001", "No002"], spw_names = ["A", "B"],
@@ -143,7 +149,8 @@ end
 
         # A scan-averaged solve — one epoch per scan — applies at full time
         # resolution: the scan name says which segment, not the epoch.
-        averaged = CAL.DataGeometry(; nfeed = 2,
+        averaged = CAL.DataGeometry(;
+            nfeed = 2,
             times = [0.05, 1.05], scan_of_time = [7, 9],
             channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
             scan_names = ["No001", "No002"], spw_names = ["A", "B"],
@@ -152,7 +159,8 @@ end
     end
 
     @testset "a scan or spw the solve never saw errors" begin
-        stranger = CAL.DataGeometry(; nfeed = 2,
+        stranger = CAL.DataGeometry(;
+            nfeed = 2,
             times = [0.0, 2.0], scan_of_time = [1, 2],
             channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
             scan_names = ["No001", "No009"], spw_names = ["A", "B"],
@@ -162,7 +170,8 @@ end
         @test_throws "\"No009\" is not in the solution" CAL.time_segment_ids(
             CAL.PerScan(), solve, stranger,
         )
-        other_band = CAL.DataGeometry(; nfeed = 2,
+        other_band = CAL.DataGeometry(;
+            nfeed = 2,
             times = solve.times, scan_of_time = solve.scan_of_time,
             channel_freqs = solve.channel_freqs, spw_of_chan = [1, 1, 1, 2, 2, 2],
             scan_names = ["No001", "No002"], spw_names = ["A", "C"],
@@ -175,7 +184,8 @@ end
     @testset "identity placement needs names, not raw ids" begin
         # Raw ids agree with themselves, so an identical labeling still places:
         # the two grids then correspond sample for sample and no name is needed.
-        unnamed = CAL.DataGeometry(; nfeed = 2,
+        unnamed = CAL.DataGeometry(;
+            nfeed = 2,
             times = solve.times, scan_of_time = solve.scan_of_time,
             channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
         )
@@ -184,7 +194,8 @@ end
 
         # Across two differently-labeled grids they do not: matching id 1 to
         # id 1 is positional matching, which identity placement exists to avoid.
-        unnamed_fine = CAL.DataGeometry(; nfeed = 2,
+        unnamed_fine = CAL.DataGeometry(;
+            nfeed = 2,
             times = fine.times, scan_of_time = fine.scan_of_time,
             channel_freqs = fine.channel_freqs, spw_of_chan = [1, 1, 1, 2, 2, 2],
         )
@@ -253,11 +264,13 @@ end
 
     @testset "channel segmentations place by frequency and width" begin
         widths = fill(0.1e9, 6)
-        solvew = CAL.DataGeometry(; nfeed = 2,
+        solvew = CAL.DataGeometry(;
+            nfeed = 2,
             solve.times, solve.scan_of_time, solve.channel_freqs, solve.spw_of_chan,
             channel_widths = widths, scan_names = solve.scan_names, spw_names = solve.spw_names,
         )
-        sub(idx; freqs = solve.channel_freqs[idx], w = widths[idx]) = CAL.DataGeometry(; nfeed = 2,
+        sub(idx; freqs = solve.channel_freqs[idx], w = widths[idx]) = CAL.DataGeometry(;
+            nfeed = 2,
             times = solve.times, scan_of_time = solve.scan_of_time,
             channel_freqs = freqs, spw_of_chan = solve.spw_of_chan[idx], channel_widths = w,
         )
@@ -281,7 +294,8 @@ end
         averaged = sub([2]; w = [0.3e9])
         @test_throws "extends beyond the solution's" CAL.freq_segment_ids(groups, solvew, averaged)
         # A solution on averaged channels places the channels each one averaged.
-        coarse(freqs, w) = CAL.DataGeometry(; nfeed = 2,
+        coarse(freqs, w) = CAL.DataGeometry(;
+            nfeed = 2,
             times = solve.times, scan_of_time = solve.scan_of_time, channel_freqs = freqs,
             spw_of_chan = [3, 4], channel_widths = w,
         )
@@ -327,7 +341,8 @@ end
             gf[2:4, [2, 5], :, :]
 
         # A scan the solution never saw is refused, naming the segmentation.
-        stranger = CAL.DataGeometry(; nfeed = 2,
+        stranger = CAL.DataGeometry(;
+            nfeed = 2,
             times = [5.0], scan_of_time = [1],
             channel_freqs = solve.channel_freqs, spw_of_chan = solve.spw_of_chan,
             scan_names = ["No042"], spw_names = ["A", "B"],
@@ -539,7 +554,8 @@ end
     freqs = [1.0e9, 2.0e9, 3.0e9, 4.0e9]
     times = [0.0, 1.0, 2.0, 3.0]
     ants = ["PT", "LM", "AA"]
-    geom = CAL.DataGeometry(; nfeed = 2,
+    geom = CAL.DataGeometry(;
+        nfeed = 2,
         times, channel_freqs = freqs, antennas = ants,
         scan_of_time = [1, 1, 2, 2], spw_of_chan = [1, 1, 1, 1], t0 = 0.0, f0 = 2.5e9,
     )
@@ -621,7 +637,8 @@ end
     @test_throws "holds no components" gains(none)
 
     # A nested subtree (`sbd.delay` / `sbd.constant`) keeps its path.
-    gb = CAL.DataGeometry(; nfeed = 2,
+    gb = CAL.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 1.0], channel_freqs = [1.0e9, 1.1e9, 5.0e9, 5.1e9], antennas = ["X", "Y"],
         scan_of_time = [1, 1], spw_of_chan = [1, 1, 2, 2], t0 = 0.0, f0 = 3.0e9,
     )
@@ -816,7 +833,8 @@ end
     end
 
     @testset "antennas differing only in prior share a plan" begin
-        geom = CAL.DataGeometry(; nfeed = 2,
+        geom = CAL.DataGeometry(;
+            nfeed = 2,
             times = [0.0, 1.0], scan_of_time = [1, 2], antennas = ["AA", "BB", "CC"],
             channel_freqs = [1.0, 1.1, 1.2, 2.0, 2.1] .* 1.0e9, spw_of_chan = [1, 1, 1, 2, 2],
             t0 = 0.0, f0 = 1.5e9,
@@ -889,7 +907,8 @@ end
     nant = 3
     freqs = collect(2.28e11:1.0e8:(2.28e11 + 5.0e8))
     times = [0.0, 0.5, 1.0]
-    geom = CAL.DataGeometry(; nfeed = 2,
+    geom = CAL.DataGeometry(;
+        nfeed = 2,
         times, channel_freqs = freqs, antennas = ["A", "B", "C"], t0 = 0.0, f0 = sum(freqs) / length(freqs),
     )
     model = CAL.GainModel(
@@ -1036,16 +1055,20 @@ end
     end
 
     @testset "geometry axis lengths" begin
-        @test_throws DimensionMismatch CAL.DataGeometry(; nfeed = 2,
+        @test_throws DimensionMismatch CAL.DataGeometry(;
+            nfeed = 2,
             times = [0.0, 1.0], channel_freqs = [1.0e9], scan_of_time = [1]
         )
-        @test_throws "scan_of_time length" CAL.DataGeometry(; nfeed = 2,
+        @test_throws "scan_of_time length" CAL.DataGeometry(;
+            nfeed = 2,
             times = [0.0, 1.0], channel_freqs = [1.0e9], scan_of_time = [1]
         )
-        @test_throws DimensionMismatch CAL.DataGeometry(; nfeed = 2,
+        @test_throws DimensionMismatch CAL.DataGeometry(;
+            nfeed = 2,
             times = [0.0], channel_freqs = [1.0e9, 2.0e9], spw_of_chan = [1]
         )
-        @test_throws "spw_of_chan length" CAL.DataGeometry(; nfeed = 2,
+        @test_throws "spw_of_chan length" CAL.DataGeometry(;
+            nfeed = 2,
             times = [0.0], channel_freqs = [1.0e9, 2.0e9], spw_of_chan = [1]
         )
 
@@ -1101,7 +1124,8 @@ end
 end
 
 @testset "Per-antenna heterogeneity" begin
-    geom = CAL.DataGeometry(; nfeed = 2,
+    geom = CAL.DataGeometry(;
+        nfeed = 2,
         times = [0.0, 0.1, 1.0, 1.1],
         scan_of_time = [1, 1, 2, 2],
         channel_freqs = collect(1.0:6.0) .* 1.0e9,
@@ -1337,7 +1361,8 @@ end
         # The whole solution evaluates as the layout it came from, on its own
         # geometry or on another holding the same samples.
         @test parent(gains(soln)) ≈ CAL.evaluate_gains(lh, θh)
-        other = CAL.DataGeometry(; nfeed = 2,
+        other = CAL.DataGeometry(;
+            nfeed = 2,
             geom.times, geom.channel_freqs, geom.scan_of_time, geom.spw_of_chan, geom.antennas, geom.t0, geom.f0,
         )
         ci, ti = [2, 5], [1, 4]

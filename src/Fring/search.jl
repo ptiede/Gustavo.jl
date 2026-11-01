@@ -340,9 +340,11 @@ function fringe_plane(V, W, freqs, times; flags = nothing)
     )
     Vm, Wm, Fm = _as_plane_arrays(V, W, flags, freqs, times)
     d = (Frequency(collect(freqs)), Ti(collect(times)))
-    return DimStack((
-        vis = DimArray(Vm, d), weights = DimArray(Wm, d), flags = DimArray(Fm, d),
-    ))
+    return DimStack(
+        (
+            vis = DimArray(Vm, d), weights = DimArray(Wm, d), flags = DimArray(Fm, d),
+        )
+    )
 end
 
 # Reshape a block to `(nchan, ntime)`. A vector is read as one time when its

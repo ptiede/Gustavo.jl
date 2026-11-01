@@ -638,7 +638,7 @@ end
     bl = all_bl_a(nant)
     pols = [(1, 1), (1, 2), (2, 1), (2, 2)]
     times = collect(0:(nap - 1)) .* 1.0
-    rng = MersenneTwister(0x287)
+    rng = MersenneTwister(0x0287)
     screen = 0.4 .* randn(rng, nant, 2, nap)
     rbar, wbar = inject_screen(bl, pols, screen)
     dropaps = 5:8
@@ -946,9 +946,11 @@ end
     @test eltype((@inferred FRa._linearized_obs(R, W, nodes, phase, sbar)).val) == Float32
     slice(A) = view(A, Ti(1))
     ph, cov = zeros(Float32, nant, 2), falses(nant, 2)
-    @test (@inferred FRa._solve_observable!(
-        ph, cov, slice(obs.val), slice(obs.w), slice(obs.mask), nodes, PinAntenna(1); rewrap = 2,
-    )) == 1
+    @test (
+        @inferred FRa._solve_observable!(
+            ph, cov, slice(obs.val), slice(obs.w), slice(obs.mask), nodes, PinAntenna(1); rewrap = 2,
+        )
+    ) == 1
     @test all(isfinite, ph) && all(cov)
     seed = @inferred Union{Nothing, Matrix{Float32}} FRa._circular_ap_seed(
         slice(obs.val), slice(obs.w), slice(obs.mask), nodes, nant, 2, 1,

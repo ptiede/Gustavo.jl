@@ -284,10 +284,10 @@ function solve_joint_bandpass!(
         iszero(k) && return nothing
         seg = segs[k]
         track(blocks, level, delay) = isempty(blocks) ? nothing : (;
-            seg.x, seg.pieces, prior = _prior_along(blocks[k].plan.priors[ai], :Frequency),
-            level = isnothing(level) ? nothing : level.level, nlevel = isnothing(level) ? 0 : level.nlevel,
-            delay = isnothing(delay) ? nothing : delay.level, dx = isnothing(delay) ? nothing : delay.dx,
-        )
+                seg.x, seg.pieces, prior = _prior_along(blocks[k].plan.priors[ai], :Frequency),
+                level = isnothing(level) ? nothing : level.level, nlevel = isnothing(level) ? 0 : level.nlevel,
+                delay = isnothing(delay) ? nothing : delay.level, dx = isnothing(delay) ? nothing : delay.dx,
+            )
         return (; phase = track(phase_blocks, phase_level[a], delay[a]), amp = track(amp_blocks, amp_level[a], nothing))
     end
 

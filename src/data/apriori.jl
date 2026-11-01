@@ -49,19 +49,25 @@ function apriori_calibrate!(
     )
     vis = ms[:visibility]
     units = get(metadata(vis), :units, nothing)
-    units == "Jy" && throw(ArgumentError(
-        "the visibilities of spectral window `$(XRadio.spectralwindow(ms))` are already in Jy"
-    ))
+    units == "Jy" && throw(
+        ArgumentError(
+            "the visibilities of spectral window `$(XRadio.spectralwindow(ms))` are already in Jy"
+        )
+    )
     T = XRadio.system_temperatures(ms)
-    isempty(T) && throw(ArgumentError(
-        "spectral window `$(XRadio.spectralwindow(ms))` records no system temperatures; " *
-            "`XRadio.read_antab!` reads them from an ANTAB file"
-    ))
+    isempty(T) && throw(
+        ArgumentError(
+            "spectral window `$(XRadio.spectralwindow(ms))` records no system temperatures; " *
+                "`XRadio.read_antab!` reads them from an ANTAB file"
+        )
+    )
     curves = XRadio.gaincurves(ms)
-    isempty(curves[:curve]) && throw(ArgumentError(
-        "spectral window `$(XRadio.spectralwindow(ms))` records no gain curves; " *
-            "`XRadio.read_antab!` reads them from an ANTAB file"
-    ))
+    isempty(curves[:curve]) && throw(
+        ArgumentError(
+            "spectral window `$(XRadio.spectralwindow(ms))` records no gain curves; " *
+                "`XRadio.read_antab!` reads them from an ANTAB file"
+        )
+    )
 
     names = collect(lookup(XRadio.polarization_types(ms), XRadio.AntennaName))
     η = _quantization_efficiencies(ms, names, quantization_efficiency)
@@ -109,27 +115,33 @@ function _quantization_efficiencies(ms, names, given)
     xds = branches(ms)[:antenna]
     window = XRadio.spectralwindow(ms)
     if !haskey(xds, :digitizer_levels)
-        isnothing(given) && throw(ArgumentError(
-            "spectral window `$window` records no `digitizer_levels`; pass " *
-                "`quantization_efficiency` (e.g. `2/π` for 2-level sampling) or record " *
-                "`digitizer_levels` in the antenna dataset"
-        ))
+        isnothing(given) && throw(
+            ArgumentError(
+                "spectral window `$window` records no `digitizer_levels`; pass " *
+                    "`quantization_efficiency` (e.g. `2/π` for 2-level sampling) or record " *
+                    "`digitizer_levels` in the antenna dataset"
+            )
+        )
         return _given_efficiencies(given, names)
     end
     levels = xds[:digitizer_levels]
     level(a) = levels[XRadio.AntennaName(At(a))]
     untabulated = filter(a -> !haskey(_QUANTIZATION_EFFICIENCY, level(a)), names)
     if isnothing(given)
-        isempty(untabulated) || throw(ArgumentError(
-            "antennas $(join(untabulated, ", ")) have $(join(map(level, untabulated), ", ")) " *
-                "digitizer levels, for which no quantization efficiency is tabulated (2, 3 " *
-                "and 4 are); pass `quantization_efficiency` for them"
-        ))
+        isempty(untabulated) || throw(
+            ArgumentError(
+                "antennas $(join(untabulated, ", ")) have $(join(map(level, untabulated), ", ")) " *
+                    "digitizer levels, for which no quantization efficiency is tabulated (2, 3 " *
+                    "and 4 are); pass `quantization_efficiency` for them"
+            )
+        )
     else
-        isempty(untabulated) && throw(ArgumentError(
-            "spectral window `$window` records `digitizer_levels` with a tabulated quantization " *
-                "efficiency for every antenna; `quantization_efficiency` cannot also be given"
-        ))
+        isempty(untabulated) && throw(
+            ArgumentError(
+                "spectral window `$window` records `digitizer_levels` with a tabulated quantization " *
+                    "efficiency for every antenna; `quantization_efficiency` cannot also be given"
+            )
+        )
         _check_untabulated_only(given, untabulated)
     end
     supplied = isnothing(given) ? Dict{String, Float64}() :
@@ -140,10 +152,12 @@ end
 _check_untabulated_only(::Real, untabulated) = nothing
 function _check_untabulated_only(η::AbstractDict, untabulated)
     extra = setdiff(String.(keys(η)), untabulated)
-    isempty(extra) || throw(ArgumentError(
-        "`quantization_efficiency` gives antennas $(join(extra, ", ")), whose " *
-            "`digitizer_levels` fix it; give it only for $(join(untabulated, ", "))"
-    ))
+    isempty(extra) || throw(
+        ArgumentError(
+            "`quantization_efficiency` gives antennas $(join(extra, ", ")), whose " *
+                "`digitizer_levels` fix it; give it only for $(join(untabulated, ", "))"
+        )
+    )
     return nothing
 end
 
@@ -169,13 +183,17 @@ function _sefd_scale(ms, T, curves, rule, min_elevation, plausible)
     half = haskey(meta, :integration_time) ? meta[:integration_time].value / 2 : 0.0
 
     tdim = only(d for d in dims(T) if d isa Union{XRadio.TimeSystemCal, Ti})
-    hasdim(T, XRadio.FrequencySystemCal) && throw(ArgumentError(
-        "the system temperatures are over `frequency_system_cal`, which MSv4 does not define"
-    ))
+    hasdim(T, XRadio.FrequencySystemCal) && throw(
+        ArgumentError(
+            "the system temperatures are over `frequency_system_cal`, which MSv4 does not define"
+        )
+    )
     resolved = hasdim(T, XRadio.Frequency)
-    resolved && collect(lookup(T, XRadio.Frequency)) != XRadio.frequencies(ms) && throw(ArgumentError(
-        "the system temperatures are resolved over frequencies other than the visibilities'"
-    ))
+    resolved && collect(lookup(T, XRadio.Frequency)) != XRadio.frequencies(ms) && throw(
+        ArgumentError(
+            "the system temperatures are resolved over frequencies other than the visibilities'"
+        )
+    )
     nchan = resolved ? length(XRadio.frequencies(ms)) : 1
     rows = collect(lookup(tdim))
     elevation = _elevations(ms, names, times)
@@ -206,16 +224,20 @@ end
 # the phase center of the field observed at each time, and the time as UTC.
 function _elevations(ms, names, times)
     meta = metadata(dims(ms, Ti))
-    (get(meta, :scale, nothing), get(meta, :format, nothing)) == ("utc", "unix") || throw(ArgumentError(
-        "elevations need UTC times, and this Measurement Set's are " *
-            "$(get(meta, :scale, nothing)) $(get(meta, :format, nothing))"
-    ))
+    (get(meta, :scale, nothing), get(meta, :format, nothing)) == ("utc", "unix") || throw(
+        ArgumentError(
+            "elevations need UTC times, and this Measurement Set's are " *
+                "$(get(meta, :scale, nothing)) $(get(meta, :format, nothing))"
+        )
+    )
     positions = XRadio.antenna_positions(ms)
     directions = XRadio.field_and_source(ms)[:field_phase_center_direction]
     frame = get(metadata(directions), :frame, nothing)
-    frame in ("icrs", "fk5") || throw(ArgumentError(
-        "elevations need an equatorial phase center, and this one's frame is $frame"
-    ))
+    frame in ("icrs", "fk5") || throw(
+        ArgumentError(
+            "elevations need an equatorial phase center, and this one's frame is $frame"
+        )
+    )
     fields = collect(ms[:field_name])
     sky = XRadio.SkyDirLabel
     out = Matrix{Float64}(undef, length(times), length(names))

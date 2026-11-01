@@ -63,8 +63,8 @@ function _peak_limits(x::AbstractVector, prof::AbstractVector, i::Integer, c::Re
 end
 
 _zoom_span(zoom::Bool) = zoom ? error(
-    "plot_fringe_search: give zoom as a span in main-lobe widths, or false for the whole window"
-) : nothing
+        "plot_fringe_search: give zoom as a span in main-lobe widths, or false for the whole window"
+    ) : nothing
 _zoom_span(zoom::Real) = (zoom > 0 || error("plot_fringe_search: zoom must be positive"); Float64(zoom))
 
 function Fring.plot_fringe_search(

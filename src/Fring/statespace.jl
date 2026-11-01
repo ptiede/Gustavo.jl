@@ -126,15 +126,19 @@ end
 function transition(m::RandomWalkModel{M}, Δ, ::Type{T}) where {M, T}
     d = abs(T(Δ))
     σ2 = T(m.σ2)
-    A = SMatrix{M, M, T}(ntuple(Val(M * M)) do l
-        i, j = (l - 1) % M, (l - 1) ÷ M
-        j >= i ? d^(j - i) / factorial(j - i) : zero(T)
-    end)
-    Q = SMatrix{M, M, T}(ntuple(Val(M * M)) do l
-        i, j = (l - 1) % M, (l - 1) ÷ M
-        p = 2M - 1 - i - j
-        σ2 * d^p / (p * factorial(M - 1 - i) * factorial(M - 1 - j))
-    end)
+    A = SMatrix{M, M, T}(
+        ntuple(Val(M * M)) do l
+            i, j = (l - 1) % M, (l - 1) ÷ M
+            j >= i ? d^(j - i) / factorial(j - i) : zero(T)
+        end
+    )
+    Q = SMatrix{M, M, T}(
+        ntuple(Val(M * M)) do l
+            i, j = (l - 1) % M, (l - 1) ÷ M
+            p = 2M - 1 - i - j
+            σ2 * d^p / (p * factorial(M - 1 - i) * factorial(M - 1 - j))
+        end
+    )
     return A, Q
 end
 

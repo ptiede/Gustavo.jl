@@ -203,8 +203,12 @@ function _em_info(em, geom)
     iterations = Dict{Symbol, Int}()
     for (kind, fit) in em
         iterations[kind] = fit.iterations
-        isnothing(fit.mixture) || (mixture[kind] = (; same_feed = (; floor = fit.mixture.floor[1], outlier_fraction = fit.mixture.outlier_fraction[1]),
-            different_feed = (; floor = fit.mixture.floor[2], outlier_fraction = fit.mixture.outlier_fraction[2])))
+        isnothing(fit.mixture) || (
+            mixture[kind] = (;
+                same_feed = (; floor = fit.mixture.floor[1], outlier_fraction = fit.mixture.outlier_fraction[1]),
+                different_feed = (; floor = fit.mixture.floor[2], outlier_fraction = fit.mixture.outlier_fraction[2]),
+            )
+        )
         for path in unique(ch.path for ch in fit.chains)
             idx = [i for (i, ch) in pairs(fit.chains) if ch.path == path]
             names = unique(geom.antennas[fit.chains[i].antenna] for i in idx)

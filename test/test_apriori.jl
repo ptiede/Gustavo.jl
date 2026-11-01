@@ -21,21 +21,23 @@
 
     # The row at 75 s is a slew between the scans.
     antab = tempname()
-    write(antab, """
-    GAIN AA ELEV DPFU = 0.1, 0.2 POLY = 1.0, 0.01 /
-    GAIN MG ALTAZ DPFU = 0.5 POLY = 2.0 /
-    TSYS AA INDEX = 'R1', 'L1' /
-    63 00:00:00   100.0  200.0
-    63 00:00:30   110.0  210.0
-    63 00:01:15   1.0e6  1.0e6
-    63 00:02:00   120.0  220.0
-    63 00:02:30   130.0  230.0
-    /
-    TSYS MG INDEX = 'R1:1', 'L1:1' /
-    63 00:00:00   50.0   60.0
-    63 00:02:00   70.0   80.0
-    /
-    """)
+    write(
+        antab, """
+        GAIN AA ELEV DPFU = 0.1, 0.2 POLY = 1.0, 0.01 /
+        GAIN MG ALTAZ DPFU = 0.5 POLY = 2.0 /
+        TSYS AA INDEX = 'R1', 'L1' /
+        63 00:00:00   100.0  200.0
+        63 00:00:30   110.0  210.0
+        63 00:01:15   1.0e6  1.0e6
+        63 00:02:00   120.0  220.0
+        63 00:02:30   130.0  230.0
+        /
+        TSYS MG INDEX = 'R1:1', 'L1:1' /
+        63 00:00:00   50.0   60.0
+        63 00:02:00   70.0   80.0
+        /
+        """
+    )
     function from_antab(; kw...)
         ms = uncalibrated(; kw...)
         @test_logs (:warn,) XRadio.read_antab!(one_member(ms), antab; ifs = Dict("spw_0" => 1))
@@ -89,19 +91,21 @@
 
     @testset "implausible system temperatures count as unmeasured" begin
         screened = tempname()
-        write(screened, """
-        GAIN AA ELEV DPFU = 0.1, 0.2 POLY = 1.0, 0.01 /
-        GAIN MG ALTAZ DPFU = 0.5 POLY = 2.0 /
-        TSYS AA INDEX = 'R1', 'L1' /
-        63 00:00:00   100.0  200.0
-        63 00:00:30   999.0  -5.0
-        63 00:02:00   2.0e4  2.0e4
-        /
-        TSYS MG INDEX = 'R1:1', 'L1:1' /
-        63 00:00:00   50.0   60.0
-        63 00:02:00   70.0   80.0
-        /
-        """)
+        write(
+            screened, """
+            GAIN AA ELEV DPFU = 0.1, 0.2 POLY = 1.0, 0.01 /
+            GAIN MG ALTAZ DPFU = 0.5 POLY = 2.0 /
+            TSYS AA INDEX = 'R1', 'L1' /
+            63 00:00:00   100.0  200.0
+            63 00:00:30   999.0  -5.0
+            63 00:02:00   2.0e4  2.0e4
+            /
+            TSYS MG INDEX = 'R1:1', 'L1:1' /
+            63 00:00:00   50.0   60.0
+            63 00:02:00   70.0   80.0
+            /
+            """
+        )
         function filled()
             ms = uncalibrated()
             @test_logs (:warn,) XRadio.read_antab!(one_member(ms), screened; ifs = Dict("spw_0" => 1))

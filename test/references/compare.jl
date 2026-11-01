@@ -178,21 +178,27 @@ function report(io, name, run)
     println(io, name)
     for k in (:fringe, :bandpass, :adhoc, :composed)
         g = k === :composed ? run[k] : run[k].gains
-        println(io, "  ", rpad(k, 10), "gains: phase ", fmt(g.phase), " rad, logamp ", fmt(g.logamp),
+        println(
+            io, "  ", rpad(k, 10), "gains: phase ", fmt(g.phase), " rad, logamp ", fmt(g.logamp),
             g.nonfinite > 0 ? ", $(g.nonfinite) non-finite" : "",
             isempty(g.recorded_only) ? "" : ", recorded only $(g.recorded_only)",
-            isempty(g.current_only) ? "" : ", current only $(g.current_only)")
+            isempty(g.current_only) ? "" : ", current only $(g.current_only)"
+        )
         k === :composed && continue
         for r in run[k].components
-            println(io, "    ", rpad(join(r.path, '.'), 24),
-                haskey(r, :note) ? r.note : "max |Δ| $(fmt(r.maxabs)) (max |recorded| $(fmt(r.scale)))")
+            println(
+                io, "    ", rpad(join(r.path, '.'), 24),
+                haskey(r, :note) ? r.note : "max |Δ| $(fmt(r.maxabs)) (max |recorded| $(fmt(r.scale)))"
+            )
         end
     end
     println(io, "  bandpass status (recorded/current): ", join(("$k $r/$c" for (k, r, c) in run[:bandpass_status]), ", "))
     d = run[:detections]
     isnothing(d) && return nothing
-    println(io, "  detections: recorded $(d.recorded), current $(d.current) of $(d.cells) cells; ",
-        "flips $(length(d.flips)); SNR ratio $(fmt.(d.snr_ratio)); |Δdelay| $(fmt(d.delay)) s, |Δrate| $(fmt(d.rate)) Hz")
+    println(
+        io, "  detections: recorded $(d.recorded), current $(d.current) of $(d.cells) cells; ",
+        "flips $(length(d.flips)); SNR ratio $(fmt.(d.snr_ratio)); |Δdelay| $(fmt(d.delay)) s, |Δrate| $(fmt(d.rate)) Hz"
+    )
     return nothing
 end
 

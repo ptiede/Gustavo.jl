@@ -29,4 +29,3 @@ resolved through each antenna's receptors by
 [`feed_pairs(::XRadio.MeasurementSet)`](@ref feed_pairs(::XRadio.MeasurementSet)).
 """
 feed_pairs(vis::AbstractDimArray) = collect(Tuple{Int, Int}, lookup(vis, Polarization))
-

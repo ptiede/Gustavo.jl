@@ -765,8 +765,10 @@ function _closure_em!(rows, rw, w, nodes, gauge, kind, chains, priors, width, op
         (; sta_a = final.sta_a[r], feed_a = final.feed_a[r], sta_b = final.sta_b[r], feed_b = final.feed_b[r], scan = final.scan[r], residual = resid[r], probability = γ[r])
             for r in eachindex(γ) if γ[r] > 1 / 2
     ]
-    return (; x, ncomp = g.ncomp, resid, rows = final, priors, converged, iterations, outliers,
-        mixture = mixture ? (; floor = sqrt.(s2), outlier_fraction = frac) : nothing)
+    return (;
+        x, ncomp = g.ncomp, resid, rows = final, priors, converged, iterations, outliers,
+        mixture = mixture ? (; floor = sqrt.(s2), outlier_fraction = frac) : nothing,
+    )
 end
 
 # The detection rows `keep` selects, with every prior row.

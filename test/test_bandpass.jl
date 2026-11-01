@@ -348,7 +348,8 @@ end
 
     @testset "observables are located by name, not plan-list position" begin
         anames = ["A1", "A2", "A3"]
-        geom = CAL.DataGeometry(; nfeed = 2,
+        geom = CAL.DataGeometry(;
+            nfeed = 2,
             times = [0.0, 1.0], scan_of_time = [1, 1],
             channel_freqs = collect(1.0e9 .+ (0:3) .* 1.0e6), spw_of_chan = ones(Int, 4),
             scan_names = ["No001"], spw_names = ["A"],

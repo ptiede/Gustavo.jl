@@ -78,10 +78,12 @@ function _block_gains(block, geom::DataGeometry, C::Type)
         _antenna_dim(geom.antennas[block.antennas]), Feed(1:geom.nfeed),
         Frequency(1:block.plan.shape.Frequency), Ti(1:block.plan.shape.Ti),
     )
-    return DimStack((;
-        g = ones(C, ax), φ = zeros(real(C), ax),
-        phase_valid = zeros(Bool, ax), amp_valid = zeros(Bool, ax), pinned = zeros(Bool, ax),
-    ))
+    return DimStack(
+        (;
+            g = ones(C, ax), φ = zeros(real(C), ax),
+            phase_valid = zeros(Bool, ax), amp_valid = zeros(Bool, ax), pinned = zeros(Bool, ax),
+        )
+    )
 end
 
 """

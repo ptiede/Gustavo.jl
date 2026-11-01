@@ -244,10 +244,10 @@ function _antenna_rows(ms)
     positions, mounts, angles = XRadio.antenna_positions(ms), XRadio.mounts(ms), XRadio.receptor_angles(ms)
     return [
         (;
-                name = String(n), position = collect(positions[:, a]), mount = mounts[a],
-                poltype = (String(types[1, a]), String(types[2, a])),
-                polangle = (angles[1, a], angles[2, a]),
-            ) for (a, n) in zip(axes(positions, 2), XRadio.antennas(ms))
+            name = String(n), position = collect(positions[:, a]), mount = mounts[a],
+            poltype = (String(types[1, a]), String(types[2, a])),
+            polangle = (angles[1, a], angles[2, a]),
+        ) for (a, n) in zip(axes(positions, 2), XRadio.antennas(ms))
     ]
 end
 

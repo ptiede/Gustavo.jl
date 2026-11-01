@@ -425,7 +425,7 @@ end
         @test maximum(abs, (d .- d[1:1, :]) .- (truth.delay .- truth.delay[1:1, :])) < 5.0e-11
 
         # The bandpass flattens every product's spectrum.
-        bp = 0.5 .* randn(MersenneTwister(0x268), 4, n, 2 * 8)
+        bp = 0.5 .* randn(MersenneTwister(0x0268), 4, n, 2 * 8)
         bp[1, :, :] .= 0
         ps, _ = _build_fringe_ps(; polarizations = products, receptors, noise = 0.3, eltype = ComplexF64, bandpass = bp)
         fr = _fringe_fit(ps, FringeClosure(; gauge))
@@ -599,8 +599,10 @@ end
         default_fringe_model();
         phase = (;
             rel_delay = GainComponent(Delay(); Ti = GlobalTime(), Feed = ExceptFeed(1)),
-            rel_drift = GainComponent(Delay(); Ti = PerScan(), Feed = ExceptFeed(1),
-                prior = OUPrior(; scale = LogNormal(log(3600.0), 1.0), σ = LogNormal(log(3.0e-11), 2.0))),
+            rel_drift = GainComponent(
+                Delay(); Ti = PerScan(), Feed = ExceptFeed(1),
+                prior = OUPrior(; scale = LogNormal(log(3600.0), 1.0), σ = LogNormal(log(3.0e-11), 2.0))
+            ),
         ),
     )
     sol = fit(FringeClosure(; model, gauge = PinAntenna(1)), dets)
