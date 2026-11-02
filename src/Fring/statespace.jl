@@ -398,7 +398,7 @@ precision weights `w` (`w ≤ 0` or non-finite ⇒ missing), at the coordinates
 """
 function smooth_ou_track(y, w, times; τ::Real, σ2::Real)
     T = float(promote_type(eltype(y), eltype(w), eltype(times), typeof(τ), typeof(σ2)))
-    r = [(isfinite(wk) && wk > 0) ? inv(T(wk)) : T(Inf) for wk in w]
+    r = map!(wk -> (isfinite(wk) && wk > 0) ? inv(T(wk)) : T(Inf), similar(w, T), w)
     return smooth_track(OUModel{T}(τ, σ2), y, r, times)
 end
 
@@ -413,7 +413,8 @@ function _nelder_mead(f, x0::AbstractVector{<:Real}; step::Real = 0.5, iters::In
     # hyperparameters and are converted into it rather than promoted against it.
     T = float(eltype(x0))
     n = length(x0)
-    simplex = [collect(T, x0) for _ in 1:(n + 1)]
+    start = collect(T, x0)
+    simplex = [copy(start) for _ in 1:(n + 1)]
     for i in 1:n
         simplex[i + 1][i] += T(step)
     end
