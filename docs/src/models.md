@@ -101,6 +101,16 @@ shape's prior, and an `OUPrior` hyperprior with the level integrated out. A
 random walk beside a level is rejected, since the walk leaves its own level
 free, as is a shape with no prior.
 
+A level, or a phase delay beside the shape, may also carry an `IIDPrior(σ)`,
+which draws it toward zero; [`with_antenna`](@ref) gives a station its own `σ`:
+
+```julia
+held = GainComponent(Delay(); Ti = GlobalTime(), Feed = PerFeed(), prior = IIDPrior(0.1e-9))
+with_antenna(m, "NN"; phase = (; level, delay = held, shape))
+```
+
+The band constant the per-scan source term absorbs stays free under either.
+
 ### Time segmentations
 
 | Segmentation | One parameter block per |
@@ -216,6 +226,11 @@ untying this one.
 `Bandpass` solver's phase half). The residual nonlinear-in-frequency
 instrumental phase that a per-scan linear delay cannot represent, stable
 across the observation (HOPS-style).
+
+Beside it, a station may carry components with `Ti = PerScan()`, such as a
+phase level and a delay per scan over groups of channels, for structure that
+changes from scan to scan; `JointSmoother` fits them with the bandpass (see
+[`JointSmoother`](@ref)).
 
 **`adhoc` — per-integration constant phase, feed-common** (the
 `AdhocPhase` solver). Residual atmospheric phase is non-birefringent

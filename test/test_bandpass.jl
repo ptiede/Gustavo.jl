@@ -307,9 +307,11 @@ end
         @test_throws "one is the shape" pair(; a = shape, b = _bpc(CAL.ChannelBlocks(2)))
         @test_throws "one is the shape" pair(; a = level, b = _bpc(CAL.GlobalFrequency()))
         @test_throws "the level GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectralWindow()" *
-            ", Feed = PerFeed(), prior = OUPrior(; scale = 1.0e7, σ = 0.1)) carries a prior" pair(;
+            ", Feed = PerFeed(), prior = OUPrior(; scale = 1.0e7, σ = 0.1)) carries prior OUPrior" pair(;
             shape, level = _bpc(CAL.PerSpectralWindow(); prior = ou),
         )
+        # The mean may carry an `IIDPrior`; the shape may not.
+        @test pair(; shape, level = _bpc(CAL.PerSpectralWindow(); prior = CAL.IIDPrior(0.1)), delay = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = CAL.PerFeed(), prior = CAL.IIDPrior(1.0e-9))) isa CAL.GainModel
         @test_throws "share one time segmentation" pair(; shape, level = _bpc(CAL.PerSpectralWindow(); Ti = CAL.TimeBlocks(10.0)))
         # Without a proper zero-mean prior the shape absorbs the level.
         @test_throws "needs a zero-mean OUPrior" pair(; level, shape = _bpc(CAL.ChannelBlocks(1)))
@@ -363,7 +365,7 @@ end
         )
 
         lu = CAL.plan_parameters(default_bandpass_model(), anames, geom)
-        @test FP._bandpass_paths(lu.plantree, :phase) == (; shape = (:phase, :bandpass), level = nothing, delay = nothing)
+        @test FP._bandpass_paths(lu.plantree, :phase) == (; shape = (:phase, :bandpass), level = nothing, delay = nothing, scan = Tuple[])
         @test only(FP._bandpass_blocks(_setup(lu), zeros(lu.nθ), :phase)).antennas == 1:3
         @test isempty(FP._bandpass_level_blocks(_setup(lu), zeros(lu.nθ), :phase))
 
@@ -382,12 +384,12 @@ end
             phase = (; spw = _bpc(CAL.PerSpectralWindow()), chan = (; c = _bpc(CAL.ChannelBlocks(1); prior = ou))),
         )
         ll = CAL.plan_parameters(leveled, anames, geom)
-        @test FP._bandpass_paths(ll.plantree, :phase) == (; shape = (:phase, :chan, :c), level = (:phase, :spw), delay = nothing)
+        @test FP._bandpass_paths(ll.plantree, :phase) == (; shape = (:phase, :chan, :c), level = (:phase, :spw), delay = nothing, scan = Tuple[])
         delayed = CAL.GainModel(
             phase = (; τ = CAL.GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = CAL.PerFeed()), chan = (; c = _bpc(CAL.ChannelBlocks(1); prior = ou))),
         )
         @test FP._bandpass_paths(CAL.plan_parameters(delayed, anames, geom).plantree, :phase) ==
-            (; shape = (:phase, :chan, :c), level = nothing, delay = (:phase, :τ))
+            (; shape = (:phase, :chan, :c), level = nothing, delay = (:phase, :τ), scan = Tuple[])
         @test only(FP._bandpass_level_blocks(_setup(ll), zeros(ll.nθ), :phase)).plan.fseg isa CAL.PerSpectralWindow
 
         # A model differing across stations puts one plan per signature group on
@@ -409,7 +411,7 @@ end
         lp = CAL.plan_parameters(
             CAL.GainModel(; phase = default_bandpass_model().phase), anames, geom,
         )
-        @test FP._bandpass_paths(lp.plantree, :logamp) == (; shape = nothing, level = nothing, delay = nothing)
+        @test FP._bandpass_paths(lp.plantree, :logamp) == (; shape = nothing, level = nothing, delay = nothing, scan = Tuple[])
         @test isempty(FP._bandpass_blocks(_setup(lp), zeros(lp.nθ), :logamp))
     end
 
@@ -429,7 +431,7 @@ end
 function _fit_one_track(y, w, x, pieces, prior; level = nothing, nlevel = 0, phase = false, flat_span = 0.01)
     n = length(y)
     known = isfinite.(y) .& (w .> 0)
-    fits = [(; phase = (; x, pieces, prior, level, nlevel, delay = nothing, dx = nothing))]
+    fits = [(; phase = (; x, pieces, prior, level, nlevel, level_σ = nothing, delay = nothing, delay_σ = nothing, dx = nothing))]
     t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:n, 1, 1, n, 1)], [(1, 1)], [[1]], 1, known))
     yk, wk = ifelse.(known, y, NaN), ifelse.(known, w, 0.0)
     x0 = ifelse.(known, y, 0.0)
@@ -455,7 +457,7 @@ end
     x = collect(range(8.6e10, 8.6e10 + 6.4e7; length = n))
     prior = CAL.RandomWalkPrior(; order = 2, σ = 0.01 * sqrt(3 / (2 * (x[2] - x[1])^3)))
     known = trues(n)
-    fits = [(; phase = (; x, pieces, prior, level = nothing, nlevel = 0, delay = nothing, dx = nothing))]
+    fits = [(; phase = (; x, pieces, prior, level = nothing, nlevel = 0, level_σ = nothing, delay = nothing, delay_σ = nothing, dx = nothing))]
     t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:n, 1, 1, n, 1)], [(1, 1)], [[1]], 1, known))
 
     # A stiff track; slot k barely measured, its value 0.2 off the track and its
@@ -603,7 +605,7 @@ end
     y = 0.3 .* sin.(range(0, 3π; length = m)) .+ randn(rng, m) ./ 20
     w = fill(400.0, m)
     function em_map(spec, resolved)
-        fits = [(; phase = (; x = xf, pieces = [1:m], prior = spec, level = nothing, nlevel = 0, delay = nothing, dx = nothing))]
+        fits = [(; phase = (; x = xf, pieces = [1:m], prior = spec, level = nothing, nlevel = 0, level_σ = nothing, delay = nothing, delay_σ = nothing, dx = nothing))]
         t = only(FP._bandpass_tracks(fits, :phase, [reshape(1:m, 1, 1, m, 1)], [(1, 1)], [[1]], 1, trues(m)))
         sys = FP._posterior_system(FP.spdiagm(w), w .* y, zeros(m), trues(m), [t], xf)
         K, h, _ = FP._reduce!(sys, FP._assemble!(sys.layout, [resolved]), 0.0)
@@ -819,10 +821,12 @@ end
         @test _bp_phase(a) == _bp_phase(b)
     end
 
-    @testset "per-scan resolution is still refused" begin
-        @test_throws "cannot fit the component" fit(Bandpass(; model = model(PerScan()), gauge = PinAntenna(1)), broken)
-        @test_throws "degenerate with that scan's source coherence" fit(Bandpass(; model = model(PerScan()), gauge = PinAntenna(1)), broken)
-        @test_throws "GlobalTime, InstrumentScans or TimeBlocks" fit(Bandpass(; model = model(PerScan()), gauge = PinAntenna(1)), broken)
+    @testset "a per-scan bandpass needs a shape beside it" begin
+        @test_throws "need a shape beside them" fit(Bandpass(; model = model(PerScan()), gauge = PinAntenna(1)), broken)
+        prior = (; Frequency = OUPrior(; scale = 1.0e7, σ = 0.1))
+        smooth = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
+        @test_throws "cannot fit the component" fit(Bandpass(; model = GainModel(phase = (; bandpass = smooth)), gauge = PinAntenna(1)), broken)
+        @test_throws "GlobalTime, InstrumentScans or TimeBlocks" fit(Bandpass(; model = GainModel(phase = (; bandpass = smooth)), gauge = PinAntenna(1)), broken)
     end
 
     @testset "JointSmoother holds both observables to one time segmentation" begin

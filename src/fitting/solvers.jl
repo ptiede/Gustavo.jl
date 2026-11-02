@@ -145,9 +145,9 @@ model_components(s::Bandpass, spec) = _vet_model(
         "Ti = <GlobalTime, InstrumentScans or TimeBlocks>, Frequency = <any " *
         "segmentation>, Feed = PerFeed(), prior = <nothing, or a RandomWalkPrior, " *
         "OUPrior or CARMAPrior along Frequency>)` — a time segmentation whose segments each span " *
-        "several scans. A segment holding one scan (`PerScan`, `PerIntegration`) is " *
-        "not fitted: the band mean of its gain is degenerate with that scan's source " *
-        "coherence. See `default_bandpass_model`.",
+        "several scans; and beside a shape, per-scan terms: any term with " *
+        "`Ti = PerScan()` and no prior. A `PerIntegration` segment is not fitted. See " *
+        "`default_bandpass_model` and `JointSmoother`.",
     spec,
 )
 

@@ -45,7 +45,7 @@ function _bandpass_track(f, a, (k, ai), feed, ts, ids, known)
     delay = nknown >= 2 ? f.delay : nothing
     dunit = isnothing(f.delay) ? 1.0 : maximum(abs, f.dx)
     du = isnothing(f.delay) ? nothing : f.dx ./ dunit
-    return (; a, k, ai, feed, ts, slots, f.x, f.pieces, f.prior, f.level, f.nlevel, delay, du, dunit, active)
+    return (; a, k, ai, feed, ts, slots, f.x, f.pieces, f.prior, f.level, f.nlevel, f.level_σ, delay, f.delay_σ, du, dunit, active)
 end
 
 # Whether `x′` differs from `x` by no more than `x`'s own rounding.
@@ -286,7 +286,9 @@ function solve_joint_bandpass!(
         track(blocks, level, delay) = isempty(blocks) ? nothing : (;
                 seg.x, seg.pieces, prior = _prior_along(blocks[k].plan.priors[ai], :Frequency),
                 level = isnothing(level) ? nothing : level.level, nlevel = isnothing(level) ? 0 : level.nlevel,
+                level_σ = isnothing(level) ? nothing : level.σ,
                 delay = isnothing(delay) ? nothing : delay.level, dx = isnothing(delay) ? nothing : delay.dx,
+                delay_σ = isnothing(delay) ? nothing : delay.σ,
             )
         return (; phase = track(phase_blocks, phase_level[a], delay[a]), amp = track(amp_blocks, amp_level[a], nothing))
     end
@@ -737,8 +739,9 @@ end
 # Each station's level for one observable, or its delay, `nothing` where it has
 # none: its piece → segment map and segment count against the station's shape
 # segments, its block's leaf, feed tying and position, the segment of each shape
-# segment, its time-segment count, and each shape segment's mean frequency
-# coordinate under the block's term (`dx`, the delay's `f − f0`).
+# segment, its time-segment count, each shape segment's mean frequency
+# coordinate under the block's term (`dx`, the delay's `f − f0`), and the σ of
+# the station's `IIDPrior` on it, `nothing` for none.
 function _antenna_levels(level_blocks, segs, loc, geom::DataGeometry, θ, ::Type{T}) where {T}
     out = Vector{Any}(nothing, length(loc))
     for lb in level_blocks, (li, a) in pairs(lb.antennas)
@@ -749,10 +752,14 @@ function _antenna_levels(level_blocks, segs, loc, geom::DataGeometry, θ, ::Type
             level, nlevel, leaf = lb.θ, tying = lb.plan.tying, ai = li,
             seg = [level[p] for p in segs[k].piece_of], nts = lb.plan.shape.Ti, geom.nfeed, T,
             dx = [sum(view(lb.plan.xf, chans)) / length(chans) for chans in segs[k].fsegs],
+            σ = _mean_σ(lb.plan.priors[li]),
         )
     end
     return out
 end
+
+_mean_σ(::Nothing) = nothing
+_mean_σ(p::IIDPrior) = float(p.σ)
 
 _level_values(::Nothing) = nothing
 _level_values(l) = fill(l.T(NaN), l.nfeed, l.nlevel, l.nts)

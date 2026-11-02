@@ -56,6 +56,7 @@ include("Fring/bandpass_data.jl")
 include("Fring/bandpass_priors.jl")
 include("Fring/bandpass_map.jl")
 include("Fring/bandpass_solve.jl")
+include("Fring/bandpass_scan.jl")
 include("Fring/coherence.jl")
 include("Fring/diagnostics.jl")
 

@@ -14,7 +14,9 @@
 # profiled over that constant, so a proper prior acts on its track less a free
 # constant, as if beside a level. Where the slots carry that constant freely, a
 # track's first level is held at zero instead (`held`), and the prior sets the
-# constant. A flat-start walk is unchanged by a constant.
+# constant. A flat-start walk is unchanged by a constant. A level or delay
+# under an `IIDPrior` is an unknown with energy `u²/2σ²`; beside it the track's
+# constant is its own flat unknown, as under a proper prior with no level.
 
 # A linear form `Σ a·u[j] + b`: its terms `j => a` and its constant `b`.
 const _Form = Tuple{Vector{Pair{Int, Float64}}, Float64}
@@ -69,10 +71,11 @@ end
 # The quadratic `½uᵀKu − hᵀu + c` over `n` unknowns: the data terms `(Is, Js,
 # Vs)` with gradient `h` and constant `c`, plus the prior terms of `chains` (per
 # track, per chain), the diagonal of the first `nf` unknowns held for damping.
-# Its pattern is fixed here; `_assemble!` writes its values for given priors.
-function _quadratic_layout(chains, n; data = (Int[], Int[], Float64[]), h = zeros(n), c = 0.0, nf = 0, fixed = false)
+# The unknowns of `ridge` add `w·u²/2` each. Its pattern is fixed here;
+# `_assemble!` writes its values for given priors.
+function _quadratic_layout(chains, n; data = (Int[], Int[], Float64[]), h = zeros(n), c = 0.0, nf = 0, fixed = false, ridge = Pair{Int, Float64}[])
     terms = [[_chain_terms(ch, fixed) for ch in cs] for cs in chains]
-    Is, Js = [data[1]; 1:nf], [data[2]; 1:nf]
+    Is, Js = [data[1]; 1:nf; first.(ridge)], [data[2]; 1:nf; first.(ridge)]
     _foreach_term(terms) do term
         for e in term.entries, g in term.entries
             push!(Is, e[2])
@@ -86,7 +89,10 @@ function _quadratic_layout(chains, n; data = (Int[], Int[], Float64[]), h = zero
     for (i, j, v) in zip(data...)
         base[_position(K, i, j)] += v
     end
-    return (; K, base, h0 = h, c0 = c, h = similar(h), diag = [_position(K, j, j) for j in 1:nf], terms)
+    return (;
+        K, base, h0 = h, c0 = c, h = similar(h), diag = [_position(K, j, j) for j in 1:nf], terms,
+        ridge, ridge_at = [_position(K, j, j) for (j, _) in ridge],
+    )
 end
 
 # Writes the slot values `x` into the rows of `lay`'s prior terms that take a
@@ -106,6 +112,9 @@ function _assemble!(lay, priors)
     Kv = nonzeros(lay.K)
     T = eltype(Kv)
     copyto!(Kv, lay.base)
+    for (p, (_, w)) in zip(lay.ridge_at, lay.ridge)
+        Kv[p] += w
+    end
     copyto!(lay.h, lay.h0)
     c = lay.c0
     for (ts, prior) in zip(lay.terms, priors)
@@ -236,33 +245,42 @@ _samples_needed(prior::RandomWalkPrior) = _proper_prior(prior) ? 1 : prior.order
 _samples_needed(::OUPrior) = 1
 _samples_needed(::CARMAPrior) = 1
 
-# The level group of track `t`'s piece `j`: its level segment beside a level,
-# one group for the whole track under a proper prior (the constant the source term
-# absorbs), and `nothing` under a flat-start walk, which no constant changes.
-_level_group(t, prior, j) = !isnothing(t.level) ? t.level[j] : _proper_prior(prior) ? 1 : nothing
-_level_groups(t, prior) = !isnothing(t.level) ? t.level : _proper_prior(prior) ? ones(Int, length(t.pieces)) : nothing
+# The flat level group of track `t`'s piece `j`: its level segment beside a
+# level with no prior, one group for the whole track under a proper prior (the
+# constant the source term absorbs), and `nothing` under a flat-start walk,
+# which no constant changes.
+_level_group(t, prior, j) = _flat_level(t) ? t.level[j] : _proper_prior(prior) ? 1 : nothing
+_level_groups(t, prior) = _flat_level(t) ? t.level : _proper_prior(prior) ? ones(Int, length(t.pieces)) : nothing
+_flat_level(t) = !isnothing(t.level) && isnothing(t.level_σ)
+_flat_delay(t) = isnothing(t.delay_σ) ? t.delay : nothing
 
 # The state chain of each piece of track `t` its prior acts on, over unknowns
 # whose frequencies `keys` holds: per sample its state less the piece's mean, as
 # linear forms whose first is the slot (`slot(n)` gives its unknown, or `0` and
 # its fixed value) and the rest new latent unknowns, with the coordinates its
 # prior runs on, its samples' slots and its state dimension as a type
-# (`Val`). Returns the chains and the unknown of each level group but the
-# track's `held` one, if any, and of each delay group, `(; levels, delays)`. A
-# delay's unknown is the phase it adds at the track's regressor `t.du = 1`.
+# (`Val`). Returns the chains and the track's mean `(; levels, delays,
+# constant, ridge)`: the unknown of each level and delay group, of each flat
+# level group but the track's `held` one, if any (in `constant` beside a level
+# under a prior, else in `levels`), and `ridge`, each unknown under an `IIDPrior` with
+# its `1/σ²`. A delay's unknown is the phase it adds at the track's regressor
+# `t.du = 1`.
 function _track_chains!(keys, t, slot)
-    mean = (; levels = Dict{Int, Int}(), delays = Dict{Int, Int}())
+    mean = (; levels = Dict{Int, Int}(), delays = Dict{Int, Int}(), constant = Dict{Int, Int}(), ridge = Pair{Int, Float64}[])
     chains = [_piece_chain!(keys, mean, t, slot, j, p) for (j, p) in pairs(t.pieces) if t.active[j]]
     return chains, mean
 end
 
 function _piece_chain!(keys, mean, t, slot, j, p)
     group = _level_group(t, t.prior, j)
-    L = isnothing(group) || group == get(t, :held, 0) ? 0 : get!(() -> _unknown!(keys, Inf), mean.levels, group)
-    τ = isnothing(t.delay) ? 0 : get!(() -> _unknown!(keys, Inf), mean.delays, t.delay[j])
+    flat = isnothing(t.level_σ) ? mean.levels : mean.constant
+    C = isnothing(group) || group == get(t, :held, 0) ? 0 : get!(() -> _unknown!(keys, Inf), flat, group)
+    L = _flat_level(t) || isnothing(t.level) ? 0 : _mean_unknown!(keys, mean, mean.levels, t.level[j], t.level_σ)
+    τ = isnothing(t.delay) ? 0 : _mean_unknown!(keys, mean, mean.delays, t.delay[j], _delay_phase_σ(t))
     states = map(p) do k
         j1, v1 = slot(t.slots[k])
         value = (iszero(j1) ? Pair{Int, Float64}[] : [j1 => 1.0], iszero(j1) ? v1 : 0.0)
+        iszero(C) || push!(value[1], C => -1.0)
         iszero(L) || push!(value[1], L => -1.0)
         iszero(τ) || push!(value[1], τ => -t.du[k])
         _Form[value; [([_unknown!(keys, t.x[k]) => 1.0], 0.0) for _ in 2:_statedim(t.prior)]]
@@ -270,6 +288,19 @@ function _piece_chain!(keys, mean, t, slot, j, p)
     u, h = _piece_coordinates(t.prior, t.x[p])
     return (; u, h, states, slots = t.slots[p], dim = Val(_statedim(t.prior)))
 end
+
+# The unknown of mean group `g` in `unknowns`, made on first use, flat for
+# `σ = nothing` and under `N(0, σ²)` otherwise.
+function _mean_unknown!(keys, mean, unknowns, g, σ)
+    return get!(unknowns, g) do
+        j = _unknown!(keys, Inf)
+        isnothing(σ) || push!(mean.ridge, j => inv(σ^2))
+        j
+    end
+end
+
+# The prior σ of track `t`'s delay unknown, the phase at `t.du = 1`.
+_delay_phase_σ(t) = isnothing(t.delay_σ) ? nothing : 2π * t.dunit * t.delay_σ
 
 # The log density of `chains` under the resolved `prior`, in expectation over the
 # states' posterior, from their moments summed where the prior's terms are the
@@ -389,12 +420,12 @@ end
 function _track_layout(t)
     keys = Float64[]
     chains, mean = _track_chains!(keys, t, _ -> (0, 0.0))
-    layout = _quadratic_layout([chains], length(keys); fixed = true)
+    layout = _quadratic_layout([chains], length(keys); fixed = true, mean.ridge)
     return (; layout, mean, factor = Ref{Union{Nothing, CHOLMOD.Factor{Float64, Int}}}(nothing), prior = Ref{Any}(nothing))
 end
 
 # The values of a track's mean by group, `(; levels, delays)`, from the unknowns `u`.
-_mean_values(mean, u) = map(m -> Dict(g => u[j] for (g, j) in m), mean)
+_mean_values(mean, u) = map(m -> Dict(g => u[j] for (g, j) in m), (; mean.levels, mean.delays))
 
 # A track's prior energy at the slot values `x`, minimized over its latent states
 # and mean, and that mean (`_mean_values`); `tl` is its `_track_layout`. The
@@ -451,6 +482,9 @@ end
 # The gradient of `_prior_energy` at the unknowns `u`.
 function _prior_gradient(lay, priors, u)
     g = zeros(length(u))
+    for (j, w) in lay.ridge
+        g[j] += w * u[j]
+    end
     for (ts, prior) in zip(lay.terms, priors)
         isempty(ts) && continue
         _with_piece_models(prior, first(ts).dim, Float64) do model
@@ -461,9 +495,10 @@ function _prior_gradient(lay, priors, u)
 end
 
 # The prior energy of the chains of `lay` under the resolved `priors` (one per
-# track) at the unknowns `u`, summed over the chains (`_chain_energy`).
+# track) at the unknowns `u`, summed over the chains (`_chain_energy`), and of
+# its ridge.
 function _prior_energy(lay, priors, u)
-    E = 0.0
+    E = sum(((j, w),) -> w * u[j]^2 / 2, lay.ridge; init = 0.0)
     for (ts, prior) in zip(lay.terms, priors)
         isempty(ts) && continue
         E += _with_piece_models(prior, first(ts).dim, Float64) do model
@@ -506,7 +541,7 @@ function _posterior_system(H, b, x, free, tracks, key)
     n = length(keys)
     layout = _quadratic_layout(
         first.(built), n; data = findnz(Hf), h = [b[free] .+ Hx; zeros(n - nf)],
-        c = dot(xf, Hx) / 2 + dot(b[free], xf), nf,
+        c = dot(xf, Hx) / 2 + dot(b[free], xf), nf, ridge = reduce(vcat, (m.ridge for m in last.(built)); init = Pair{Int, Float64}[]),
     )
     return (;
         layout, chains = first.(built), means = last.(built), x = Float64.(x), free, xf, bf = Float64.(b[free]),
@@ -699,15 +734,17 @@ function _seed_prior(t, y, wy; phase::Bool)
     return _estimate_hypers(t.prior, ys, ws, xs; mean = _mean_designs(t, t.prior), branches = phase)
 end
 
-# The design of track `t`'s mean per piece (`_level_design`): its level group's
-# coefficient, and after every level group's its delay group's, whose regressor
-# is `t.du`; `nothing` under a flat-start walk, which takes neither.
+# The design of track `t`'s flat mean per piece (`_level_design`): its flat
+# level group's coefficient, and after every level group's its flat delay
+# group's, whose regressor is `t.du`; `nothing` under a flat-start walk, which
+# takes neither. A level or delay under a prior is not part of it.
 function _mean_designs(t, prior)
     groups = _level_groups(t, prior)
     isnothing(groups) && return nothing
-    isnothing(t.delay) && return [(; cols = SVector(groups[j]), rows = fill(SVector(1.0), length(p))) for (j, p) in pairs(t.pieces)]
+    delay = _flat_delay(t)
+    isnothing(delay) && return [(; cols = SVector(groups[j]), rows = fill(SVector(1.0), length(p))) for (j, p) in pairs(t.pieces)]
     nlevel = maximum(groups)
-    return [(; cols = SVector(groups[j], nlevel + t.delay[j]), rows = [SVector(1.0, t.du[k]) for k in p]) for (j, p) in pairs(t.pieces)]
+    return [(; cols = SVector(groups[j], nlevel + delay[j]), rows = [SVector(1.0, t.du[k]) for k in p]) for (j, p) in pairs(t.pieces)]
 end
 
 # Put phase track `t` on the branches `_branch_filter` finds most probable for its

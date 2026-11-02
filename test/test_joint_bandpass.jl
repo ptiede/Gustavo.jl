@@ -1049,6 +1049,66 @@ end
     end
 end
 
+@testset "JointSmoother: a station's prior on its mean draws it toward zero" begin
+    nant, nchan = 4, 64
+    anames = ["A$i" for i in 1:nant]
+    geom = CAL.DataGeometry(;
+        nfeed = 2,
+        times = collect(0.0:3.0), scan_of_time = collect(1:4),
+        channel_freqs = collect(1.0e9 .+ (0:(nchan - 1)) .* 1.0e6),
+        spw_of_chan = repeat([1, 2]; inner = nchan ÷ 2),
+        scan_names = ["No00$i" for i in 1:4], spw_names = ["A", "B"],
+        antennas = anames,
+    )
+    ou = CAL.OUPrior(; scale = LogNormal(log(8.0e6), 1.0), σ = LogNormal(log(0.1), 1.5))
+    shape = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior = ou)
+    level(prior = nothing) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.PerSpectralWindow(), Feed = PerFeed(), prior)
+    delay(prior = nothing) = GainComponent(CAL.Delay(); Ti = CAL.GlobalTime(), Feed = PerFeed(), prior)
+
+    rng = MersenneTwister(79)
+    bl_pairs = [(a, b) for a in 1:nant for b in (a + 1):nant]
+    feeds = [(1, 1), (1, 2), (2, 1), (2, 2)]
+    f0 = geom.f0
+    spw = geom.spw_of_chan
+    τtrue = 4.0e-9 .* randn(rng, nant, 2)
+    steps = 0.5 .* randn(rng, nant, 2, 2)
+    ripple = 0.03 .* sin.((1:nchan) ./ 3)
+    gtrue = ones(ComplexF64, nant, 2, 1, nchan)
+    for a in 1:nant, f in 1:2
+        gtrue[a, f, 1, :] .= cis.(2π .* τtrue[a, f] .* (geom.channel_freqs .- f0) .+ steps[a, f, spw] .+ ripple)
+    end
+    Strue = [(0.5 + rand(rng)) * cis(2pi * rand(rng)) for _ in 1:4, _ in eachindex(bl_pairs), _ in eachindex(feeds)]
+    results = _joint_scan_accumulators(gtrue, Strue, fill(1, nant, 4), bl_pairs, feeds, geom)
+
+    # Each station's level per window and delay per feed, from the blocks that hold it.
+    station_value(blocks, a, f, g) = only(b.θ[1, f, g, 1, findfirst(==(a), b.antennas)] for b in blocks if a in b.antennas)
+    function solve(model)
+        l = CAL.plan_parameters(model, anames, geom)
+        s = (; layout = l, paths = (; phase = FP._bandpass_paths(l.plantree, :phase), logamp = FP._bandpass_paths(l.plantree, :logamp)))
+        θ = zeros(l.nθ)
+        pb, ab = FP._bandpass_blocks(s, θ, :phase), FP._bandpass_blocks(s, θ, :logamp)
+        plb, db = FP._bandpass_level_blocks(s, θ, :phase), FP._bandpass_delay_blocks(s, θ)
+        FP.solve_joint_bandpass!(θ, results, geom, pb, ab; phase_level_blocks = plb, delay_blocks = db, gauge = PinAntenna(1))
+        return (;
+            τ = [station_value(db, a, f, 1) for a in 1:nant, f in 1:2],
+            L = [station_value(plb, a, f, g) for a in 1:nant, f in 1:2, g in 1:2],
+        )
+    end
+    flat = solve(CAL.GainModel(; phase = (; level = level(), delay = delay(), shape), logamp = (; shape)))
+    @test flat.τ ≈ τtrue .- τtrue[1, 1] atol = 0.05e-9
+
+    # A prior far wider than the values leaves the flat solution.
+    wide = solve(CAL.GainModel(; phase = (; level = level(CAL.IIDPrior(100.0)), delay = delay(CAL.IIDPrior(1.0e-6)), shape), logamp = (; shape)))
+    @test maximum(abs, wide.τ .- flat.τ) < 5.0e-12
+    @test maximum(abs, (wide.L .- wide.L[:, :, 1:1]) .- (flat.L .- flat.L[:, :, 1:1])) < 1.0e-3
+
+    # A tight prior on one station holds its own mean at zero.
+    base = CAL.GainModel(; phase = (; level = level(), delay = delay(), shape), logamp = (; shape))
+    tight = solve(with_antenna(base, "A3"; phase = (; level = level(CAL.IIDPrior(1.0e-3)), delay = delay(CAL.IIDPrior(1.0e-12)), shape)))
+    @test maximum(abs, tight.τ[3, :]) < 1.0e-3 * maximum(abs, flat.τ[3, :])
+    @test maximum(abs, tight.L[3, :, :]) < 1.0e-3 * maximum(abs, flat.L[3, :, :])
+end
+
 # The same-feed products do not see a delay added to the second feed of every
 # station, so only the weak different-feed products measure it, whatever the
 # feeds' basis.
@@ -1647,4 +1707,127 @@ end
     cov = FP._covariance(P, K)
     pattern = [(i, j) for j in 1:n for i in FP.rowvals(K)[FP.nzrange(K, j)]]
     @test maximum(((a, b),) -> abs(cov(a, b) - Minv[a, b]), pattern) < 1.0e-10
+end
+
+# A synthetic set whose stations `moving` add `dev[a][s, c]` to their phase on
+# scan `s`, both feeds, beside a static bandpass for every station, under
+# per-baseline source structure.
+function _scan_term_ps(dev; nant = 4, nchan = 32, nscans = 8, seed = 7)
+    rng = MersenneTwister(seed)
+    static = 0.3 .* randn(rng, nant, 2, nchan)
+    bp = zeros(nant, 2, nchan, nscans)
+    for s in 1:nscans
+        bp[:, :, :, s] .= static
+        for (a, d) in dev
+            bp[a, :, :, s] .+= reshape(d[s, :], 1, nchan)
+        end
+    end
+    ps, truth = _build_fringe_ps(; nant, nspw = 1, nchan, ntime = 6, nscans, antenna_gains = false, bandpass = bp, noise = 0.3)
+    nbl, npol = length(truth.bl_pairs), length(truth.polarizations)
+    _scale_sources!(ps, 0.5 .+ rand(rng, nscans, nbl, npol), 2π .* rand(rng, nscans, nbl, npol))
+    return ps, truth
+end
+
+# The rms phase about the band mean of each scan's averaged spectrum, parallel
+# hands, on the baselines of station `a` and on the rest.
+function _scan_spectrum_rms(sol, ps, truth, a)
+    c = calibrate(sol, ps; flag_bad = false, apply_flags = false)
+    on, off = Float64[], Float64[]
+    for ms in values(c)
+        V = parent(ms[:visibility])
+        for bl in axes(V, 3), p in (1, 4)
+            v = vec(sum(V[p, :, bl, :]; dims = 2))
+            push!(a in truth.bl_pairs[bl] ? on : off, sqrt(mean(abs2, angle.(v ./ (sum(v) / length(v))))))
+        end
+    end
+    return mean(on), mean(off)
+end
+
+# Each scan's phase of station `a`, feed 1, over the channels, with the
+# per-channel mean over scans and each scan's mean over channels removed.
+function _double_centered(X)
+    return X .- mean(X; dims = 2) .- mean(X; dims = 1) .+ mean(X)
+end
+function _scan_phases(sol, ps, a, nscans)
+    geom = CAL.DataGeometry(ps)
+    G = parent(gains(sol))
+    first_time(s) = findfirst(==(findfirst(==(string(s)), geom.scan_names)), geom.scan_of_time)
+    return reduce(vcat, [angle.(G[:, first_time(s), a, 1] ./ G[:, first_time(1), a, 1])' for s in 1:nscans])
+end
+
+@testset "JointSmoother: per-scan terms beside the shape" begin
+    nchan, nscans = 32, 8
+    ou = OUPrior(; scale = LogNormal(log(8.0e6), 1.0), σ = LogNormal(log(0.1), 1.5))
+    shape = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior = (; Frequency = ou))
+    base = GainModel(; phase = (; bandpass = shape), logamp = (; bandpass = shape))
+    gauge = PinAntenna(1)
+
+    @testset "a level and a delay per group of channels on one station" begin
+        groups = [1:1, 2:13, 14:25, 26:32]
+        rng = MersenneTwister(11)
+        dev = zeros(nscans, nchan)
+        for s in 1:nscans, g in groups
+            dev[s, g] .= 0.2 * randn(rng) .+ 0.03 * randn(rng) .* (g .- mean(g))
+        end
+        ps, truth = _scan_term_ps(Dict(2 => dev); nchan, nscans)
+        fg = FreqGroups(groups)
+        model = with_antenna(
+            base, "A2"; phase = (;
+                bandpass = shape,
+                level = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = fg, Feed = SharedFeeds()),
+                delay = GainComponent(Delay(); Ti = PerScan(), Frequency = fg, Feed = SharedFeeds()),
+            ),
+        )
+        without = _scan_spectrum_rms(fit(Bandpass(; model = base, gauge), ps), ps, truth, 2)
+        sol = fit(Bandpass(; model, gauge), ps)
+        with = _scan_spectrum_rms(sol, ps, truth, 2)
+        # The A2 baselines come down to the noise the others show.
+        @test without[1] > 3 * without[2]
+        @test with[1] < 1.2 * with[2]
+        err = _double_centered(_scan_phases(sol, ps, 2, nscans)) .- _double_centered(dev .- dev[1:1, :])
+        @test sqrt(mean(abs2, err)) < 0.05 * sqrt(mean(abs2, _double_centered(dev)))
+    end
+
+    @testset "a level per group of channels and feed" begin
+        groups = [1:16, 17:32]
+        rng = MersenneTwister(13)
+        dev = zeros(nscans, nchan)
+        for s in 1:nscans, g in groups
+            dev[s, g] .= 0.3 * randn(rng)
+        end
+        ps, truth = _scan_term_ps(Dict(2 => dev); nchan, nscans, seed = 9)
+        level = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = FreqGroups(groups), Feed = PerFeed())
+        sol = fit(Bandpass(; model = with_antenna(base, "A2"; phase = (; bandpass = shape, level)), gauge), ps)
+        err = _double_centered(_scan_phases(sol, ps, 2, nscans)) .- _double_centered(dev .- dev[1:1, :])
+        @test sqrt(mean(abs2, err)) < 0.05 * sqrt(mean(abs2, _double_centered(dev)))
+    end
+
+    @testset "a band-wide delay per scan on two stations" begin
+        rng = MersenneTwister(12)
+        freqs = 230.0e9 .+ (0:(nchan - 1)) .* 2.0e6
+        ramp = 2π .* (freqs .- sum(freqs) / nchan)
+        dev = Dict(a => reduce(vcat, [(1.0e-9 * randn(rng) .* ramp)' for _ in 1:nscans]) for a in (2, 3))
+        ps, truth = _scan_term_ps(dev; nchan, nscans, seed = 8)
+        delay = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds())
+        model = with_antenna(with_antenna(base, "A2"; phase = (; bandpass = shape, delay)), "A3"; phase = (; bandpass = shape, delay))
+        sol = fit(Bandpass(; model, gauge), ps)
+        for a in (2, 3)
+            err = _double_centered(_scan_phases(sol, ps, a, nscans)) .- _double_centered(dev[a] .- dev[a][1:1, :])
+            @test sqrt(mean(abs2, err)) < 0.05 * sqrt(mean(abs2, _double_centered(dev[a])))
+        end
+    end
+
+    @testset "per-scan terms on every station are refused" begin
+        ps, _ = _scan_term_ps(Dict{Int, Matrix{Float64}}(); nant = 2, nchan = 8, nscans = 2)
+        delay = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds())
+        model = GainModel(; phase = (; bandpass = shape, delay), logamp = (; bandpass = shape))
+        @test_throws "every station observing it carries per-scan terms" fit(Bandpass(; model, gauge), ps)
+    end
+
+    @testset "per-scan terms need a shape beside them" begin
+        delay = GainComponent(Delay(); Ti = PerScan(), Feed = SharedFeeds())
+        ps, _ = _scan_term_ps(Dict{Int, Matrix{Float64}}(); nant = 3, nchan = 8, nscans = 2)
+        model = GainModel(; phase = (; delay), logamp = (; bandpass = shape))
+        @test_throws "need a shape beside them" fit(Bandpass(; model, gauge), ps)
+    end
 end
