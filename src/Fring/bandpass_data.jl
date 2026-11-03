@@ -1,0 +1,532 @@
+# ── Joint complex bandpass + per-scan source coherence ───────────────────────
+#
+# `solve_joint_bandpass!` fits the complex visibilities against
+#
+#     V_ab(ν) | scan  ≈  g_a(ν) · S_{scan,ab,pol} · conj(g_b(ν)),
+#
+# one frequency-flat complex `S` per (scan, baseline, polarization product), so
+# a resolved or polarized source's per-baseline structure is absorbed into `S`
+# rather than biasing the station bandpass. `S` given the gains is closed-form,
+# and the gains maximize the posterior with `S` profiled out (bandpass_map.jl).
+#
+# The data are `(Scan, AntennaPair, FeedPair, Frequency)` arrays over the
+# refinement cells every station's segmentation is a union of. The gains are one
+# `(AntennaName, Feed, Frequency, Ti)` array per phase station block, over the block's
+# own stations, frequency segments and time segments; a station's block and
+# position come from `_block_locations`. Station and feed
+# indices come from the `AntennaPair`/`FeedPair` labels (`_cell_nodes`).
+
+# One scan's per-(baseline, pol, segment) coherent residual, written directly
+# into `rview`/`wview`, a (AntennaPair, FeedPair, Frequency) slice of the multi-scan
+# accumulator, with no intermediate allocation.
+#
+# Cells are kept at their inverse-variance weights at any SNR: a weak cell is
+# unbiased, and the weak cells pairing different feeds are the only rows tying
+# one feed's gains to another's. Outliers are flagged upstream of the solve.
+function _reduce_scan_segments!(rview, wview, sc, segs)
+    for p in axes(rview, FeedPair), bi in axes(rview, AntennaPair)
+        for (fs, chans) in enumerate(segs)
+            rc, wc = _segment_residual(sc.rl, sc.wl, bi, p, chans)
+            keep = isfinite(rc) && isfinite(wc) && wc > 0
+            rview[bi, p, fs] = keep ? rc : zero(rc)
+            wview[bi, p, fs] = keep ? wc : zero(wc)
+        end
+    end
+    return nothing
+end
+
+# Every scan's (AntennaPair, FeedPair, segment) residual, stacked over an added Scan
+# axis — not summed across scans, since the per-scan source coherence needs each
+# scan's own coherent visibility, in the scan accumulators' element types or
+# in the real type `eltype`. The segments are numbered along `Frequency`.
+function _reduce_all_scans(scans, segs; eltype = nothing)
+    rl = first(scans).rl
+    T = something(eltype, real(Base.eltype(first(scans).wl)))
+    C = isnothing(eltype) ? Base.eltype(rl) : complex(eltype)
+    d = (Scan(eachindex(scans)), dims(rl, AntennaPair), dims(rl, FeedPair), Frequency(eachindex(segs)))
+    rseg, wseg = zeros(C, d), zeros(T, d)
+    for (r, w, sc) in zip(eachslice(rseg; dims = Scan), eachslice(wseg; dims = Scan), scans)
+        _reduce_scan_segments!(r, w, sc, segs)
+    end
+    return rseg, wseg
+end
+
+# Each station's block and its position on that block's `AntennaName` axis; `(0, 0)`
+# for a station no block covers.
+function _block_locations(blocks, nant)
+    loc = fill((0, 0), nant)
+    for (k, b) in pairs(blocks), (ai, a) in pairs(b.antennas)
+        loc[a] = (k, ai)
+    end
+    return loc
+end
+
+# The blocks a joint solve holds its complex gains on: the phase blocks, or the
+# amplitude blocks when the model has no phase. Where both exist they match.
+_gain_blocks(phase_blocks, amp_blocks) = isempty(phase_blocks) ? amp_blocks : phase_blocks
+
+# One gain block's solved state over `(AntennaName, Feed, Frequency, Ti)` — its
+# stations, every feed, its frequency segments and its time segments, both
+# numbered: the
+# complex gains `g`; their phases `φ` on the branches the solve chose; the slots
+# whose phase and whose log-amplitude the solve gave a value (`phase_valid`,
+# `amp_valid`), which differ where a prior fills one observable over a slot
+# without data and the other has no prior; and the gauge pins (`pinned`).
+
+function _block_gains(block, geom::DataGeometry, C::Type)
+    ax = (
+        _antenna_dim(geom.antennas[block.antennas]), Feed(1:geom.nfeed),
+        Frequency(1:block.plan.shape.Frequency), Ti(1:block.plan.shape.Ti),
+    )
+    return DimStack(
+        (;
+            g = ones(C, ax), φ = zeros(real(C), ax),
+            phase_valid = zeros(Bool, ax), amp_valid = zeros(Bool, ax), pinned = zeros(Bool, ax),
+        )
+    )
+end
+
+"""
+    _antenna_freq_segments(blocks, nant) -> (fseg, cells)
+
+The frequency cells a joint solve reduces its data onto — the coarsest
+channel partition every block's own segmentation is a union of cells of — and
+`fseg[a, k]` is the segment station `a` carries over cell `k`, `0` for a station
+no block covers.
+
+Stations that share one frequency segmentation give the identity refinement, so
+`cells` is that segmentation's own channel groups and every station's cell maps
+to itself.
+"""
+function _antenna_freq_segments(blocks, nant)
+    cell_ids, ncell = common_refinement([b.plan.fseg_id for b in blocks])
+    cells = segment_groups(cell_ids, ncell)
+    fseg = zeros(Int, Base.OneTo(nant), Base.OneTo(ncell))
+    for b in blocks, a in b.antennas
+        for (k, chans) in pairs(cells)
+            # A cell lies wholly inside one segment of every block's
+            # segmentation, so its first channel names them all.
+            fseg[a, k] = b.plan.fseg_id[first(chans)]
+        end
+    end
+    return fseg, cells
+end
+
+# Dense ids of the gain slots, one array per block in its gain array's shape,
+# numbered consecutively across the blocks.
+function _gain_slot_ids(gains)
+    lasts = cumsum(map(st -> length(st.g), gains))
+    return map(gains, lasts) do st, l
+        reshape((l - length(st.g) + 1):l, size(st.g))
+    end
+end
+
+# The phase-gauge graph of a joint bandpass solve: one node per gain slot —
+# (station, feed, that station's own frequency segment, its own time segment) —
+# one edge per (scan, station pair, feed pair, refinement cell) correlation of
+# nonzero weight, joining its two ends in the segments they are in for that
+# scan and that cell.
+# `nodew[n]` sums the data weights of the correlations touching node `n`, the
+# score the gauge falls back to when choosing an anchor.
+#
+# The node set is the gauge condition. An edge names the two gain slots one
+# correlation reads, and a shared phase cancels out of `g_a·S·conj(g_b)` only
+# when both ends of every internal edge carry it, so the unobservable phases are
+# one constant per connected component. No coarser node set states that, and a
+# station whose frequency segments are finer than the modes the array leaves free
+# would be over-constrained by any pin that fixed its whole track.
+#
+# `ids` numbers the slots (`_gain_slot_ids`); `compid[n]` is `0` for a slot no
+# weighted correlation touches.
+function _joint_bandpass_graph(data, layout, ids)
+    (; w, ends) = data
+    (; loc, tseg, fseg) = layout
+    nslots = sum(length, ids; init = 0)
+    edges = Tuple{Int, Int}[]
+    nodew = zeros(Base.eltype(w), nslots)
+    for si in axes(tseg, 2), p in axes(ends, FeedPair), bi in axes(ends, AntennaPair)
+        _solvable(ends[bi, p]) || continue
+        (a, fa), (b, fb) = ends[bi, p]
+        # A station no block covers (segment 0) carries no bandpass parameter, so
+        # the correlations touching it constrain nothing.
+        ta, tb = tseg[a, si], tseg[b, si]
+        (iszero(ta) || iszero(tb)) && continue
+        (ka, ia), (kb, ib) = loc[a], loc[b]
+        for cell in axes(fseg, 2)
+            iszero(w[si, bi, p, cell]) && continue
+            na = ids[ka][ia, fa, fseg[a, cell], ta]
+            nb = ids[kb][ib, fb, fseg[b, cell], tb]
+            push!(edges, (na, nb))
+            nodew[na] += w[si, bi, p, cell]
+            nodew[nb] += w[si, bi, p, cell]
+        end
+    end
+    compid, ncomp, _ = connected_components(nslots, edges)
+    return compid, ncomp, nodew
+end
+
+"""
+    _joint_bandpass_gauge!(gains, data, layout, blocks, gauge, phase_tracks, track_pins) -> (; tracks, pinned, meet)
+
+Fix the phase frame of a joint bandpass solve over every gain slot's phase `φ`,
+numbered by `_gain_slot_ids`: impose `gauge` and hold the band constant of each
+phase track. `phase_tracks(known)` builds the phase tracks (`_bandpass_tracks`)
+given the slots with data no pin fixes; they are returned with their holds
+(`_hold_phase_constants!`), the held slots marked in `track_pins` and the pinned
+ones in `pinned` and in the `pinned` layer of `gains`. A held or pinned slot's
+amplitude is solved like any other slot's.
+
+Under `PinAntenna` there is one [`GaugeFreedom`](@ref) per connected component
+and the reference's slot in each is pinned at zero: the reference's track is
+zero wherever it has data, and the priors act on every other track relative to
+it. In a component where the reference has no data, the next reference with
+data is pinned (`gauge_anchor`), and the reference's slot there is filled by
+its prior. `meet` is then `nothing`. Under any other gauge the freedoms are the
+shifts that neither the data nor the priors of the tracks see
+(`_gauge_directions`): the solve pins what the holds leave of them, and
+afterwards moves along the freedoms onto the constraints `C·φ = d` the gauge
+gives (`_meet_gauge!`). `meet` is `(; rows, d, freedoms)`: `rows[j]` the
+`(slot, coefficient)` pairs of row `j` and `freedoms[k]` the slots of freedom
+`k` with their shift.
+
+Only the phase is a gauge freedom. Multiplying the gains of a set of nodes by a
+shared `c` sends `g_a·S·conj(g_b)` to `|c|²·g_a·S·conj(g_b)` on every
+correlation internal to that set: the phase of `c` cancels between the two
+conjugated factors. The sets on which it cancels everywhere are the connected
+components of the joint-bandpass graph, so the data leave one phase per
+component free. A station-uniform segmentation splits the graph along the
+array-wide (frequency segment, time segment) cells, so the free direction is a
+phase spectrum common to every station; a model in which one station breaks
+mid-track keeps the whole track in one component, because the stations that
+hold one gain over it bridge the broken station's two segments.
+
+A proper prior along frequency is not invariant to that spectrum: it sees all
+of it but the part its track's mean takes up — a constant under a level, a
+line in frequency under a delay. A pin settles the spectrum by the
+reference's data: the reference's bandpass is zero by definition, and its
+structure appears, sign flipped, on every other track, where their priors act
+on it. A prior on the reference's own track has nothing left to act on, so a
+fully pinned track takes no part in the prior fit. Other gauges leave the
+spectrum to the priors: only the shifts every prior is blind to are freedoms,
+each fixed by a projection onto its shift being zero (under a zero sum, of
+every slot). Along such a freedom the data and the priors are unchanged, so
+the gauge changes no gauge-invariant quantity, nor the posterior of anything
+the priors see.
+
+The same bridging on the frequency axis makes a pin PARTIAL: where a station
+holds one gain across cells the others split, those cells lie in one component,
+and its single pin fixes ONE segment of the pinned station's track while the
+rest of that track is fitted.
+
+Besides that common phase, each (station, feed, time segment) track has a free
+band-constant phase and log-amplitude: `S` is per scan and baseline but
+frequency-flat, so it absorbs a band-constant factor on any one station, and
+a prior is profiled over that constant (see the header of bandpass_priors.jl). Pinning `|g|` as well
+would assert the reference antenna has a flat amplitude bandpass, discarding
+structure that is identifiable (mean-removing `log|V_ab| = la_a + la_b + ls_ab`
+over the band eliminates `ls` and leaves a signless-Laplacian system, full rank
+wherever each connected group of baselines has an odd loop; see
+`_split_free_amplitudes!` for a group without one) and biasing every other
+station through the inconsistency.
+"""
+function _joint_bandpass_gauge!(gains, data, layout, blocks, gauge, phase_tracks, track_pins)
+    T = real(eltype(first(gains).g))
+    ids = _gain_slot_ids(gains)
+    compid, ncomp, nodew = _joint_bandpass_graph(data, layout, ids)
+    slot = [(k, I) for (k, idk) in pairs(ids) for I in CartesianIndices(idk)]
+    # A slot no correlation touches (`compid` 0) is in no component.
+    members = [Int[] for _ in 1:ncomp]
+    for (n, c) in pairs(compid)
+        iszero(c) || push!(members[c], n)
+    end
+    function along(comps, shift)
+        nodes = reduce(vcat, members[comps])
+        at = Dict(zip(comps, shift))
+        return (nodes, [at[compid[n]] for n in nodes])
+    end
+    function system(freedoms)
+        fs = map(freedoms) do (nodes, direction)
+            GaugeFreedom(;
+                nodes, antenna = [blocks[slot[n][1]].antennas[slot[n][2][1]] for n in nodes],
+                feed = [slot[n][2][2] for n in nodes], scan = zeros(Int, length(nodes)),
+                component = [blocks[slot[n][1]].plan.path for n in nodes], observable = fill(:phase, length(nodes)),
+                direction = T.(direction), weight = nodew[nodes],
+            )
+        end
+        C, d = _bandpass_gauge_system(gauge, GaugeFreedoms{T}(fs, length(compid)))
+        Cs = sparse(C)
+        rows = [Tuple{Int, T}[] for _ in axes(Cs, 1)]
+        for n in axes(Cs, 2), i in nzrange(Cs, n)
+            iszero(nonzeros(Cs)[i]) || push!(rows[rowvals(Cs)[i]], (n, nonzeros(Cs)[i]))
+        end
+        return rows, d
+    end
+    pinned = falses(length(compid))
+    reference = _gauge_for(gauge, first(blocks).plan.path) isa PinAntenna
+    if reference
+        rows, _ = system([along([c], [1.0]) for c in 1:ncomp])
+        foreach(row -> pinned[first(only(row))] = true, rows)
+    end
+    tracks = phase_tracks((nodew .> 0) .& .!pinned)
+    natural = _gauge_directions(compid, members, tracks)
+    tracks = _hold_phase_constants!(pinned, track_pins, tracks, natural, nodew; reference)
+    for n in findall(pinned)
+        k, I = slot[n]
+        gains[k].pinned[I] = true
+    end
+    reference && return (; tracks, pinned, meet = nothing)
+    rows, d = system(natural)
+    return (; tracks, pinned, meet = (; rows, d, freedoms = natural))
+end
+
+# Each phase track with the band constant `S` absorbs held, and the slots that
+# fix what the holds leave of the freedoms `natural` (`(slots, shift)`) marked
+# in `pinned`. Along a freedom `f`, with each track `t` also moved by a constant
+# `α_t`, slot `n` of `t` moves by `f_n + α_t`, which neither the data nor the
+# priors see; one constant on every slot with each `α_t` its negative moves
+# nothing. A track's hold sets its `α_t` to minus its held slot's `f_n` (marked
+# in `track_pins`) or, under a proper prior acting on it, minus its held level's
+# share of `f` (`held`), leaving `f_n − ℓ_t(f)`. The pins fix that. Within a
+# block of freedoms sharing slots, a pivoted QR of `f_n − ℓ_t(f)` over the slots
+# whose track is held in the block, each weighted by `√nodew`, picks them; it
+# leaves the block's constant, which the holds do not see. Across blocks, in
+# order of `nodew`, each slot is pinned that ties its track's constant to a
+# block's not yet tied to it, so the pins and holds form a spanning forest over
+# the tracks and blocks, and only the shift that moves nothing is left. Under a
+# pin on the reference (`reference`), a track is held only where its pins leave
+# its constant free, and nothing else is pinned.
+function _hold_phase_constants!(pinned, track_pins, tracks, natural, nodew; reference)
+    blocks = _freedom_blocks(natural)
+    nblock = length(blocks)
+    block = zeros(Int, length(pinned))
+    for (b, js) in pairs(blocks)
+        block[first(natural[first(js)])] .= b
+    end
+    track = zeros(Int, length(pinned))
+    for (i, t) in pairs(tracks)
+        track[t.slots] .= i
+    end
+    root = collect(1:(nblock + length(tracks)))
+    function find(i)
+        while root[i] != i
+            i = root[i] = root[root[i]]
+        end
+        return i
+    end
+    ties(n) = !iszero(track[n]) && !iszero(block[n]) && find(nblock + track[n]) != find(block[n])
+    tie!(n) = (root[find(nblock + track[n])] = find(block[n]))
+    foreach(n -> ties(n) && tie!(n), findall(pinned))
+
+    hold_block = zeros(Int, length(tracks))
+    held = map(eachindex(tracks)) do i
+        t = tracks[i]
+        j = findfirst(t.active)
+        if !isnothing(j) && _proper_prior(t.prior)
+            piece = t.slots[t.pieces[j]]
+            n = piece[findfirst(n -> !iszero(block[n]), piece)]
+            ties(n) || return merge(t, (; held = 0))
+            tie!(n)
+            hold_block[i] = block[n]
+            return merge(t, (; held = _level_group(t, t.prior, j)))
+        end
+        measured = sort!([n for n in t.slots if nodew[n] > 0 && !pinned[n]]; by = n -> nodew[n], rev = true)
+        h = findfirst(ties, measured)
+        if !isnothing(h)
+            n = measured[h]
+            track_pins[n] = true
+            tie!(n)
+            hold_block[i] = block[n]
+        end
+        return merge(t, (; held = 0))
+    end
+    reference && return held
+
+    for (b, js) in pairs(blocks)
+        length(js) > 1 || continue
+        nodes = first(natural[first(js)])
+        shifts = reduce(hcat, [last(natural[j]) for j in js])
+        at = Dict(n => i for (i, n) in pairs(nodes))
+        share = Dict{Int, Vector{Float64}}()
+        rows = [i for (i, n) in pairs(nodes) if nodew[n] > 0 && !iszero(track[n]) && hold_block[track[n]] == b && !track_pins[n]]
+        isempty(rows) && continue
+        V = similar(shifts, length(rows), length(js))
+        for (r, i) in pairs(rows)
+            t = held[track[nodes[i]]]
+            V[r, :] .= shifts[i, :] .- get!(() -> _held_share(t, shifts, at, track_pins), share, track[nodes[i]])
+        end
+        F = qr(permutedims(V .* sqrt.(nodew[nodes[rows]])), ColumnNorm())
+        R = abs.(diag(F.R))
+        foreach(p -> pinned[nodes[rows[p]]] = true, F.p[1:count(>(first(R) * sqrt(eps())), R)])
+    end
+    measured = sort!([n for n in eachindex(nodew) if nodew[n] > 0 && !pinned[n] && !track_pins[n]]; by = n -> nodew[n], rev = true)
+    for n in measured
+        ties(n) || continue
+        pinned[n] = true
+        tie!(n)
+    end
+    return held
+end
+
+# The share of the freedoms `shifts` (over the slots `at` numbers) track `t`'s
+# hold takes up: its held slot's shift, or, under a held level, that level's
+# coefficient in the shift its prior's mean takes up (`_mean_basis`).
+function _held_share(t, shifts, at, track_pins)
+    iszero(t.held) && return shifts[at[t.slots[findfirst(n -> track_pins[n], t.slots)]], :]
+    (; slots, B, cols) = _mean_basis(t)
+    inside = [i for i in eachindex(slots) if haskey(at, slots[i])]
+    coefficients = B[inside, :] \ shifts[[at[slots[i]] for i in inside], :]
+    return coefficients[searchsortedfirst(cols, t.held), :]
+end
+
+# The indices of `freedoms`, each `(slots, shift)`, grouped by the slots they
+# move: the freedoms of one block share them.
+function _freedom_blocks(freedoms)
+    groups = Dict{Vector{Int}, Vector{Int}}()
+    for (j, (nodes, _)) in pairs(freedoms)
+        push!(get!(groups, nodes, Int[]), j)
+    end
+    return sort!(collect(values(groups)); by = first)
+end
+
+# The phase shifts that neither the data nor the priors of `tracks` see, as
+# `(slots, shift)`. The data see no shift that is constant on each component of
+# the joint-bandpass graph (`members` its slots). Track `t`'s prior sees every
+# shift but those whose values on its slots lie in its null space
+# (`_prior_null_bases`). A component no prior acts on is its own freedom; the
+# rest are joined into blocks by the tracks that cross them. In a block, with
+# `D` the count of prior-bearing slots in each component and `U` the
+# orthonormal null bases carried onto the components, the freedoms are the
+# shifts `g` with `(D − UUᵀ)g = 0`, i.e. `g = D⁻¹Uy` for `y` an eigenvector of
+# `UᵀD⁻¹U` with eigenvalue one, the largest it has. A slot no data reach moves
+# with its track: by `B_out·c` where `B_in·c` is the shift of the track's slots
+# in the block.
+function _gauge_directions(compid, members, tracks)
+    ncomp = length(members)
+    D = zeros(ncomp)
+    columns = Tuple{Vector{Int}, Vector{Float64}}[]
+    bases = Tuple{Vector{Int}, Matrix{Float64}, Vector{Int}}[]
+    links = Graphs.SimpleGraph(ncomp)
+    for t in tracks, (slots, B) in _prior_null_bases(t)
+        inside = findall(!iszero, compid[slots])
+        isempty(inside) && continue
+        push!(bases, (slots, B, inside))
+        comps = compid[slots[inside]]
+        foreach(k -> D[k] += 1, comps)
+        foreach(i -> Graphs.add_edge!(links, comps[1], comps[i]), eachindex(comps))
+        F = svd(B[inside, :])
+        for j in 1:count(>(first(F.S) * length(slots) * eps()), F.S)
+            push!(columns, (comps, F.U[:, j]))
+        end
+    end
+    out = Tuple{Vector{Int}, Vector{Float64}}[]
+    for block in Graphs.connected_components(links)
+        if all(k -> iszero(D[k]), block)
+            foreach(k -> push!(out, (members[k], ones(length(members[k])))), block)
+            continue
+        end
+        at = Dict(k => i for (i, k) in pairs(block))
+        mine = [c for c in columns if haskey(at, first(c[1]))]
+        U = zeros(length(block), length(mine))
+        for (j, (comps, q)) in pairs(mine), (k, v) in zip(comps, q)
+            U[at[k], j] += v
+        end
+        crossing = [b for b in bases if haskey(at, compid[b[1][first(b[3])]])]
+        nodes = reduce(vcat, members[block])
+        unreached = [n for (slots, _, _) in crossing for n in slots if iszero(compid[n])]
+        Dinv = Diagonal(inv.(D[block]))
+        E = eigen(Symmetric(U' * Dinv * U))
+        for j in findall(>=(1 - sqrt(eps())), E.values)
+            g = Dinv * U * E.vectors[:, j]
+            g ./= maximum(abs, g)
+            shift = Dict(n => g[at[compid[n]]] for n in nodes)
+            for (slots, B, inside) in crossing
+                c = B[inside, :] \ [g[at[compid[n]]] for n in slots[inside]]
+                for i in eachindex(slots)
+                    iszero(compid[slots[i]]) && (shift[slots[i]] = dot(view(B, i, :), c))
+                end
+            end
+            push!(out, ([nodes; unreached], [shift[n] for n in [nodes; unreached]]))
+        end
+    end
+    return out
+end
+
+# The constraints fixing the bandpass freedoms. A zero sum sets the projection
+# of every slot onto a freedom's shift to zero: on a freedom of one component,
+# the zero sum of its one value; where a prior spreads freedoms over many
+# components, a sum of ones would miss a shift that sums to zero. `ByComponent`
+# applies each freedom's own choice; other gauges give their own rows.
+_bandpass_gauge_system(g, fs) = _gauge_system(g, fs)
+
+function _bandpass_gauge_system(::ZeroSumPhase, fs::GaugeFreedoms{T}) where {T}
+    I, J, V = Int[], Int[], T[]
+    for (j, f) in pairs(fs), i in eachindex(f.nodes, f.direction)
+        push!(I, j)
+        push!(J, f.nodes[i])
+        push!(V, f.direction[i] / length(f.nodes))
+    end
+    return sparse(I, J, V, length(fs), fs.nnodes), zeros(T, length(fs))
+end
+
+function _bandpass_gauge_system(g::ByComponent, fs::GaugeFreedoms{T}) where {T}
+    I, J, V = Int[], Int[], T[]
+    d = zeros(T, length(fs))
+    choice = [Calibration._component_choice(g, f) for f in fs]
+    for c in unique(choice)
+        idx = findall(x -> x === c, choice)
+        Cc, d[idx] = _bandpass_gauge_system(c, GaugeFreedoms{T}(fs.freedoms[idx], fs.nnodes))
+        Ic, Jc, Vc = findnz(sparse(Cc))
+        append!(I, idx[Ic])
+        append!(J, Jc)
+        append!(V, Vc)
+    end
+    return sparse(I, J, V, length(fs), fs.nnodes), d
+end
+
+# Shift `φ` along the gauge freedoms onto the constraints `gauge.rows`/`gauge.d`.
+# Neither the data nor the priors change along a freedom, so the shift moves a
+# solve held by its pins onto the gauge asked for without changing anything
+# else. `freedoms` holds each freedom's slots and its shift there.
+function _meet_gauge!(φ, gauge, freedoms)
+    along = [Dict(zip(nodes, shift)) for (nodes, shift) in freedoms]
+    C = zeros(length(gauge.rows), length(freedoms))
+    r = copy(gauge.d)
+    for (j, row) in pairs(gauge.rows), (n, c) in row
+        for (k, a) in pairs(along)
+            C[j, k] += c * get(a, n, 0.0)
+        end
+        r[j] -= c * φ[n]
+    end
+    δ = C \ r
+    for (k, (nodes, shift)) in pairs(freedoms), (n, v) in zip(nodes, shift)
+        φ[n] += δ[k] * v
+    end
+    return φ
+end
+
+# The pattern of the χ²'s curvature in one observable's slot values, over the
+# slot pairs each correlation `e` joins: a matrix holding it and, per `e`, the
+# indices among its stored values of `(a, a)`, `(b, b)`, `(a, b)` and `(b, a)`.
+function _curvature_pattern(slot_pairs, nslots)
+    Is = [n for (na, nb) in slot_pairs for n in (na, nb, na, nb)]
+    Js = [n for (na, nb) in slot_pairs for n in (na, nb, nb, na)]
+    H = sparse(Is, Js, ones(length(Is)), nslots, nslots)
+    pos = [ntuple(r -> _position(H, Is[4(e - 1) + r], Js[4(e - 1) + r]), 4) for e in eachindex(slot_pairs)]
+    return H, pos
+end
+
+# Writes into `H` (`_curvature_pattern`) the curvature of the χ² in one
+# observable's slot values, `Σ_e q_e·(x_a + s·x_b)²`, with `s = +1` for
+# log-amplitude sums and `−1` for phase differences.
+function _data_curvature!(H, pos, q, s)
+    Hv = fill!(nonzeros(H), 0.0)
+    for (e, p) in pairs(pos)
+        qe = q[e]
+        qe > 0 || continue
+        Hv[p[1]] += qe
+        Hv[p[2]] += qe
+        Hv[p[3]] += s * qe
+        Hv[p[4]] += s * qe
+    end
+    return H
+end
