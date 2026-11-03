@@ -93,55 +93,60 @@
         @test isempty(FR.step_tests(res, iv, "A9"))
     end
 
-    @testset "bandpass_chi2" begin
+    @testset "tss and chi2" begin
         nspw, nchan, ntime, nscans = 2, 16, 12, 4
         ps, _ = _build_fringe_ps(; nspw, nchan, ntime, nscans, noise = 1.0, antenna_gains = false, seed = 3)
-        res = FR.bandpass_chi2(ps)
-        @test res isa FR.BandpassChi2
-        series = 6 * 2                                  # cross baselines × parallel feed pairs
-        @test res.ap.total.dof_const == series * ntime * nscans * nspw * 2 * (nchan - 1)
-        @test res.scan.total.dof_const == series * nscans * nspw * 2 * (nchan - 1)
-        @test res.scan.total.dof_lin == series * nscans * nspw * 2 * (nchan - 2)
-        for level in (res.ap, res.scan), t in (level.total, values(level.per_station)..., values(level.per_product)...)
-            tol = level === res.ap ? 0.06 : 0.15
-            @test t.chi2_const / t.dof_const ≈ 1 atol = tol
-            @test t.chi2_lin / t.dof_lin ≈ 1 atol = tol
+        s = spectra(ps)
+        parallel = s[FeedPair = At([(1, 1), (2, 2)])]
+        everything = (Frequency, Scan, AntennaPair, FeedPair)
+
+        q = FR.tss(parallel)
+        @test keys(q) == (:tss, :dof)
+        @test dims(q.tss) == DimensionalData.otherdims(parallel.vis, Frequency)
+        @test all(==(2 * (nspw * nchan - 1)), q.dof)
+        @test sum(q.tss) / sum(q.dof) ≈ 1 atol = 0.15
+        per = sum(q.tss; dims = Scan) ./ sum(q.dof; dims = Scan)
+        @test all(x -> 0.6 < x < 1.5, per)
+
+        # Per integration, on one Measurement Set's layers.
+        ms = ps[:synth_fringe_1_1]
+        w = DimArray(ifelse.(parent(ms[:flag]), 0.0f0, parent(ms[:weight])), dims(ms[:weight]))
+        layers = DimStack((; vis = ms[:visibility], weight = w))
+        ap = FR.tss(layers)
+        @test sum(ap.tss) / sum(ap.dof) ≈ 1 atol = 0.15
+        # Along time: each channel about its mean over the scan.
+        along = FR.tss(layers; dims = Ti)
+        @test dims(along.tss) == DimensionalData.otherdims(ms[:visibility], Ti)
+        @test sum(along.tss) / sum(along.dof) ≈ 1 atol = 0.15
+
+        # Against its own band means as the model, the χ² is the total sum of
+        # squares with the means' 2 degrees of freedom per cut not charged.
+        means = zeros(ComplexF64, DimensionalData.otherdims(parallel.vis, Frequency))
+        for cell in DimensionalData.DimIndices(means)
+            v, wc = parallel.vis[cell...], parallel.weight[cell...]
+            ok = wc .> 0
+            means[cell...] = sum(wc[ok] .* v[ok]) / sum(wc[ok])
         end
-        @test sort!(collect(keys(res.scan.per_product))) == [(1, 1), (2, 2)]
+        c = FR.chi2(parallel, means; dims = everything)
+        @test keys(c) == (:chi2, :dof)
+        @test c.chi2[] ≈ sum(q.tss)
+        @test c.dof[] == sum(q.dof) + 2 * length(means)
 
-        @test FR.total_chi2(res) == (; chi2 = res.scan.total.chi2_lin, dof = res.scan.total.dof_lin)
-        @test FR.total_chi2(res; model = :const) == (; chi2 = res.scan.total.chi2_const, dof = res.scan.total.dof_const)
-        st = FR.station_chi2(res)
-        @test sort!(collect(keys(st))) == ["A1", "A2", "A3", "A4"]
-        @test st["A1"].dof == 3 * 2 * nscans * nspw * 2 * (nchan - 2)
-        @test sum(x -> x.dof, values(st)) == 2 * FR.total_chi2(res).dof
-        @test_throws "model must be :const or :lin" FR.total_chi2(res; model = :quadratic)
-
-        scan_only = FR.bandpass_chi2(ps; per_integration = false)
-        @test isnothing(scan_only.ap)
-        @test scan_only.scan.total == res.scan.total
-        @test FR.bandpass_chi2(ps; min_channels = nchan + 1).scan.total.dof_const == 0
-
-        text = sprint(show, MIME"text/plain"(), res)
-        @test occursin("ap   total", text) && occursin("scan total", text) && occursin("1-1", text)
-        charged = sprint(io -> FR.print_chi2(io, res; nparams = 10, station_params = Dict("A1" => 5)))
-        @test occursin("dof $(res.scan.total.dof_const - 10) / $(res.scan.total.dof_lin - 10)", charged)
-        @test occursin(Regex("A1\\s+5\\s+$(st["A1"].dof - 5)\\s"), charged)
-        @test occursin("BandpassChi2", sprint(show, res))
-        @test !occursin("ap   total", sprint(show, MIME"text/plain"(), scan_only))
+        # A model off by a constant raises the χ².
+        @test FR.chi2(parallel, 1.1 .* means; dims = everything).chi2[] > c.chi2[]
 
         # Weights off by a constant factor, then rescaled to inverse variances.
         off, _ = _build_fringe_ps(; nspw, nchan, ntime, nscans, noise = 1.0, antenna_gains = false, seed = 3, weight = 1.0)
-        t = FR.bandpass_chi2(off; per_integration = false).scan.total
-        @test t.chi2_const / t.dof_const ≈ 0.5 atol = 0.08
+        t = FR.tss(spectra(off)[FeedPair = At([(1, 1), (2, 2)])])
+        @test sum(t.tss) / sum(t.dof) ≈ 0.5 atol = 0.08
         foreach(ms -> scale_weights!(ms, weight_scales(ms)), values(off))
-        t = FR.bandpass_chi2(off).ap.total
-        @test t.chi2_const / t.dof_const ≈ 1 atol = 0.06
+        t = FR.tss(spectra(off)[FeedPair = At([(1, 1), (2, 2)])])
+        @test sum(t.tss) / sum(t.dof) ≈ 1 atol = 0.15
 
-        # A residual bandpass raises the χ², most at the scan resolution.
+        # A residual bandpass raises it.
         bp = 0.2 .* randn(StableRNG(2), 4, 2, nspw * nchan)
-        bad = FR.bandpass_chi2(first(_build_fringe_ps(; nspw, nchan, ntime, nscans, noise = 1.0, antenna_gains = false, seed = 3, bandpass = bp)))
-        @test bad.scan.total.chi2_lin / bad.scan.total.dof_lin > 2
-        @test bad.scan.total.chi2_lin / bad.scan.total.dof_lin > bad.ap.total.chi2_lin / bad.ap.total.dof_lin
+        bad = spectra(first(_build_fringe_ps(; nspw, nchan, ntime, nscans, noise = 1.0, antenna_gains = false, seed = 3, bandpass = bp)))
+        b = FR.tss(bad[FeedPair = At([(1, 1), (2, 2)])])
+        @test sum(b.tss) / sum(b.dof) > 2
     end
 end

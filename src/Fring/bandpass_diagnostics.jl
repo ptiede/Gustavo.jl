@@ -158,210 +158,65 @@ function _split_terms(R, V, scans, before)
     return Δ, ν₁, χ², ν₂
 end
 
-# ── χ² of corrected visibilities ─────────────────────────────────────────────
+# ── Goodness of fit ──────────────────────────────────────────────────────────
 
 """
-    Chi2Tally{T}
+    chi2(spectra, model; dims) -> DimStack
 
-Residual χ² and degrees of freedom about a channel-constant (`chi2_const`,
-`dof_const`) and a linear-in-frequency (`chi2_lin`, `dof_lin`) complex model
-of each spectrum, summed over spectra.
+The χ² of `spectra` against `model`, `Σ w |v - model|²`, summed over `dims`.
+`spectra` holds layers `vis` and `weight`, as for [`normalized_residuals`](@ref),
+with the weight the inverse variance of each real component of `vis`. `model`
+is a `DimArray` of model visibilities over some of the dimensions of
+`spectra.vis`, used for every sample along the dimensions it lacks.
+
+Layers `chi2` and `dof`, over the dimensions not in `dims`: each usable sample
+(positive weight, finite data) counts 2 degrees of freedom. The model's own
+free parameters are not charged; subtract them from `dof`.
 """
-struct Chi2Tally{T <: Real}
-    chi2_const::T
-    dof_const::Int
-    chi2_lin::T
-    dof_lin::Int
-end
-
-Base.:+(a::Chi2Tally, b::Chi2Tally) = Chi2Tally(
-    a.chi2_const + b.chi2_const, a.dof_const + b.dof_const, a.chi2_lin + b.chi2_lin, a.dof_lin + b.dof_lin,
-)
-Base.zero(::Type{Chi2Tally{T}}) where {T} = Chi2Tally(zero(T), 0, zero(T), 0)
-Base.zero(t::Chi2Tally) = zero(typeof(t))
-
-"""
-    Chi2Level{T}
-
-The [`Chi2Tally`](@ref)s of one time resolution: `total`, `per_station`
-(station name ⇒ tally of its baselines) and `per_product` (feed pair ⇒ tally).
-"""
-struct Chi2Level{T <: Real}
-    total::Chi2Tally{T}
-    per_station::Dict{String, Chi2Tally{T}}
-    per_product::Dict{Tuple{Int, Int}, Chi2Tally{T}}
+function chi2(spectra::AbstractDimStack, model::AbstractDimArray; dims)
+    vis, weight = spectra.vis, spectra.weight
+    usable = _shape_usable.(vis, weight)
+    terms = @d ifelse.(usable, weight .* abs2.(vis .- model), zero(real(eltype(vis))))
+    samples = ifelse.(usable, 2, 0)
+    return DimStack((; chi2 = _sum_over(terms, dims), dof = _sum_over(samples, dims)))
 end
 
 """
-    BandpassChi2{A, S}
+    tss(spectra; dims = Frequency) -> DimStack
 
-The result of [`bandpass_chi2`](@ref): the [`Chi2Level`](@ref)s `ap`
-(per integration, or `nothing`) and `scan` (per scan average). Read it with
-[`total_chi2`](@ref) and [`station_chi2`](@ref), and print it with
-[`print_chi2`](@ref).
+The weighted total sum of squares of `spectra` along `dims`, as `var` takes a
+variance along `dims`: every cut along `dims` against its own weighted mean
+`m = Σ w v / Σ w`, `Σ w |v - m|²`. `spectra` holds layers `vis` and `weight`,
+as for [`chi2`](@ref).
+
+This is the χ² of the intercept-only model, which fits each cut with one
+complex constant: the null deviance of a Gaussian model, Cochran's Q for the
+homogeneity of the samples of each cut, and, divided by its degrees of
+freedom, the Birge ratio. Along `Frequency` it tests whether corrected spectra
+are flat. A value per degree of freedom near 1 means no structure is left
+across the band; above 1, the correction left structure, a residual delay
+included.
+
+Layers `tss` and `dof`, one value per cut, over the dimensions not in `dims`:
+a cut with `n` usable samples (positive weight, finite data) has `2(n - 1)`
+degrees of freedom, and a cut with none has 0 of both. Totals over further
+dimensions are sums: `sum(q.tss; dims = Scan)`.
 """
-struct BandpassChi2{A <: Union{Nothing, Chi2Level}, S <: Chi2Level}
-    ap::A
-    scan::S
-end
-
-"""
-    bandpass_chi2(ps; min_channels = 8, per_integration = true) -> BandpassChi2
-
-The χ² of the corrected processing set `ps` against a source that is constant
-(`const`) or linear (`lin`) in frequency, over cross baselines and parallel
-feed pairs (both feeds the same index). Once a bandpass is divided out, each
-spectrum should be the source alone; channel structure left over is bandpass
-error. The linear model also absorbs a residual delay or a source spectral
-index, which are close to linear over a narrow band, so it is the one to
-compare bandpass models with.
-
-A spectrum is the channels of one Measurement Set on one baseline, feed pair
-and time sample: each integration of `ps` for the `ap` resolution, and each
-sample of `XRadio.average(ps, XRadio.ByScan())` for the `scan` resolution. A
-bandpass error is constant over a scan while the noise averages down, so the
-`scan` χ² shows it more clearly. A residual delay drifting through a scan also
-decoheres the average, more in the outer channels, which raises the `scan` χ²
-by the same amount for every model compared on the same data.
-
-Each spectrum with at least `min_channels` usable channels (unflagged, finite,
-positive weight) contributes `2(n - 1)` degrees of freedom to `const` and
-`2(n - 2)` to `lin`. `per_station` counts each baseline under both its
-stations, so the station sums exceed the total. `per_integration = false`
-skips the `ap` resolution, which is most of the cost, and leaves `ap` as
-`nothing`.
-
-The weights must be inverse variances of each real component of the
-visibilities, which `scale_weights!(ms, weight_scales(ms))` on each Measurement
-Set makes them. `calibrate` keeps them so.
-"""
-function bandpass_chi2(ps; min_channels = 8, per_integration = true)
-    ap = per_integration ? _level_chi2(ps, min_channels) : nothing
-    scan = _level_chi2(XRadio.average(XRadio.transform(_without_integration_time, ps), XRadio.ByScan()), min_channels)
-    return BandpassChi2(ap, scan)
-end
-
-# `average` cannot average `effective_integration_time`, which the χ² does not read.
-function _without_integration_time(ms)
-    haskey(ms, :effective_integration_time) || return ms
-    return delete!(copy(ms), :effective_integration_time)
-end
-
-function _level_chi2(ps, min_channels)
-    total = zero(Chi2Tally{Float64})
-    per_station = Dict{String, Chi2Tally{Float64}}()
-    per_product = Dict{Tuple{Int, Int}, Chi2Tally{Float64}}()
-    for ms in values(ps)
-        V, W, F = _member_layers(ms)
-        ν = lookup(V, Frequency)
-        antennas = _member_antenna_pairs(ms)
-        feeds = feed_pairs(ms)
-        for bi in axes(V, BaselineID), p in axes(V, Polarization)
-            a, b = antennas[bi]
-            fp = feeds[p, bi]
-            (a != b && fp[1] == fp[2]) || continue
-            for t in axes(V, Ti)
-                cell = (Polarization(p), BaselineID(bi), Ti(t))
-                x = _spectrum_chi2(view(V, cell...), view(W, cell...), view(F, cell...), ν, min_channels)
-                isnothing(x) && continue
-                total += x
-                per_station[a] = get(per_station, a, zero(total)) + x
-                per_station[b] = get(per_station, b, zero(total)) + x
-                per_product[fp] = get(per_product, fp, zero(total)) + x
-            end
-        end
+function tss(spectra::AbstractDimStack; dims = Frequency)
+    vis, weight = spectra.vis, spectra.weight
+    cuts = DimensionalData.otherdims(vis, dims)
+    q = zeros(Float64, cuts)
+    ν = zeros(Int, cuts)
+    for cell in DimensionalData.DimIndices(cuts)
+        v, w = view(vis, cell...), view(weight, cell...)
+        ok = [k for k in eachindex(v, w) if _shape_usable(v[k], w[k])]
+        isempty(ok) && continue
+        m = sum(k -> w[k] * v[k], ok) / sum(k -> w[k], ok)
+        q[cell...] = sum(k -> w[k] * abs2(v[k] - m), ok)
+        ν[cell...] = 2 * (length(ok) - 1)
     end
-    return Chi2Level(total, per_station, per_product)
+    return DimStack((; tss = q, dof = ν))
 end
 
-# Weighted least squares of one complex spectrum against a constant and against
-# a line in frequency centered on its weighted mean frequency, where the two
-# basis columns are orthogonal; `nothing` when fewer than `min_channels`
-# channels are usable. Frequencies are taken from the first usable channel, so
-# the weighted sums stay small enough for single precision.
-function _spectrum_chi2(v, w, f, ν, min_channels)
-    ks = [k for k in eachindex(v, w, f, ν) if _usable(f[k], w[k], v[k])]
-    n = length(ks)
-    n >= min_channels || return nothing
-    x = [ν[k] - ν[first(ks)] for k in ks]
-    ws = [w[k] for k in ks]
-    vs = [v[k] for k in ks]
-    W = sum(ws)
-    m = sum(ws .* vs) / W
-    x̄ = sum(ws .* x) / W
-    slope = sum(ws .* (x .- x̄) .* vs) / sum(ws .* (x .- x̄) .^ 2)
-    χ²c = sum(ws .* abs2.(vs .- m))
-    χ²l = sum(ws .* abs2.(vs .- m .- slope .* (x .- x̄)))
-    return Chi2Tally{Float64}(χ²c, 2 * (n - 1), χ²l, 2 * (n - 2))
-end
-
-_tally_model(t::Chi2Tally, model::Symbol) =
-    model === :lin ? (; chi2 = t.chi2_lin, dof = t.dof_lin) :
-    model === :const ? (; chi2 = t.chi2_const, dof = t.dof_const) :
-    throw(ArgumentError("model must be :const or :lin, got $(repr(model))"))
-
-"""
-    total_chi2(res::BandpassChi2; model = :lin) -> (; chi2, dof)
-
-The χ² and degrees of freedom of the whole set at the `scan` resolution, about
-the `:lin` or `:const` model.
-"""
-total_chi2(res::BandpassChi2; model = :lin) = _tally_model(res.scan.total, model)
-
-"""
-    station_chi2(res::BandpassChi2; model = :lin) -> Dict{String, NamedTuple}
-
-The χ² and degrees of freedom `(; chi2, dof)` of each station's baselines at
-the `scan` resolution, about the `:lin` or `:const` model. A baseline counts
-under both its stations.
-"""
-station_chi2(res::BandpassChi2; model = :lin) =
-    Dict(st => _tally_model(t, model) for (st, t) in res.scan.per_station)
-
-_reduced(χ², dof) = χ² / dof
-
-"""
-    print_chi2([io], res::BandpassChi2; nparams = 0, station_params = Dict{String, Int}())
-
-Print `res` as tables of reduced χ²: the totals of each resolution, then per
-station and per feed pair at the `scan` resolution. The totals' degrees of
-freedom are charged the `nparams` free parameters of the solution, and each
-station's are charged its own, `station_params[station]` (0 when absent), so
-that models with different numbers of parameters compare: a model must lower
-χ² by more than the parameters it adds. Per feed pair, nothing is charged.
-"""
-function print_chi2(io::IO, res::BandpassChi2; nparams = 0, station_params = Dict{String, Int}())
-    println(io, "bandpass χ²/dof   free parameters $nparams")
-    for (name, level) in (("ap  ", res.ap), ("scan", res.scan))
-        isnothing(level) && continue
-        t = level.total
-        @printf(
-            io, "  %s total   const %9.4f   lin %9.4f   (dof %d / %d)\n",
-            name, _reduced(t.chi2_const, t.dof_const - nparams), _reduced(t.chi2_lin, t.dof_lin - nparams),
-            t.dof_const - nparams, t.dof_lin - nparams,
-        )
-    end
-    println(io, "  per station, scan resolution (a baseline counts under both stations)")
-    @printf(io, "    %-8s %8s %10s %10s %10s\n", "station", "params", "dof", "const", "lin")
-    for st in sort!(collect(keys(res.scan.per_station)))
-        t = res.scan.per_station[st]
-        k = get(station_params, st, 0)
-        @printf(
-            io, "    %-8s %8d %10d %10.4f %10.4f\n", st, k, t.dof_lin - k,
-            _reduced(t.chi2_const, t.dof_const - k), _reduced(t.chi2_lin, t.dof_lin - k),
-        )
-    end
-    println(io, "  per feed pair, scan resolution")
-    for fp in sort!(collect(keys(res.scan.per_product)))
-        t = res.scan.per_product[fp]
-        @printf(io, "    %-8s %10.4f %10.4f\n", "$(fp[1])-$(fp[2])", _reduced(t.chi2_const, t.dof_const), _reduced(t.chi2_lin, t.dof_lin))
-    end
-    return nothing
-end
-print_chi2(res::BandpassChi2; kwargs...) = print_chi2(stdout, res; kwargs...)
-
-Base.show(io::IO, ::MIME"text/plain", res::BandpassChi2) = print_chi2(io, res)
-function Base.show(io::IO, res::BandpassChi2)
-    t = res.scan.total
-    return print(io, "BandpassChi2(scan χ²/dof lin ", round(_reduced(t.chi2_lin, t.dof_lin); sigdigits = 4), ")")
-end
+_sum_over(A, dims) = isempty(dims) ? A : dropdims(sum(A; dims); dims)
+_sum_over(A, dims::Union{Type, DimensionalData.Dimension}) = _sum_over(A, (dims,))

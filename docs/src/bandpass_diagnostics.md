@@ -10,7 +10,8 @@ are from that, compare bandpass models, and find where a station's bandpass
 changed between scans. They report what is left, a residual delay included,
 rather than fitting anything out of it.
 
-- [`bandpass_chi2`](@ref): the goodness of fit of a corrected set.
+- [`tss`](@ref): how far each corrected spectrum is from flat.
+- [`chi2`](@ref): the χ² of data against a model.
 - [`normalized_residuals`](@ref): each spectrum over its mean along an axis.
 - [`step_tests`](@ref): an F test for a change in one station's bandpass at
   each gap between its scans.
@@ -32,29 +33,49 @@ both χ² values scale with the weights, and the ratios below cancel the scale.
 
 ## Goodness of fit
 
-[`bandpass_chi2`](@ref) fits each spectrum (one baseline, parallel feed pair
-and time sample) with a complex constant and with a line in frequency, and sums
-the residual χ²:
+Both functions take spectra with layers `vis` and `weight` and return a
+DimStack with a degrees-of-freedom layer `dof`.
+
+[`tss`](@ref) is the weighted total sum of squares along `dims`, as `var` is
+the variance along `dims`: each cut against its own weighted mean, one value
+per cut. Along `Frequency`, the default, it is the χ² of a source that is
+constant across the band, the model a corrected spectrum should satisfy, with
+that constant fitted to each spectrum. Totals are sums:
 
 ```julia
-res = bandpass_chi2(calibrate(sol, ps))
-print_chi2(res; nparams = sum(c -> length(c.params), sol.components))
-total_chi2(res; model = :lin)       # (; chi2, dof) at the scan resolution
-station_chi2(res)["S1"]             # one station's baselines
+using XRadio: average, ByScan
+s = baseline_spectra(average(calibrate(sol, ps), ByScan()))
+parallel = s[FeedPair = At([(1, 1), (2, 2)])]
+q = tss(parallel)                                    # per scan, baseline and feed pair
+sum(q.tss) / sum(q.dof)                              # the whole set
+sum(q.tss; dims = Scan) ./ sum(q.dof; dims = Scan)   # per baseline and feed pair
+mine = [p for p in lookup(q.tss, AntennaPair) if "S1" in p]
+sum(q.tss[AntennaPair = At(mine)]) / sum(q.dof[AntennaPair = At(mine)])   # one station
 ```
 
-Two resolutions are reported:
-- `ap`: every integration.
-- `scan`: every scan average.
-
 A bandpass error is the same in every integration of a scan, while the noise
-averages down, so the `scan` χ² shows bandpass error most clearly.
+averages down, so scan averages show bandpass error most clearly. Per
+integration, pass a Measurement Set's layers, with the weights of flagged
+samples set to zero, as for [`normalized_residuals`](@ref). With `dims = Ti`,
+each channel is taken about its mean over time instead, which tests whether
+the data hold steady through a scan.
 
-The `lin` model absorbs a phase slope across the band: a residual delay, or
-the frequency dependence of a resolved source. A `const` χ² well above the
-`lin` one therefore says the corrected data still carry delays. That is a
-missing delay term in the gain model, which no bandpass shape can follow when
-the delay changes from scan to scan.
+A value per degree of freedom well above 1 says the correction left structure
+across the band. A residual delay is such structure: a phase slope that, if it
+changes from scan to scan, is a missing delay term in the gain model rather
+than anything a bandpass shape can follow. [`normalized_residuals`](@ref)
+shows which it is.
+
+[`chi2`](@ref) compares the data with any model of the visibilities, a
+`DimArray` over some of the data's dimensions, which is used for every sample
+along the dimensions it lacks. Here `dims` only names what is summed:
+
+```julia
+chi2(parallel, model; dims = (Frequency, Scan))      # Σ w |v - model|² per baseline and feed pair
+```
+
+Every usable sample counts 2 degrees of freedom. The model's own free
+parameters are not charged; subtract them from `dof`.
 
 To compare a model B with a model A that adds `Δp` parameters (a break, say),
 fit both to the same data and form
@@ -63,7 +84,9 @@ fit both to the same data and form
 F = \frac{(\chi^2_B - \chi^2_A)/\Delta p}{\chi^2_A/\nu_A}.
 ```
 
-If A's residuals were noise, F would follow F(Δp, ν_A), whose upper quantiles
+Here χ² is each model's [`tss`](@ref) on the data it corrected, or its
+[`chi2`](@ref) against a common model. If A's residuals were noise, F would
+follow F(Δp, ν_A), whose upper quantiles
 are close to 1 for large `ν_A`. Residuals of real data are rarely noise. They
 carry structure that changes from scan to scan, and nearly any extra
 parameters absorb some of it. So the quantile alone accepts almost any
