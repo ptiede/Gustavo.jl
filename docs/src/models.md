@@ -230,7 +230,7 @@ across the observation (HOPS-style).
 Beside it, a station may carry components with `Ti = PerScan()`, such as a
 phase level and a delay per scan over groups of channels, for structure that
 changes from scan to scan; `JointSmoother` fits them with the bandpass (see
-[`JointSmoother`](@ref)).
+[`JointSmoother`](@ref Gustavo.Fring.JointSmoother)).
 
 **`adhoc` — per-integration constant phase, feed-common** (the
 `AdhocPhase` solver). Residual atmospheric phase is non-birefringent
