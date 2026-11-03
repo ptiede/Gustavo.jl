@@ -105,6 +105,10 @@ include("test_synthetic_chain.jl")
 # Fringe diagnostics + Makie plot stubs (Phase 8).
 include("test_fringe_diagnostics.jl")
 
+# Bandpass diagnostics: per-scan residual spectra, the step F test and the χ²
+# of corrected visibilities.
+include("test_bandpass_diagnostics.jl")
+
 # fringe_antenna_solutions θ-decode + the `rel_time` model option.
 # Reuses _build_fringe_ps + CAL/FP aliases from test_pipeline.jl.
 include("test_fringe_antenna_solutions.jl")

@@ -801,7 +801,8 @@ corrected scan show the delay slope a good fit flattens, and plot directly
 with DimensionalData's Makie recipes. [`baseline_delays`](@ref) and
 [`delay_closure`](@ref) test the station-based structure: delays close around
 triangles before correction and vanish after it. [`freq_group_coherence`](@ref)
-localises residual structure to a frequency group.
+localises residual structure to a frequency group. For a bandpass solution,
+see [Bandpass diagnostics](@ref bandpass-diagnostics).
 
 ```julia
 using XRadio: average, ByScan

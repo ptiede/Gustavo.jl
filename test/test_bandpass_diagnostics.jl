@@ -1,0 +1,147 @@
+# Bandpass diagnostics on synthetic sets with known bandpasses: the normalized
+# residuals, the per-station step F test, and the χ² of corrected data.
+
+@isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
+
+@testset "bandpass diagnostics" begin
+    FR = Gustavo.Fring
+    spectra(ps) = FR.baseline_spectra(XRadio.average(ps, XRadio.ByScan()))
+
+    @testset "normalized_residuals" begin
+        nchan, τ0 = 32, 3.0e-9
+        freqs = 230.0e9 .+ (0:(nchan - 1)) .* 2.0e6
+        f0 = sum(freqs) / nchan
+        bp = zeros(4, 2, nchan)
+        bp[2, :, :] .= reshape(2π .* τ0 .* (freqs .- f0), 1, nchan)
+        ps, _ = _build_fringe_ps(; nspw = 1, nchan, nscans = 2, noise = 0.2, antenna_gains = false, bandpass = bp, seed = 5)
+        parent(ps[:synth_fringe_1_1][:flag])[:, 3, 1, :] .= true
+        s = spectra(ps)
+
+        res = FR.normalized_residuals(s)
+        @test keys(res) == (:r, :var)
+        @test dims(res.r) == dims(s.vis)
+        # Each cut's weighted mean along the axis is 1.
+        cut_means(res, w, D) = [
+            let r = res.r[cell...], wc = w[cell...], ok = isfinite.(r)
+                sum(wc[ok] .* r[ok]) / sum(wc[ok])
+            end
+                for cell in DimensionalData.DimIndices(DimensionalData.otherdims(res.r, D)) if any(isfinite, res.r[cell...])
+        ]
+        @test all(≈(1), cut_means(res, s.weight, Frequency))
+        @test all(>(0), filter(isfinite, res.var))
+        # The delay on A2 stays in the residual; the other baselines are flat.
+        @test maximum(abs ∘ angle, filter(isfinite, res.r[AntennaPair = At(("A1", "A2"))])) > 0.4
+        @test maximum(abs ∘ angle, filter(isfinite, res.r[AntennaPair = At(("A1", "A3"))])) < 0.1
+        # One baseline's channel 3 is flagged in scan 1, on all four feed pairs.
+        @test count(isnan, res.r[Scan = At("1"), Frequency = 3]) == 4
+        @test count(isnan, res.var[Scan = At("1"), Frequency = 3]) == 4
+        @test !any(isnan, res.r[Scan = At("2")])
+
+        # Along time, on one Measurement Set's integrations.
+        ms = ps[:synth_fringe_2_1]
+        w = DimArray(ifelse.(parent(ms[:flag]), 0.0f0, parent(ms[:weight])), dims(ms[:weight]))
+        along = FR.normalized_residuals(DimStack((; vis = ms[:visibility], weight = w)); dims = Ti)
+        @test dims(along.r) == dims(ms[:visibility])
+        @test all(≈(1), cut_means(along, w, Ti))
+    end
+
+    @testset "scan_intervals" begin
+        ps, truth = _build_fringe_ps(; nscans = 3, ntime = 12)
+        iv = FR.scan_intervals(ps)
+        @test iv isa Dict{String, Tuple{Float64, Float64}}
+        @test iv == Dict(string(s) => (truth.t0_sec + (s - 1) * 420.0, truth.t0_sec + (s - 1) * 420.0 + 330.0) for s in 1:3)
+    end
+
+    @testset "step_tests" begin
+        nant, nchan, nscans = 4, 32, 8
+        rng = StableRNG(7)
+        static = 0.3 .* randn(rng, nant, 2, nchan)
+        jump = 0.3 .* randn(rng, nchan)
+        bp_flat = repeat(static, 1, 1, 1, nscans)
+        bp_step = copy(bp_flat)
+        bp_step[3, :, :, 5:end] .+= reshape(jump, 1, nchan)
+        build(bp) = first(
+            _build_fringe_ps(; nant, nspw = 1, nchan, ntime = 12, nscans, noise = 1.0, antenna_gains = false, bandpass = bp, seed = 11)
+        )
+
+        ps = build(bp_step)
+        iv = FR.scan_intervals(ps)
+        res = FR.normalized_residuals(spectra(ps))
+        rows = FR.step_tests(res, iv, "A3")
+        # The first and last gaps leave one scan on a side, too few to split.
+        @test length(rows) == nscans - 3
+        @test keys(first(rows)) == (:time, :gap, :F, :chi2_split, :dof_split, :nbaselines)
+        @test all(r -> r.gap ≈ 90.0, rows)
+        @test all(r -> r.nbaselines == 3 * 2, rows)
+        @test issorted(rows; by = r -> r.time)
+        k = findfirst(r -> r.time ≈ (iv["4"][2] + iv["5"][1]) / 2, rows)
+        @test !isnothing(k)
+        @test argmax(r -> r.F, rows) === rows[k]
+        @test rows[k].F > 8
+        @test rows[k].F > 2 * maximum(r.F for r in rows if r !== rows[k])
+        @test rows[k].dof_split == 3 * 2 * nchan * 2 * (nscans - 2)
+        # Only one of A1's three baselines carries A3's step.
+        @test rows[k].F > FR.step_tests(res, iv, "A1")[k].F
+
+        flat = FR.normalized_residuals(spectra(build(bp_flat)))
+        for station in ("A1", "A2", "A3", "A4")
+            rows = FR.step_tests(flat, iv, station)
+            @test length(rows) == nscans - 3
+            @test all(r -> 0.7 < r.F < 1.4, rows)
+            @test all(r -> 0.8 < r.chi2_split / r.dof_split < 1.2, rows)
+        end
+        @test isempty(FR.step_tests(res, iv, "A9"))
+    end
+
+    @testset "bandpass_chi2" begin
+        nspw, nchan, ntime, nscans = 2, 16, 12, 4
+        ps, _ = _build_fringe_ps(; nspw, nchan, ntime, nscans, noise = 1.0, antenna_gains = false, seed = 3)
+        res = FR.bandpass_chi2(ps)
+        @test res isa FR.BandpassChi2
+        series = 6 * 2                                  # cross baselines × parallel feed pairs
+        @test res.ap.total.dof_const == series * ntime * nscans * nspw * 2 * (nchan - 1)
+        @test res.scan.total.dof_const == series * nscans * nspw * 2 * (nchan - 1)
+        @test res.scan.total.dof_lin == series * nscans * nspw * 2 * (nchan - 2)
+        for level in (res.ap, res.scan), t in (level.total, values(level.per_station)..., values(level.per_product)...)
+            tol = level === res.ap ? 0.06 : 0.15
+            @test t.chi2_const / t.dof_const ≈ 1 atol = tol
+            @test t.chi2_lin / t.dof_lin ≈ 1 atol = tol
+        end
+        @test sort!(collect(keys(res.scan.per_product))) == [(1, 1), (2, 2)]
+
+        @test FR.total_chi2(res) == (; chi2 = res.scan.total.chi2_lin, dof = res.scan.total.dof_lin)
+        @test FR.total_chi2(res; model = :const) == (; chi2 = res.scan.total.chi2_const, dof = res.scan.total.dof_const)
+        st = FR.station_chi2(res)
+        @test sort!(collect(keys(st))) == ["A1", "A2", "A3", "A4"]
+        @test st["A1"].dof == 3 * 2 * nscans * nspw * 2 * (nchan - 2)
+        @test sum(x -> x.dof, values(st)) == 2 * FR.total_chi2(res).dof
+        @test_throws "model must be :const or :lin" FR.total_chi2(res; model = :quadratic)
+
+        scan_only = FR.bandpass_chi2(ps; per_integration = false)
+        @test isnothing(scan_only.ap)
+        @test scan_only.scan.total == res.scan.total
+        @test FR.bandpass_chi2(ps; min_channels = nchan + 1).scan.total.dof_const == 0
+
+        text = sprint(show, MIME"text/plain"(), res)
+        @test occursin("ap   total", text) && occursin("scan total", text) && occursin("1-1", text)
+        charged = sprint(io -> FR.print_chi2(io, res; nparams = 10, station_params = Dict("A1" => 5)))
+        @test occursin("dof $(res.scan.total.dof_const - 10) / $(res.scan.total.dof_lin - 10)", charged)
+        @test occursin(Regex("A1\\s+5\\s+$(st["A1"].dof - 5)\\s"), charged)
+        @test occursin("BandpassChi2", sprint(show, res))
+        @test !occursin("ap   total", sprint(show, MIME"text/plain"(), scan_only))
+
+        # Weights off by a constant factor, then rescaled to inverse variances.
+        off, _ = _build_fringe_ps(; nspw, nchan, ntime, nscans, noise = 1.0, antenna_gains = false, seed = 3, weight = 1.0)
+        t = FR.bandpass_chi2(off; per_integration = false).scan.total
+        @test t.chi2_const / t.dof_const ≈ 0.5 atol = 0.08
+        foreach(ms -> scale_weights!(ms, weight_scales(ms)), values(off))
+        t = FR.bandpass_chi2(off).ap.total
+        @test t.chi2_const / t.dof_const ≈ 1 atol = 0.06
+
+        # A residual bandpass raises the χ², most at the scan resolution.
+        bp = 0.2 .* randn(StableRNG(2), 4, 2, nspw * nchan)
+        bad = FR.bandpass_chi2(first(_build_fringe_ps(; nspw, nchan, ntime, nscans, noise = 1.0, antenna_gains = false, seed = 3, bandpass = bp)))
+        @test bad.scan.total.chi2_lin / bad.scan.total.dof_lin > 2
+        @test bad.scan.total.chi2_lin / bad.scan.total.dof_lin > bad.ap.total.chi2_lin / bad.ap.total.dof_lin
+    end
+end
