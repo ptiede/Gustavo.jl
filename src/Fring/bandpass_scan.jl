@@ -21,7 +21,7 @@
 # shape; each parameter is held to an information-weighted mean of zero over
 # those scans, so the shape is the time-averaged bandpass.
 
-const _MAX_SCAN_ROUNDS = 25
+const _MAX_SCAN_ROUNDS = 100
 
 # One parameter of a per-scan component: its position in θ, station,
 # observable, the scan (position in the solve's scan groups) it serves, 0 for
