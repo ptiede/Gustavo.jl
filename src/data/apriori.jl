@@ -1,7 +1,6 @@
 """
     apriori_calibrate!(ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation = 0.0,
-                       max_tsys = 1.0e4, tsys_placeholders = (999.0,),
-                       quantization_efficiency = nothing) -> ms
+                       tsys_placeholders = (999.0,), quantization_efficiency = nothing) -> ms
 
 Put the visibilities of `ms` in janskys, in place, from the system
 temperatures and gain curves the Measurement Set records
@@ -30,12 +29,11 @@ one number for all of them, or a `Dict` naming no other antenna.
 
 `tsys` places the system temperatures, which are sampled on their own clock, on
 the visibilities' times: [`ScanMean`](@ref), [`LinearInTime`](@ref) or
-[`NearestInTime`](@ref). A system temperature that is not positive, exceeds
-`max_tsys` (kelvin), or equals one of `tsys_placeholders` (values written for
-"not measured") counts as unmeasured before it is placed; the store keeps it.
-Elevations come from the antenna positions, the field
-phase center and the time; a source below `min_elevation` (radians) has no
-usable gain.
+[`NearestInTime`](@ref). A system temperature that is not positive or equals
+one of `tsys_placeholders` (values written for "not measured") counts as
+unmeasured before it is placed; the store keeps it. Elevations come from the
+antenna positions, the field phase center and the time; a source below
+`min_elevation` (radians) has no usable gain.
 
 A sample whose antennas lack a usable system temperature, gain curve or
 elevation is flagged and keeps its visibility and weight. Autocorrelations are
@@ -45,7 +43,7 @@ system temperatures or no gain curves.
 """
 function apriori_calibrate!(
         ms::XRadio.MeasurementSet; tsys = ScanMean(), min_elevation::Real = 0.0,
-        max_tsys::Real = 1.0e4, tsys_placeholders = (999.0,), quantization_efficiency = nothing,
+        tsys_placeholders = (999.0,), quantization_efficiency = nothing,
     )
     vis = ms[:visibility]
     units = get(metadata(vis), :units, nothing)
@@ -71,7 +69,7 @@ function apriori_calibrate!(
 
     names = collect(lookup(XRadio.polarization_types(ms), XRadio.AntennaName))
     η = _quantization_efficiencies(ms, names, quantization_efficiency)
-    plausible(v) = isfinite(v) && 0 < v <= max_tsys && !(v in tsys_placeholders)
+    plausible(v) = isfinite(v) && v > 0 && !(v in tsys_placeholders)
     scale = _sefd_scale(ms, T, curves, tsys, Float64(min_elevation), plausible)
     feeds = feed_pairs(ms)
     V, W, F = _storage_order(vis), _storage_order(ms[:weight]), _storage_order(ms[:flag])
