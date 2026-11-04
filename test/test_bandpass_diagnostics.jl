@@ -18,8 +18,9 @@
         s = spectra(ps)
 
         res = FR.normalized_residuals(s)
-        @test keys(res) == (:r, :var)
-        @test dims(res.r) == dims(s.vis)
+        @test keys(res) == (:r, :var, :scan_name)
+        @test dims(res.r) == dims(s.visibility)
+        @test res.scan_name == s.scan_name
         # Each cut's weighted mean along the axis is 1.
         cut_means(res, w, D) = [
             let r = res.r[cell...], wc = w[cell...], ok = isfinite.(r)
@@ -33,16 +34,19 @@
         @test maximum(abs ∘ angle, filter(isfinite, res.r[AntennaPair = At(("A1", "A2"))])) > 0.4
         @test maximum(abs ∘ angle, filter(isfinite, res.r[AntennaPair = At(("A1", "A3"))])) < 0.1
         # One baseline's channel 3 is flagged in scan 1, on all four feed pairs.
-        @test count(isnan, res.r[Scan = At("1"), Frequency = 3]) == 4
-        @test count(isnan, res.var[Scan = At("1"), Frequency = 3]) == 4
-        @test !any(isnan, res.r[Scan = At("2")])
+        @test s.scan_name[Ti = 1] == "1"
+        @test count(isnan, res.r[Ti = 1, Frequency = 3]) == 4
+        @test count(isnan, res.var[Ti = 1, Frequency = 3]) == 4
+        @test !any(isnan, res.r[Ti = 2])
+        # A processing set gives the same as its spectra.
+        @test isequal(FR.normalized_residuals(XRadio.average(ps, XRadio.ByScan())).r, res.r)
 
         # Along time, on one Measurement Set's integrations.
         ms = ps[:synth_fringe_2_1]
-        w = DimArray(ifelse.(parent(ms[:flag]), 0.0f0, parent(ms[:weight])), dims(ms[:weight]))
-        along = FR.normalized_residuals(DimStack((; vis = ms[:visibility], weight = w)); dims = Ti)
-        @test dims(along.r) == dims(ms[:visibility])
-        @test all(≈(1), cut_means(along, w, Ti))
+        along = FR.normalized_residuals(ms; dims = Ti)
+        layout = FR.baseline_spectra(ms)
+        @test dims(along.r) == dims(layout.visibility)
+        @test all(≈(1), cut_means(along, layout.weight, Ti))
     end
 
     @testset "scan_intervals" begin
@@ -98,33 +102,32 @@
         ps, _ = _build_fringe_ps(; nspw, nchan, ntime, nscans, noise = 1.0, antenna_gains = false, seed = 3)
         s = spectra(ps)
         parallel = s[FeedPair = At([(1, 1), (2, 2)])]
-        everything = (Frequency, Scan, AntennaPair, FeedPair)
+        everything = (Frequency, Ti, AntennaPair, FeedPair)
 
         q = FR.tss(parallel)
         @test keys(q) == (:tss, :dof)
-        @test dims(q.tss) == DimensionalData.otherdims(parallel.vis, Frequency)
+        @test dims(q.tss) == DimensionalData.otherdims(parallel.visibility, Frequency)
         @test all(==(2 * (nspw * nchan - 1)), q.dof)
         @test sum(q.tss) / sum(q.dof) ≈ 1 atol = 0.15
-        per = sum(q.tss; dims = Scan) ./ sum(q.dof; dims = Scan)
+        per = sum(q.tss; dims = Ti) ./ sum(q.dof; dims = Ti)
         @test all(x -> 0.6 < x < 1.5, per)
+        @test FR.tss(XRadio.average(ps, XRadio.ByScan())) == FR.tss(s)
 
-        # Per integration, on one Measurement Set's layers.
-        ms = ps[:synth_fringe_1_1]
-        w = DimArray(ifelse.(parent(ms[:flag]), 0.0f0, parent(ms[:weight])), dims(ms[:weight]))
-        layers = DimStack((; vis = ms[:visibility], weight = w))
-        ap = FR.tss(layers)
+        # Per integration, across the band.
+        ap = FR.tss(ps)
         @test sum(ap.tss) / sum(ap.dof) ≈ 1 atol = 0.15
-        # Along time: each channel about its mean over the scan.
-        along = FR.tss(layers; dims = Ti)
-        @test dims(along.tss) == DimensionalData.otherdims(ms[:visibility], Ti)
+        # Along time, on one Measurement Set: each channel about its mean over the scan.
+        ms = ps[:synth_fringe_1_1]
+        along = FR.tss(ms; dims = Ti)
+        @test dims(along.tss) == DimensionalData.otherdims(FR.baseline_spectra(ms).visibility, Ti)
         @test sum(along.tss) / sum(along.dof) ≈ 1 atol = 0.15
 
         # Against its own band means as the model, the χ² is the total sum of
         # squares with the means' 2 degrees of freedom per cut not charged.
-        means = zeros(ComplexF64, DimensionalData.otherdims(parallel.vis, Frequency))
+        means = zeros(ComplexF64, DimensionalData.otherdims(parallel.visibility, Frequency))
         for cell in DimensionalData.DimIndices(means)
-            v, wc = parallel.vis[cell...], parallel.weight[cell...]
-            ok = wc .> 0
+            v, wc = parallel.visibility[cell...], parallel.weight[cell...]
+            ok = .!parallel.flag[cell...] .& (wc .> 0)
             means[cell...] = sum(wc[ok] .* v[ok]) / sum(wc[ok])
         end
         c = FR.chi2(parallel, means; dims = everything)

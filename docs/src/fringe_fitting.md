@@ -795,8 +795,8 @@ plot_gain_phases(gains(sol; Frequency = Near(sol.geom.f0)))  # phase against tim
 
 The data themselves show what a solution removed. XRadio's `average`
 reduces a scan to its inverse-variance weighted means, and
-[`baseline_spectra`](@ref) lays a time-averaged set out by station pair, feed
-pair and frequency across its spectral windows. Spectra of the raw and the
+[`baseline_spectra`](@ref) lays a set out by time, station pair, feed pair and
+frequency across its spectral windows. Spectra of the raw and the
 corrected scan show the delay slope a good fit flattens, and plot directly
 with DimensionalData's Makie recipes. [`baseline_delays`](@ref) and
 [`delay_closure`](@ref) test the station-based structure: delays close around
@@ -808,7 +808,7 @@ see [Bandpass diagnostics](@ref bandpass-diagnostics).
 using XRadio: average, ByScan
 before = baseline_spectra(average(g, ByScan()))
 after = baseline_spectra(average(calibrate(fr, g; flag_bad = false, apply_flags = false), ByScan()))
-series(angle.(after.vis[Scan = 1, FeedPair = At((1, 1))]))   # one line per baseline
+series(angle.(after.visibility[Ti = 1, FeedPair = At((1, 1))]))   # one line per baseline
 delay_closure(before)
 ```
 

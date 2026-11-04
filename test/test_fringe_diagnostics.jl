@@ -109,27 +109,36 @@
     after = FP.baseline_spectra(scan_average(calibrate(sol, ps; flag_bad = false, apply_flags = false)))
 
     @testset "baseline spectra before/after" begin
-        @test keys(before) == (:vis, :weight)
+        @test keys(before) == (:visibility, :weight, :flag, :scan_name)
         pairs = collect(lookup(before, AntennaPair))
         @test all(((a, b),) -> a != b, pairs)
         @test length(pairs) == 6
         @test collect(lookup(before, FeedPair)) == [(1, 1), (1, 2), (2, 1), (2, 2)]
-        @test collect(lookup(before, Gustavo.Scan)) == sol.geom.scan_names
-        @test size(before.vis) == (1, 6, 4, length(sol.geom.channel_freqs))
+        @test collect(before.scan_name) == sol.geom.scan_names
+        @test size(before.visibility) == (1, 6, 4, length(sol.geom.channel_freqs))
         @test lookup(before, Frequency) == sol.geom.channel_freqs
 
         # Dividing out the fringe solution aligns the per-channel phases, so the
         # concentration R = |Σe^{iφ}|/N over frequency drops on no cross baseline.
         concentration(z) = (v = filter(isfinite, z); isempty(v) ? 0.0 : abs(sum(cis, angle.(v))) / length(v))
         for pr in pairs
-            sel = (Gustavo.Scan(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
-            @test concentration(after.vis[sel]) >= concentration(before.vis[sel]) - 1.0e-6
+            sel = (Ti(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
+            @test concentration(after.visibility[sel]) >= concentration(before.visibility[sel]) - 1.0e-6
         end
 
-        @test_throws "average over time first" FP.baseline_spectra(ps)
+        # Without averaging, every integration is a time sample.
+        raw = FP.baseline_spectra(ps)
+        @test lookup(raw, Ti) == sol.geom.times
+        @test all(==(only(sol.geom.scan_names)), raw.scan_name)
+        ms = first(values(ps))
+        @test isequal(parent(FP.baseline_spectra(ms).visibility), parent(raw.visibility[Frequency = At(collect(XRadio.frequencies(ms)))]))
+        twice = XRadio.ProcessingSet(OrderedDict{Symbol, XRadio.MeasurementSet}(:a => ms, :b => ms))
+        @test_throws "two Measurement Sets hold" FP.baseline_spectra(twice)
+
         ps2, _ = _build_fringe_ps(; nscans = 2)
         two = FP.baseline_spectra(scan_average(ps2))
-        @test length(lookup(two, Gustavo.Scan)) == 2
+        @test length(lookup(two, Ti)) == 2
+        @test allunique(two.scan_name)
     end
 
     @testset "delay closure" begin
@@ -147,7 +156,7 @@
     end
 
     @testset "baseline spectra plot with DimensionalData's recipes" begin
-        fig = series(angle.(after.vis[Gustavo.Scan(1), FeedPair(At((1, 1)))]))
+        fig = series(angle.(after.visibility[Ti(1), FeedPair(At((1, 1)))]))
         @test (show(IOBuffer(), MIME("image/png"), fig); true)
     end
 
@@ -395,11 +404,16 @@ end
     # 3 bands of 4 channels with gaps; flat phase gives η = 1, a ramp less.
     freqs = vcat(1.0e9 .+ (0:3) .* 1.0e6, 1.1e9 .+ (0:3) .* 1.0e6, 1.3e9 .+ (0:3) .* 1.0e6)
     @test FP._freq_group_ranges(freqs) == [1:4, 5:8, 9:12]
-    d = (FP._scan_dim(["1"]), FP._antenna_pair_dim([("A", "B")]), FeedPair([(1, 1)]), Frequency(freqs))
-    spectra(z) = DimStack((; vis = DimArray(reshape(z, 1, 1, 1, :), d)))
+    d = (Ti([0.0]), FP._antenna_pair_dim([("A", "B")]), FeedPair([(1, 1)]), Frequency(freqs))
+    spectra(z) = DimStack(
+        (;
+            visibility = DimArray(reshape(z, 1, 1, 1, :), d), weight = DimArray(ones(1, 1, 1, length(freqs)), d),
+            flag = DimArray(falses(1, 1, 1, length(freqs)), d),
+        )
+    )
     ramp = FP.freq_group_coherence(spectra(ComplexF64[cis(2π * c / 6) for c in eachindex(freqs)]))
     flat = FP.freq_group_coherence(spectra(fill(1.0 + 0.0im, length(freqs))))
-    @test map(DimensionalData.basetypeof, dims(flat)) == (Gustavo.Scan, FeedPair, FP.FreqGroup)
+    @test map(DimensionalData.basetypeof, dims(flat)) == (Ti, FeedPair, FP.FreqGroup)
     @test collect(lookup(flat, FP.FreqGroup)) == [(freqs[1], freqs[4]), (freqs[5], freqs[8]), (freqs[9], freqs[12])]
     @test all(≈(1.0), flat)
     @test all(<(0.9), ramp)
@@ -429,8 +443,8 @@ end
     # check even with few samples.
     z = Float64[]
     for pr in lookup(spectra, AntennaPair)
-        sel = (Gustavo.Scan(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
-        col = collect(spectra.vis[sel])
+        sel = (Ti(1), AntennaPair(At(pr)), FeedPair(At((1, 1))))
+        col = collect(spectra.visibility[sel])
         σ = inv.(sqrt.(collect(spectra.weight[sel])))
         μ = sum(col) / length(col)
         append!(z, real.(col .- μ) ./ σ, imag.(col .- μ) ./ σ)

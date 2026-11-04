@@ -31,34 +31,41 @@ foreach(ms -> scale_weights!(ms, weight_scales(ms)), values(ps))
 A comparison between two models fitted to the same data does not need this:
 both χ² values scale with the weights, and the ratios below cancel the scale.
 
+## Input
+
+Each function takes a processing set or a single Measurement Set. It lays the
+data out as [`baseline_spectra`](@ref) does, over
+`(Ti, AntennaPair, FeedPair, Frequency)` with the channels of every spectral
+window on one `Frequency` axis, and skips flagged samples. A
+[`baseline_spectra`](@ref) result works too, which saves laying the data out
+again for each call. Results keep those dimensions, less the ones reduced.
+
+A bandpass error is the same in every integration of a scan, while the noise
+averages down, so scan averages show it most clearly: pass
+`average(ps, ByScan())`. Unaveraged data give one value per integration.
+
 ## Goodness of fit
 
-Both functions take spectra with layers `vis` and `weight` and return a
-DimStack with a degrees-of-freedom layer `dof`.
+Both functions return a DimStack with a degrees-of-freedom layer `dof`.
 
-[`tss`](@ref) is the weighted total sum of squares along `dims`, as `var` is
-the variance along `dims`: each cut against its own weighted mean, one value
-per cut. Along `Frequency`, the default, it is the χ² of a source that is
-constant across the band, the model a corrected spectrum should satisfy, with
-that constant fitted to each spectrum. Totals are sums:
+[`tss`](@ref) is the weighted sum of squares of each cut along `dims` about its
+own weighted mean, one value per cut. Along `Frequency`, the default, it is
+the χ² of a source that is constant across the band, the model a corrected
+spectrum should satisfy, with that constant fitted to each spectrum. Totals
+are sums:
 
 ```julia
 using XRadio: average, ByScan
-s = baseline_spectra(average(calibrate(sol, ps), ByScan()))
-parallel = s[FeedPair = At([(1, 1), (2, 2)])]
-q = tss(parallel)                                    # per scan, baseline and feed pair
+q = tss(average(calibrate(sol, ps), ByScan()))[FeedPair = At([(1, 1), (2, 2)])]
 sum(q.tss) / sum(q.dof)                              # the whole set
-sum(q.tss; dims = Scan) ./ sum(q.dof; dims = Scan)   # per baseline and feed pair
+sum(q.tss; dims = Ti) ./ sum(q.dof; dims = Ti)       # per baseline and feed pair
 mine = [p for p in lookup(q.tss, AntennaPair) if "S1" in p]
 sum(q.tss[AntennaPair = At(mine)]) / sum(q.dof[AntennaPair = At(mine)])   # one station
 ```
 
-A bandpass error is the same in every integration of a scan, while the noise
-averages down, so scan averages show bandpass error most clearly. Per
-integration, pass a Measurement Set's layers, with the weights of flagged
-samples set to zero, as for [`normalized_residuals`](@ref). With `dims = Ti`,
-each channel is taken about its mean over time instead, which tests whether
-the data hold steady through a scan.
+With `dims = Ti`, each channel is taken about its mean over time instead.
+On unaveraged data, `tss(ms; dims = Ti)` tests whether a Measurement Set's
+channels hold steady through its scan.
 
 A value per degree of freedom well above 1 says the correction left structure
 across the band. A residual delay is such structure: a phase slope that, if it
@@ -71,7 +78,7 @@ shows which it is.
 along the dimensions it lacks. Here `dims` only names what is summed:
 
 ```julia
-chi2(parallel, model; dims = (Frequency, Scan))      # Σ w |v - model|² per baseline and feed pair
+chi2(average(ps, ByScan()), model; dims = (Frequency, Ti))   # Σ w |v - model|² per baseline and feed pair
 ```
 
 Every usable sample counts 2 degrees of freedom. The model's own free
@@ -95,8 +102,8 @@ and require a large one.
 
 ## Residuals
 
-[`normalized_residuals`](@ref) divides every cut of a set of spectra along an
-axis by its weighted mean along that axis, and gives the variance of each
+[`normalized_residuals`](@ref) divides every cut of the data along an axis by
+its weighted mean along that axis, and gives the variance of each
 component. Along `Frequency`, the default, this removes each spectrum's phase,
 amplitude scale and band-mean source visibility. What is left is the structure
 across the band that the correction did not remove. That includes a residual
@@ -104,17 +111,16 @@ delay, seen as a phase slope, which is the sign of a missing delay term:
 
 ```julia
 using XRadio: average, ByScan
-res = normalized_residuals(baseline_spectra(average(ps, ByScan())))
-angle.(res.r[Scan = At("SRC_3"), FeedPair = At((1, 1))])   # residual phase per baseline
+res = normalized_residuals(average(ps, ByScan()))
+k = findfirst(==("SRC_3"), res.scan_name)
+angle.(res.r[Ti = k, FeedPair = At((1, 1))])         # residual phase per baseline
 ```
 
-Any layout with a `Frequency` axis works: scan averages as above, shorter
-averages, or a Measurement Set's integrations. Along `Ti`, each channel is
-taken about its mean over time instead:
+Scan averages, shorter averages and unaveraged data all work. Along `Ti`, each
+channel is taken about its mean over time instead:
 
 ```julia
-w = DimArray(ifelse.(parent(ms[:flag]), 0.0f0, parent(ms[:weight])), dims(ms[:weight]))
-normalized_residuals(DimStack((; vis = ms[:visibility], weight = w)); dims = Ti)
+normalized_residuals(ms; dims = Ti)
 ```
 
 Scan averages raise the signal-to-noise each spectrum is normalized with, and
