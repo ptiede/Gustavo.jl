@@ -17,6 +17,7 @@ makedocs(;
         "Conventions" => "conventions.md",
         "Specifying gain models" => "models.md",
         "Fringe fitting" => "fringe_fitting.md",
+        "Bandpass diagnostics" => "bandpass_diagnostics.md",
         "Fitting under priors" => "priors.md",
         "Authoring a new gain term" => "authoring_terms.md",
         "Authoring a solver" => "authoring_solvers.md",

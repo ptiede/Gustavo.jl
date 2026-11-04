@@ -217,79 +217,93 @@ end
 # ── Per-baseline spectra (the fringe-fit quality check) ──────────────────────
 
 """
-    baseline_spectra(avg) -> DimStack
+    baseline_spectra(data) -> DimStack
 
-The time-averaged spectra of `avg`, a processing set XRadio's `average`
-reduced to one sample per scan (`average(ps, ByScan())`), laid out by label
-across its spectral windows: layers `vis` (the inverse-variance weighted mean
-visibility) and `weight` (its summed weight, so `1/√weight` is its width per
-real component), over `(Scan, AntennaPair, FeedPair, Frequency)`, cross
-baselines only. A cell no Measurement Set holds, or holds flagged, is `NaN`
-with weight zero. Throws when a Measurement Set holds more than one sample of
-a scan.
+The visibilities of `data`, a processing set or a Measurement Set, laid out by
+station pair and feed pair, with the channels of all its spectral windows on
+one `Frequency` axis. Layers `visibility`, `weight` and `flag`, as the
+Measurement Sets hold them, over `(Ti, AntennaPair, FeedPair, Frequency)`,
+cross baselines only, and `scan_name` over `Ti`. A cell no Measurement Set
+holds is `NaN`, of weight zero and flagged. Throws when two Measurement Sets
+hold the same cell.
 
-Spectra of a scan before and after a solution show what it removed; a good
-fringe fit flattens the phase slope. DimensionalData's Makie recipes plot them
-directly, one line per baseline:
+Time averages give fewer, deeper spectra: `average(ps, ByScan())` gives one
+per scan. Spectra of a scan before and after a solution show what it removed;
+a good fringe fit flattens the phase slope. DimensionalData's Makie recipes
+plot them directly, one line per baseline:
 
 ```julia
 before = baseline_spectra(average(g, ByScan()))
 after = baseline_spectra(average(calibrate(fr, g; flag_bad = false, apply_flags = false), ByScan()))
-series(angle.(after.vis[Scan = 1, FeedPair = At((1, 1))]))
+series(angle.(after.visibility[Ti = 1, FeedPair = At((1, 1))]))
 ```
-
-Per-scan results combine with [`cat_scans`](@ref).
 """
-function baseline_spectra(avg::XRadio.ProcessingSet)
-    isempty(avg) && throw(ArgumentError("the processing set holds no Measurement Sets"))
-    members = collect(values(avg))
-    geom = DataGeometry(avg)
+baseline_spectra(ms::XRadio.MeasurementSet) =
+    baseline_spectra(XRadio.ProcessingSet(OrderedDict{Symbol, XRadio.MeasurementSet}(:ms => ms)))
+
+function baseline_spectra(ps::XRadio.ProcessingSet)
+    isempty(ps) && throw(ArgumentError("the processing set holds no Measurement Sets"))
+    members = collect(values(ps))
+    geom = DataGeometry(ps)
     pairs = [p for p in _canonical_antenna_pairs(reduce(vcat, map(_member_antenna_pairs, members)), geom) if p[1] != p[2]]
     feeds = sort!(unique!(reduce(vcat, (vec(feed_pairs(ms)) for ms in members))))
-    scans = unique(reduce(vcat, (String.(collect(ms[:scan_name])) for ms in members)))
+    scan_of = Dict{Float64, String}()
+    for ms in members, (t, scan) in zip(XRadio.times(ms), String.(collect(ms[:scan_name])))
+        get!(scan_of, t, scan) == scan || throw(ArgumentError("time $t is in scans $(scan_of[t]) and $scan"))
+    end
+    times = sort!(collect(keys(scan_of)))
     freqs = sort!(unique!(reduce(vcat, (collect(XRadio.frequencies(ms)) for ms in members))))
-    d = (_scan_dim(scans), _antenna_pair_dim(pairs), FeedPair(feeds), Frequency(freqs))
+    d = (Ti(times), _antenna_pair_dim(pairs), FeedPair(feeds), Frequency(freqs))
     n = map(length, d)
     V = mapreduce(ms -> eltype(ms[:visibility]), promote_type, members)
     W = mapreduce(ms -> eltype(ms[:weight]), promote_type, members)
-    vis = fill(V(NaN), n)
+    visibility = fill(V(NaN), n)
     weight = zeros(W, n)
+    flag = trues(n)
     seen = falses(n)
     index = (
-        Dict(s => i for (i, s) in enumerate(scans)), Dict(p => i for (i, p) in enumerate(pairs)),
+        Dict(t => i for (i, t) in enumerate(times)), Dict(p => i for (i, p) in enumerate(pairs)),
         Dict(f => i for (i, f) in enumerate(feeds)), Dict(f => i for (i, f) in enumerate(freqs)),
     )
     for ms in members
-        _place_spectra!(vis, weight, seen, index, _member_layers(ms)..., ms)
+        _place_spectra!((visibility, weight, flag), seen, index, _member_layers(ms)..., ms)
     end
-    return DimStack((; vis = DimArray(vis, d), weight = DimArray(weight, d)))
+    return DimStack(
+        (;
+            visibility = DimArray(visibility, d), weight = DimArray(weight, d), flag = DimArray(flag, d),
+            scan_name = DimArray([scan_of[t] for t in times], (d[1],)),
+        )
+    )
 end
 
-function _place_spectra!(vis, weight, seen, (scan_i, pair_i, feed_i, freq_i), V, W, F, ms)
+function _place_spectra!((vis, weight, flag), seen, (time_i, pair_i, feed_i, freq_i), V, W, F, ms)
     antennas = _member_antenna_pairs(ms)
     feeds = feed_pairs(ms)
-    scans = String.(collect(ms[:scan_name]))
+    times = XRadio.times(ms)
     freqs = collect(lookup(V, Frequency))
     for ti in axes(V, Ti), bi in axes(V, BaselineID), p in axes(V, Polarization)
         haskey(pair_i, antennas[bi]) || continue                # autocorrelations
-        s, j, q = scan_i[scans[ti]], pair_i[antennas[bi]], feed_i[feeds[p, bi]]
+        s, j, q = time_i[times[ti]], pair_i[antennas[bi]], feed_i[feeds[p, bi]]
         for c in axes(V, Frequency)
             k = freq_i[freqs[c]]
             seen[s, j, q, k] && throw(
                 ArgumentError(
-                    "the set holds more than one sample of scan $(scans[ti]) on $(antennas[bi]); " *
-                        "average over time first: `average(ps, ByScan())`"
+                    "two Measurement Sets hold $(antennas[bi]), feeds $(feeds[p, bi]), " *
+                        "at time $(times[ti]) and frequency $(freqs[c])"
                 )
             )
             seen[s, j, q, k] = true
             cell = (Frequency(c), Ti(ti), BaselineID(bi), Polarization(p))
-            _usable(F[cell], W[cell], V[cell]) || continue
             vis[s, j, q, k] = V[cell]
             weight[s, j, q, k] = W[cell]
+            flag[s, j, q, k] = F[cell]
         end
     end
     return nothing
 end
+
+# The visibilities of a `baseline_spectra` result, `NaN` where unusable.
+_usable_visibility(s) = map((f, w, v) -> _usable(f, w, v) ? v : oftype(v, NaN), s.flag, s.weight, s.visibility)
 
 """
     freq_group_coherence(spectra) -> DimArray
@@ -298,29 +312,29 @@ The coherence `η = Σ |Σ_c z_c| / Σ Σ_c |z_c|` of each frequency group
 ([`fringe_freq_groups`](@ref)) of `spectra`, a [`baseline_spectra`](@ref)
 result, pooled over cross baselines: the inner sums run
 over the group's channels, the outer over baselines. Over
-`(Scan, FeedPair, FreqGroup)`, each `FreqGroup` labeled by its lowest and
+`(Ti, FeedPair, FreqGroup)`, each `FreqGroup` labeled by its lowest and
 highest channel frequency. A group whose coherence lags its neighbours after a
 fit localises residual frequency structure (RFI, a station passband defect)
 to that group.
 """
 function freq_group_coherence(spectra::AbstractDimStack)
-    spec = spectra.vis
+    spec = _usable_visibility(spectra)
     freqs = collect(lookup(spec, Frequency))
     groups = _freq_group_ranges(freqs)
     d = (
-        dims(spec, Scan), dims(spec, FeedPair),
+        dims(spec, Ti), dims(spec, FeedPair),
         FreqGroup(DimensionalData.Lookups.Categorical([(freqs[first(r)], freqs[last(r)]) for r in groups]; order = DimensionalData.Lookups.Unordered())),
     )
     η = fill(NaN, d)
-    for s in axes(spec, Scan), p in axes(spec, FeedPair), (k, r) in enumerate(groups)
+    for s in axes(spec, Ti), p in axes(spec, FeedPair), (k, r) in enumerate(groups)
         num = 0.0
         den = 0.0
         for bl in axes(spec, AntennaPair)
-            z = filter(isfinite, view(spec, Scan(s), AntennaPair(bl), FeedPair(p), Frequency(r)))
+            z = filter(isfinite, view(spec, Ti(s), AntennaPair(bl), FeedPair(p), Frequency(r)))
             num += abs(sum(z; init = zero(eltype(spec))))
             den += sum(abs, z; init = 0.0)
         end
-        den > 0 && (η[Scan(s), FeedPair(p), FreqGroup(k)] = num / den)
+        den > 0 && (η[Ti(s), FeedPair(p), FreqGroup(k)] = num / den)
     end
     return η
 end
@@ -356,15 +370,15 @@ end
     baseline_delays(spectra) -> DimArray
 
 Each cross baseline's group delay (s) in `spectra`, a
-[`baseline_spectra`](@ref) result, over `(Scan, AntennaPair, FeedPair)`: the
+[`baseline_spectra`](@ref) result, over `(Ti, AntennaPair, FeedPair)`: the
 coherence-weighted mean phase increment between adjacent channels over 2π
 times their spacing. On data a correct delay solution has corrected, every
 baseline's delay is ≈ 0.
 """
 function baseline_delays(spectra::AbstractDimStack)
-    spec = spectra.vis
+    spec = _usable_visibility(spectra)
     freqs = collect(lookup(spec, Frequency))
-    d = (dims(spec, Scan), dims(spec, AntennaPair), dims(spec, FeedPair))
+    d = (dims(spec, Ti), dims(spec, AntennaPair), dims(spec, FeedPair))
     delay = fill(NaN, d)
     for I in DimensionalData.DimIndices(delay)
         delay[I] = _baseline_delay(collect(spec[I]), freqs)
@@ -378,7 +392,7 @@ end
 The triangle delay closure `τ_ab + τ_bc + τ_ca` of the
 [`baseline_delays`](@ref) of `spectra`, a [`baseline_spectra`](@ref) result,
 around every triangle of stations whose three baselines were measured. Over
-`(Scan, Triangle, FeedPair)`, each `Triangle` labeled by its station names,
+`(Ti, Triangle, FeedPair)`, each `Triangle` labeled by its station names,
 for the products that pair a feed with itself: on a product `(f, g)` with
 `f ≠ g` each station enters the triangle once with each feed, so the feeds'
 delay difference does not cancel.
@@ -400,16 +414,16 @@ function delay_closure(spectra::AbstractDimStack)
     ]
     parallel = [f for f in lookup(delay, FeedPair) if f[1] == f[2]]
     d = (
-        dims(delay, Scan),
+        dims(delay, Ti),
         Triangle(DimensionalData.Lookups.Categorical(triangles; order = DimensionalData.Lookups.Unordered())),
         FeedPair(parallel),
     )
     closure = fill(NaN, d)
     # A baseline stored as (y, x) has the negated delay of (x, y).
-    τ(s, e, f) = haskey(index, e) ? delay[Scan(s), AntennaPair(index[e]), FeedPair(At(f))] :
-        -delay[Scan(s), AntennaPair(index[reverse(e)]), FeedPair(At(f))]
-    for s in axes(closure, Scan), (t, (a, b, c)) in enumerate(triangles), f in parallel
-        closure[Scan(s), Triangle(t), FeedPair(At(f))] = τ(s, (a, b), f) + τ(s, (b, c), f) + τ(s, (c, a), f)
+    τ(s, e, f) = haskey(index, e) ? delay[Ti(s), AntennaPair(index[e]), FeedPair(At(f))] :
+        -delay[Ti(s), AntennaPair(index[reverse(e)]), FeedPair(At(f))]
+    for s in axes(closure, Ti), (t, (a, b, c)) in enumerate(triangles), f in parallel
+        closure[Ti(s), Triangle(t), FeedPair(At(f))] = τ(s, (a, b), f) + τ(s, (b, c), f) + τ(s, (c, a), f)
     end
     return closure
 end

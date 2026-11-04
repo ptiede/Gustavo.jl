@@ -28,7 +28,7 @@ using ..Calibration: weighted_regularized_least_squares, ConstrainedWLS, Factore
     unwrap_phase_track, connected_components
 using FFTW: fft, fftfreq, plan_fft, MEASURE
 import DimensionalData
-using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack
+using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack, @d
 using Statistics: median, mean
 using LinearAlgebra
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nnz, nzrange, nonzeros, rowvals, CHOLMOD
@@ -59,6 +59,7 @@ include("Fring/bandpass_solve.jl")
 include("Fring/bandpass_scan.jl")
 include("Fring/coherence.jl")
 include("Fring/diagnostics.jl")
+include("Fring/bandpass_diagnostics.jl")
 
 # ── Plot stubs — implemented by `GustavoMakieExt`. Load Makie or CairoMakie
 # to enable plotting.
@@ -110,6 +111,8 @@ export TrackStatus, TrackNoData, TrackSolved, TrackFlat
 export fringe_snr_table, fringe_detections, cat_scans
 export fringe_antenna_solutions
 export baseline_spectra, freq_group_coherence, fringe_freq_groups, FreqGroup, Triangle
+export normalized_residuals, scan_intervals, step_tests
+export chi2, tss
 export fringe_antenna_flags
 export baseline_delays, delay_closure
 export can_fit, validate_model
