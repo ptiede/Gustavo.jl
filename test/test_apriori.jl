@@ -89,7 +89,7 @@
         @test parent(ms[:visibility])[1, 1, 1, 1] ≈ sqrt(100.0 / (0.1 * gain_aa) * sefd_mg(1, 1)) / η_aa_mg
     end
 
-    @testset "implausible system temperatures count as unmeasured" begin
+    @testset "placeholders and non-positive values count as unmeasured" begin
         screened = tempname()
         write(
             screened, """
@@ -116,13 +116,11 @@
         # The placeholder and the negative row leave the first scan's mean alone.
         @test V[1, 1, 1, 1] ≈ sqrt(100.0 / (0.1 * gain_aa) * sefd_mg(1, 1)) / η_aa_mg
         @test V[4, 1, 1, 2] ≈ sqrt(200.0 / (0.2 * gain_aa) * sefd_mg(2, 1)) / η_aa_mg
-        # The second scan's only row is above `max_tsys`, so AA is unmeasured there.
-        @test all(F[:, :, 1:2, 3:4]) && all(==(1), V[:, :, 1:2, 3:4])
+        # A large value is a measurement: it sets the second scan's scale.
+        @test V[1, 1, 1, 3] ≈ sqrt(2.0e4 / (0.1 * gain_aa) * sefd_mg(1, 2)) / η_aa_mg
+        @test !any(F[:, :, 1, 3:4])
         # The store keeps what the file said.
         @test 999.0 in XRadio.system_temperatures(ms)
-
-        raised = apriori_calibrate!(filled(); max_tsys = 3.0e4)
-        @test parent(raised[:visibility])[1, 1, 1, 3] ≈ sqrt(2.0e4 / (0.1 * gain_aa) * sefd_mg(1, 2)) / η_aa_mg
     end
 
     @testset "below the elevation limit" begin
