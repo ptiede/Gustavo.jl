@@ -105,4 +105,3 @@ function _group_bytes(group)
     end
     return bytes
 end
-
