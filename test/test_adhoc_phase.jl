@@ -55,7 +55,7 @@ end
         bandpass = bp_true, amp_bandpass = abp_true,
     )
     fm = default_fringe_model()
-    specs = (FringeClosure(; model = fm, gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge))
+    specs = (FringeClosure(; model = fm, gauge), Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(adhoc; gauge))
     sols_n = _fit_chain(specs, ps; exec = ExecutionConfig())
     ad_n = last(sols_n)
 
@@ -96,7 +96,7 @@ end
             k => (copy(parent(ms[:visibility])), copy(parent(ms[:weight])))
                 for (k, ms) in pairs(ps)
         )
-        fit(Bandpass(; gauge), ps)
+        fit(Bandpass(; model = _bandpass_model(), gauge), ps)
         fit(AdhocPhase(adhoc; gauge), ps)
         @test all(
             isequal(snap[k][1], parent(ms[:visibility])) && isequal(snap[k][2], parent(ms[:weight]))

@@ -4,8 +4,8 @@
 # the OUTER across-scan group scheduler behind `each_group`, and the INNER
 # within-scan fan-out — each an OhMyThreads `Scheduler`. The contract under
 # test: groups are dispatched heaviest-first and run at the outer scheduler's
-# own task count, θ and outputs are bit-identical across BOTH choices, and a
-# failed group task surfaces its exception.
+# own task count, θ and outputs are bit-identical across outer choices and agree
+# to rounding across inner choices, and a failed group task surfaces its exception.
 
 @isdefined(_build_fringe_ps) || include("synthetic_ps.jl")
 using Gustavo: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
@@ -74,7 +74,7 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
         specs = (
-            FringeClosure(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1)),
+            FringeClosure(; gauge = PinAntenna(1)), Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1)),
             AdhocPhase(adhoc; gauge = PinAntenna(1)),
         )
         run(ex) = _fit_chain(specs, ps; exec = ExecutionConfig(outer_executor = ex))
@@ -91,20 +91,19 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
         end
     end
 
-    @testset "full chain: θ bit-identical across INNER executors" begin
+    @testset "full chain: θ agrees across INNER executors" begin
         ps, _ = _build_fringe_ps(; nscans = 2)
         adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
         specs = (
-            FringeClosure(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1)),
+            FringeClosure(; gauge = PinAntenna(1)), Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1)),
             AdhocPhase(adhoc; gauge = PinAntenna(1)),
         )
         run(inner) = _fit_chain(specs, ps; exec = ExecutionConfig(inner_executor = inner))
-        # Serial vs multi-chunk within-scan fan-out: the per-block folds are
-        # order-fixed by the data layout, so θ is bit-identical.
+        # The bandpass sums run in one chunk per inner task, so θ agrees to rounding.
         sols_ser = run(SerialScheduler())
         sols_dyn = run(DynamicScheduler(; nchunks = 4))
         for (sol_ser, sol_dyn) in zip(sols_ser, sols_dyn)
-            @test parent(gains(sol_ser)) == parent(gains(sol_dyn))
+            @test all(isapprox.(parent(gains(sol_ser)), parent(gains(sol_dyn)); rtol = 1.0e-8, atol = 1.0e-12, nans = true))
         end
     end
 end

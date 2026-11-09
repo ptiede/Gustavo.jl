@@ -629,7 +629,7 @@ function _read_uvfits(path, element_type, gap)
         ones(Int32, length(obs_time))
     end
     if hasproperty(dt, :FREQSEL) || hasproperty(dt, :FREQID) || length(nx_freqid) > 0
-        # Densify FRQSEL slots to 1..nrows index when the FQ FRQSELs are sparse.
+        # Densify FRQSEL values to 1..nrows index when the FQ FRQSELs are sparse.
         if fq_frqsels != 1:nfreq
             remap = Dict{Int32, Int32}()
             for (i, f) in enumerate(fq_frqsels)

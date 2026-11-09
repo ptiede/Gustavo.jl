@@ -85,10 +85,18 @@ include("test_fringe_fit.jl")
 # record, and portable calibrate!.
 include("test_bandpass.jl")
 
-# Bandpass(smoother = JointSmoother()): the alternating complex-visibility +
-# per-scan source-coherence solve, and the shape specs acting as priors inside
-# its gain update.
+# Bandpass(smoother = JointSmoother()): the joint solve of the components'
+# parameters against the complex visibilities, a per-scan source term profiled
+# out and each component under its prior.
 include("test_joint_bandpass.jl")
+
+# The station gains of a joint solve and their sparse Jacobian in the
+# components' parameters.
+include("test_station_gains.jl")
+
+# The joint solve over components' parameters under required priors, with the
+# gauge met after the fit.
+include("test_joint_gains.jl")
 
 # The weight convention behind the bandpass SNRs and gain-estimate weights.
 include("test_noise_convention.jl")

@@ -100,7 +100,7 @@ _rms(x) = sqrt(sum(abs2, x) / length(x))
         ),
     )
     first_pass = _precal(fit(FringeClosure(; model = feed_common, gauge), fit(search, ps)), ps)
-    bandpassed = _precal(fit(Bandpass(; gauge), first_pass), first_pass)
+    bandpassed = _precal(fit(Bandpass(; model = _bandpass_model(), gauge), first_pass), first_pass)
     closure = FringeClosure(; model = track_model, gauge, closure = Stationization(; loss = OutlierMixture()))
     track = fit(closure, fit(search, bandpassed))
     tracked = _precal(track, bandpassed)

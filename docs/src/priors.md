@@ -507,18 +507,25 @@ optimum decoding algorithm, *IEEE Transactions on Information Theory* 13(2),
 ## [The bandpass posterior](@id bandpass-posterior)
 
 [`solve_joint_bandpass!`](@ref) fits the complex visibilities against
-``V_{ab}(\nu) \approx g_a(\nu)\, S\, \overline{g_b(\nu)}``, with one complex
-gain ``g = e^{\ell + i\phi}`` per (station, feed, frequency segment, time
-segment) slot and one frequency-flat source term ``S_J`` per
-``J`` = (scan, station pair, feed pair). Its objective is the negative log posterior
+``V_{ab}(\nu) \approx g_a(\nu)\, S\, \overline{g_b(\nu)}`` through
+[`solve_joint_gains!`](@ref). The unknowns are the parameters ``\theta`` of the
+model's components. Each station gain ``g = e^{\ell + i\phi}``, one per
+(station, feed, data cell), is the sum of the components' terms there, so for
+each observable the station-gain values are ``x = J\theta`` with ``J`` the
+sparse Jacobian of the station gains in the parameters (`StationGains`, by
+sparse forward-mode differentiation through the model layer). One
+frequency-flat source term ``S_J`` sits on each ``J`` = (scan, station pair,
+feed pair). The objective is the negative log posterior
 
 ```math
-O(\ell, \phi) = \tfrac12 \chi^2\big(g, \hat S(g)\big) + \sum_{\text{tracks}} E(\ell_{\text{track}}) + \sum_{\text{tracks}} E(\phi_{\text{track}}),
+O(\theta) = \tfrac12 \chi^2\big(g(\theta), \hat S(g)\big) + \sum_{\text{components}} E_c(\theta_c),
 ```
 
 with ``\hat S(g)`` the closed-form least-squares source term for the gains and
-``E`` each track's prior energy. With ``u_c = g_a \bar g_b`` over the cells
-``c`` of ``J`` and ``r_c`` their weighted sums, profiling ``S`` gives
+``E_c`` component ``c``'s prior energy: ``\theta_j^2 / 2\sigma^2`` per parameter
+under an `IIDPrior`, and the state-space energy of its chains under a prior
+along frequency. With ``u_c = g_a \bar g_b`` over the cells ``c`` of ``J`` and
+``r_c`` their weighted sums, profiling ``S`` gives
 
 ```math
 \chi^2_J(g) = \sum_c \frac{|r_c|^2}{w_c} - \frac{\big|\sum_c \bar u_c r_c\big|^2}{\sum_c w_c |u_c|^2}.
@@ -526,109 +533,86 @@ with ``\hat S(g)`` the closed-form least-squares source term for the gains and
 
 ### [What the data leave free](@id bandpass-gauge)
 
-Two kinds of phase shift leave every ``\chi^2_J`` unchanged:
+Two kinds of shift leave every ``\chi^2_J`` unchanged:
 
-- **The gauge.** A phase added to every slot of a connected component of the
-  correlation graph cancels from ``g_a S \bar g_b`` on every correlation in it.
-  Where the stations share one segmentation, the components are the array's
-  (frequency segment, time segment) cells, so the shift is a phase spectrum
-  common to every station.
-- **The band constants.** ``S_J`` is frequency-flat, so a constant ``\alpha_t``
-  added to every slot of one (station, feed, time segment) track ``t`` is
-  absorbed by the ``S_J`` of its correlations.
+- **The gauge.** A phase added to every station gain of a connected group of
+  the correlation graph cancels from ``g_a S \bar g_b`` on every correlation in
+  it. Where the stations share one segmentation, the groups are the array's
+  frequency cells, so the shift is a phase spectrum common to every station.
+  With `PerScan` components on every station, each scan's cells are groups of
+  their own, and a shift common to every station of one scan is free too.
+- **The scan constants.** ``S_J`` is frequency-flat, so a constant added to the
+  station gains of one station and feed over a scan is absorbed by the
+  ``S_J`` of its correlations, in phase and in log-amplitude.
 
-A proper prior along frequency sees a common spectrum, except the part its
-track's mean takes up: a constant under a level, and a line in frequency under
-a delay. Let ``F`` be the common shifts every prior is blind to. That is one
-constant per set of components the priors join, plus a line under a delay, and
-one constant per component where no prior acts. A shift ``f \in F``, with track
-constants ``\alpha``, moves slot ``n`` of track ``t`` by
+Every fitted component carries a prior whose curvature is positive in every
+direction: an `IIDPrior`, or a state-space prior whose start is proper. The
+posterior then has one mode even along these directions, which the priors set,
+and every step's system is nonsingular. Being proper is not enough: a uniform
+prior over bounds is proper but flat inside them, and would leave these
+directions singular.
+
+After the MAP, the gauge moves the phase parameters onto its constraints along
+the gauge freedoms of the components that span scans (every component but the
+`PerScan` ones), at least cost in prior energy (`_meet_phase_gauge!`). Their
+part of a station gain, ``x^s = J_s\theta`` over their parameters, is the
+same on every scan where the station gain repeats the same parameters; one
+such shared value stands for all of them. The move is
 
 ```math
-\delta\phi_n = f_n + \alpha_t,
+\delta = \arg\min_\delta E(\hat\theta + \delta) \quad\text{subject to}\quad
+(J_s \delta)_m = c_{g(m)} \text{ for each shared value } m \text{ with data},\quad
+\delta_j = 0 \text{ for each per-scan parameter } j,\quad
+C\,J_s(\hat\theta + \delta) = d,
 ```
 
-which neither the data nor the priors see. One constant on every slot, with
-every ``\alpha_t`` its negative, moves nothing, so a connected set of ``T``
-tracks has ``|F| + T - 1`` such directions. The MAP is unique only when the
-solve fixes each of them, and nothing more. It does so in two parts
-(`_joint_bandpass_gauge!`):
+with ``c_g`` one free phase per connected group ``g`` of shared values and
+``C\,x^s = d`` the gauge's constraints on them ([`gauge_constraints`](@ref)).
+The move changes no model visibility, so the calibrated data do not depend on
+the gauge; it moves ``\theta`` off the posterior mode by the prior energy along
+the freedoms, and the hyperparameters stay those fitted at the mode. Under
+`PinAntenna` the reference's shared phase is zero in every group (where the
+reference has no data in a group, the next reference with data,
+`gauge_anchor`); under `ZeroSumPhase` each group's shared phases sum to zero.
+The constraints are on the components that span scans, so a scan the
+reference misses needs no reference of its own, and the per-scan components
+do not enter them: the shift common to every station of one scan is left
+where their priors put it. A group joined to a station gain with no part from
+the components that span scans has no such freedom and is left as fitted. A
+model whose components that span scans cannot add a constant phase to every
+shared value of a group cannot meet the constraints, and the solve stops with
+an error.
 
-1. **Each track holds its band constant.** Under a proper prior acting on the
-   track, the track's level is held at zero, and the prior sets the constant
-   through the mean it is profiled over. Any other track holds its
-   best-measured slot at zero. A hold sets ``\alpha_t = -\ell_t(f)``, with
-   ``\ell_t(f)`` the held level's share of ``f`` or ``f`` at the held slot, and
-   leaves ``f_n - \ell_t(f)``.
-2. **The gauge pins what the holds leave.** Within a set of components that
-   the priors join, a pivoted QR of ``f_n - \ell_t(f)``, weighted by each slot's
-   data, picks the pins. Across those sets, the pins tie each track's constant
-   to every set it reaches, best-measured slots first, so that the pins and
-   holds form a spanning forest over the tracks and sets. That makes
-   ``|F| - 1`` pins per connected set: none under a level alone, one (for the
-   line) under a delay, and one per component but one where no prior acts.
-
-After the MAP, a shift along ``F`` meets the gauge asked for; under
-`ZeroSumPhase`, that is a zero mean over the slots along each freedom. Neither
-the data nor the priors see the shift, so the pins choose only the solve's path,
-not its result.
-
-`PinAntenna` pins more than ``F``: the reference's slot in every component. The
-reference's bandpass is zero by definition, the other tracks' priors act on
-their bandpasses relative to it, and the reference's track, fixed throughout,
-takes no part in the hyperparameter fit. A track is then held only where its
-pins leave its constant free, so the reference holds nothing. Where the
-reference has no data in a component, the next reference with data is pinned
-there instead (`gauge_anchor`). Whether that station also holds its constant
-depends on the priors:
-
-- **With a prior,** the prior sees a jump in the common phase at that
-  component, so the pin alone fixes the station's constant. Holding its level
-  as well would pull its bandpass toward a zero mean that nothing measures.
-- **Without a prior,** nothing ties the common phase in that component to the
-  other components. The pin fixes only the sum of that phase and the station's
-  constant, so the station also holds a slot in a component the reference
-  pins. Without that hold, the common phase in the component would be
-  undetermined, and the published phases there would depend on where the solve
-  started.
-
-Any direction left unfixed makes the MAP objective flat along it: the curvature
-is singular there, and the solution along that direction is whatever the start
-gives.
+A group of station gains joined only by baselines with no odd loop (two
+stations, a chain, an even ring) measures the sums ``\ell_a + \ell_b`` but not
+how they divide between the two sides: only the amplitude priors set the
+split, and the solve warns.
 
 ### The prior as a sparse quadratic
 
-A state-space prior's energy over a track, written over its states rather than
+A state-space prior's energy over a chain, written over its states rather than
 through the filter, is a sum of small quadratic terms: for each step between
 samples, ``\tfrac12 (s_k - A_k s_{k-1})^\top Q_k^{-1} (s_k - A_k s_{k-1})``, and
-for a proper start ``\tfrac12 (s_1 - \mu_0)^\top P_0^{-1} (s_1 - \mu_0)``, where
-the first entry of ``s_k`` is the track's value less its mean. Minimized over
-the latent entries of the states (the derivatives of a random walk) and the
-mean's coefficients, this is the energy the Kalman filter gives with the values observed
-exactly, and a flat start is exact: no start term at all, rather than a large
-starting variance (`_track_energy`). The unknowns of one track are its values,
-its latent states and its mean's coefficients, and the terms couple only neighboring
-samples, so the energy of every track is one sparse quadratic. This is the
+for the start ``\tfrac12 (s_1 - \mu_0)^\top P_0^{-1} (s_1 - \mu_0)``, where
+the first entry of ``s_k`` is the chain's parameter. A chain runs over one
+component's parameters of one station, feed node and time segment along
+frequency, one piece per spectral window, which it never crosses. Minimized
+over the latent entries of the states (the derivatives of a random walk), this
+is the energy the Kalman filter gives with the values observed exactly. The
+terms couple only neighboring samples, so the energy of every chain, with the
+data's quadratic in the parameters, is one sparse quadratic. This is the
 smoothing problem written as least squares, which the RTS smoother solves by
 elimination along the chain (Bell 1994).
-
-The source term is frequency-flat, so it absorbs any constant added to a track:
-``\chi^2_J`` is unchanged by it, and the data cannot measure a track's band
-constant. Where a proper prior (an OU prior, or a random walk with an `init`)
-acts on the track, the solve holds the track's first level at zero and lets the
-prior set the constant: the slots are free to move together, so the MAP of
-everything else is that under the prior profiled over the constant. On a track
-no such prior acts on, one slot of the track is held.
 
 ### The step
 
 The objective's gradient is the held-``S`` gradient at ``\hat S``, since
-``\hat S`` is stationary. In one observable's slot values ``x`` (``\phi``, or
-``\ell``), each cell sees ``x_a + \sigma x_b`` with ``\sigma = -1`` for the
-phase and ``+1`` for the log-amplitude, and the two observables decouple. With
-``z_c = \bar u_c r_c``, ``p_c = w_c |u_c|^2``, ``D = \sum_c p_c`` and
-``S = \sum_c z_c / D``, the Hessian of ``\chi^2_J/2`` over the cells is, for the
-phase,
+``\hat S`` is stationary. In one observable's station-gain values ``x``
+(``\phi``, or ``\ell``), each cell sees ``x_a + \sigma x_b`` with
+``\sigma = -1`` for the phase and ``+1`` for the log-amplitude, and the two
+observables decouple. With ``z_c = \bar u_c r_c``, ``p_c = w_c |u_c|^2``,
+``D = \sum_c p_c`` and ``S = \sum_c z_c / D``, the Hessian of ``\chi^2_J/2``
+over the cells is, for the phase,
 
 ```math
 \operatorname{diag}\big(\operatorname{Re}(\bar S z_c)\big) - \operatorname{Re}(z z^{\mathsf H})/D,
@@ -642,38 +626,41 @@ and for the log-amplitude
 \qquad t = \operatorname{Re}(\bar S z).
 ```
 
-Where the model fits the data, ``z = S p``, and both reduce to the Gauss–Newton
-curvature with ``S`` profiled: the held-``S`` curvature ``q_c = |S|^2 p_c`` less
-its Schur complement in ``S``, ``q q^\top / \sum_c q_c``. Where the data are
-weak, ``|\hat S|^2`` holds the noise as well as the signal, and the Gauss–Newton
-form overstates the curvature of a profiled χ² that is nearly flat: along the
-array-wide R–L spectrum, which only the cross-hands measure, by an order of
-magnitude on real data, so Gauss–Newton steps there crawl. The solve takes
-Gauss–Newton steps while they are large, which keeps them in the basin they
-start in, and the exact Hessian once a step moves no gain by more than one
-standard error, or by fewer than ten while the objective falls by more than 1.5
-times what the Gauss–Newton model predicts (`_profile_product!`,
-`_gauss_newton_product!`).
+In the parameters, the gradient is ``J^\top`` times the station gains' and the
+curvature ``J^\top H J``. Where the model fits the data, ``z = S p``, and both
+reduce to the Gauss–Newton curvature with ``S`` profiled: the held-``S``
+curvature ``q_c = |S|^2 p_c`` less its Schur complement in ``S``,
+``q q^\top / \sum_c q_c``. Where the data are weak, ``|\hat S|^2`` holds the
+noise as well as the signal, and the Gauss–Newton form overstates the curvature
+of a profiled χ² that is nearly flat: along the array-wide R–L spectrum, which
+only the cross-hands measure, by an order of magnitude on real data, so
+Gauss–Newton steps there crawl. The solve takes Gauss–Newton steps while they
+are large, which keeps them in the basin they start in, and the exact Hessian
+once a step moves no station gain by more than one standard error, or by fewer
+than ten while the objective falls by more than 1.5 times what the
+Gauss–Newton model predicts (`_profile_product!`, `_gauss_newton_product!`).
 
 Either curvature is dense across frequency, since each ``J`` couples every cell
-of its two tracks, but a product with it is one pass over the cells: the
+of its two stations, but a product with it is one pass over the cells: the
 held-``S`` part is sparse and the rest has rank at most three per ``J``. Each
-step solves the system of the Hessian, the exact prior quadratic and a damping
-``\lambda/2\,\lVert x' - x \rVert^2`` over the slots, over the slots, latent
-states and means, by preconditioned conjugate gradients (LinearSolve.jl's
+step solves, over the parameters and the chains' latent states, the system of
+the Hessian, the exact prior quadratic and a damping
+``\lambda/2\,\sum_j d_j(\theta'_j - \theta_j)^2``, with ``d_j`` parameter ``j``'s
+curvature, so that the damping does not depend on the parameters' units
+(Marquardt 1963), by preconditioned conjugate gradients (LinearSolve.jl's
 `KrylovJL_CG`, stopping at nonpositive curvature). The preconditioner
 (`ProfilePreconditioner`) is the sparse Cholesky factor of the held-``S``
-system, ordered by frequency so that it is banded, balanced on the coarse space
-of the track constants (Mandel 1993): the held-``S`` curvature sees a track's
-constant through every correlation of the track, the profiled one only through
-its prior, and on that space the preconditioner takes the profiled curvature,
-which there is the prior's alone. A step is accepted when it does not raise the
-objective, with ``S`` re-solved, and ``\lambda``, a multiple ``\mu`` of the
-largest data curvature, follows the ratio of the objective's actual decrease
-to the model's predicted one (Madsen, Nielsen & Tingleff 2004).
+system, ordered along each chain so that it is banded, balanced on the coarse
+space of the chains' scan constants (Mandel 1993): the held-``S`` curvature
+sees such a constant through every correlation of the chain, the profiled one
+only through its prior, and on that space the preconditioner takes the
+profiled curvature, which there is the prior's alone. A step is accepted when it
+does not raise the objective, with ``S`` re-solved, and ``\lambda`` follows the
+ratio of the objective's actual decrease to the model's predicted one (Madsen,
+Nielsen & Tingleff 2004).
 
-The solve starts each slot at its own gain estimate given every other gain and
-``S``, repeated with ``S`` re-solved (Salvini & Wijnholds 2014). A phase
+The solve starts each station gain at its own estimate given every other gain
+and ``S``, repeated with ``S`` re-solved (Salvini & Wijnholds 2014). A phase
 spectrum ``\rho(\nu)`` added to one feed of every station leaves every
 same-feed product unchanged and turns each product pairing that feed with
 another by ``\pm\rho``. Only those products measure it, and the estimates the
@@ -687,18 +674,19 @@ earlier feed: with ``S`` profiled, a product group ``J`` lowers the χ² by
 noise alone is χ² with two degrees of freedom. The delay is applied when the
 best trial's false-alarm probability over the grid is below ``10^{-4}``, and
 the solve warns otherwise. The search works on feed indices, so it is the same
-for circular, linear and mixed feeds. The MAP stops
-when the undamped step would move no gain by more than `tolerance` of its
-standard error from the data. The latent states are unknowns of the MAP beside
-the gains: they start at their optimum given the gains and move with each step,
-so the prior energy compared between steps is a sum of whitened innovations at
-given states, free of the rounding of a solve as stiff as the stiffest prior.
-Each step's Krylov solve starts at the current point, so its initial residual
-is the gradient and its stopping rule, a tenth of that residual, bounds the
-step's error relative to the step. Where a slot's phase is held more than
-``\pi/2`` from its own data, by a phase prior or the gauge, the amplitude that
-fits it best is zero; without an amplitude prior the posterior then has no
-mode, and the solve warns.
+for circular, linear and mixed feeds. Each phase chain is then put on its
+branches (below), and the parameters start at the minimum of
+``\tfrac12 \sum_n w_n (J\theta - \hat x)_n^2`` plus the prior energy over the
+station-gain estimates ``\hat x``, one sparse solve.
+
+The MAP stops when the undamped step would move no station gain by more than
+`tolerance` of its standard error from the data. The latent states are
+unknowns of the MAP beside the parameters: they start at their optimum given
+the parameters and move with each step, so the prior energy compared between
+steps is a sum of whitened innovations at given states, free of the rounding
+of a solve as stiff as the stiffest prior. Each step's Krylov solve starts at
+the current point, so its initial residual is the gradient and its stopping
+rule, a tenth of that residual, bounds the step's error relative to the step.
 
 ### Hyperparameters
 
@@ -709,11 +697,11 @@ the posterior of the gains at given ``\psi`` approximated by a Gaussian at its
 mode (Laplace; Tierney & Kadane 1986). Each EM map
 
 1. finds the MAP of the gains under the current ``\psi`` (the step above);
-2. takes, for each track, the posterior means and second moments of its state
-   chain, ``v_k = (s_k, s_{k-1})``, under the Gaussian whose precision is the
-   preconditioner's curvature: held-``S``, except on the track constants, which
-   keep their prior variance;
-3. maximizes, for each track, its expected log prior density plus its
+2. takes, for each chain, the posterior means and second moments of its
+   states, ``v_k = (s_k, s_{k-1})``, under the Gaussian whose precision is the
+   preconditioner's curvature: held-``S``, except on the chains' scan
+   constants, which keep their prior variance;
+3. maximizes, for each chain, its expected log prior density plus its
    hyperprior over the log hyperparameters, within the hyperprior's support,
 
 ```math
@@ -747,14 +735,16 @@ for the array-wide R–L spectrum, so the maps are accelerated by SQUAREM
 a SQUAREM cycle moves no gain by more than `tolerance` of its standard error:
 the gains are what the solve is for, and the hyperparameters they no longer
 depend on, which the data barely measure, would take EM many more cycles. The
-hyperparameters start from type-II MAP on each track alone, taking each slot's
-own estimate given every other gain and ``S`` as an independent measurement;
-for a phase track that start is summed over the branch histories.
+hyperparameters start from type-II MAP on each chain alone, taking each
+station gain's own estimate given every other gain and ``S`` as an independent
+measurement of the chain's parameter, with the scan constants integrated out;
+for a phase chain that start is summed over the branch histories. A chain's
+parameters must each be one station gain's value for that start.
 
 ### Branches
 
-The phase branches are chosen once, from the slot estimates at the start under
-the starting hyperparameters (see
+The phase branches are chosen once per chain, from the station-gain estimates at the start
+under the starting hyperparameters (see
 [Phase tracks and their 2π branches](@ref phase-branches)). The data are
 fringe-corrected before the bandpass, so phase steps along frequency are small,
 and the MAP and EM then move the phases continuously on those branches.
@@ -769,6 +759,9 @@ K. Madsen, H. B. Nielsen, and O. Tingleff (2004), *Methods for Non-Linear Least
 Squares Problems*, 2nd ed., Technical University of Denmark.
 J. Mandel (1993), Balancing domain decomposition, *Communications in Numerical
 Methods in Engineering* 9(3), 233–241.
+D. W. Marquardt (1963), An algorithm for least-squares estimation of nonlinear
+parameters, *Journal of the Society for Industrial and Applied Mathematics*
+11(2), 431–441.
 S. Salvini and S. J. Wijnholds (2014), Fast gain calibration in radio astronomy
 using alternating direction implicit methods: analysis and applications,
 *Astronomy & Astrophysics* 571, A97.
@@ -784,12 +777,13 @@ Statistics* 35(2), 335–353.
 
 ## Where the solvers use this
 
-**Bandpass, [`JointSmoother`](@ref).** Each (station, feed, time segment)
-has one track per spectral window along frequency, and the solve maximizes the
-posterior of every track at once, with the per-scan source term profiled out,
-as described in [The bandpass posterior](@ref bandpass-posterior) above. Each
-phase window is put on its most probable branches once, at the start, and the
-hyperparameters are fit by MAP-EM around the MAP solve.
+**Bandpass, [`JointSmoother`](@ref).** The component with a prior along
+frequency has one chain per (station, feed node, time segment), one piece per
+spectral window, and the solve maximizes the posterior of every component's
+parameters at once, with the per-scan source term profiled out, as described in
+[The bandpass posterior](@ref bandpass-posterior) above. Each phase chain is put
+on its most probable branches once, at the start, and the hyperparameters are
+fit by MAP-EM around the MAP solve.
 
 **Adhoc phase, [`PerTrackAdhocSmoother`](@ref).** After the per-AP solve, each
 (station, feed node) track of a scan is fit on its own: hyperparameters per

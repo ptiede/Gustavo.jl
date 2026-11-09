@@ -116,7 +116,7 @@ _quiet_write(path, ps) = Test.@test_logs (:warn, r"earth_orientation") write_uvf
         data = Base.get_extension(Gustavo, :GustavoFITSFilesExt)._fast_random_read(
             getfield(hdus[1], :data)
         )
-        # Eleven records: the missing slot is not written.
+        # Eleven records: the missing cell is not written.
         @test size(data.data, 1) == 11
         # (time, baseline) order.
         bl = Int.(data.BASELINE)

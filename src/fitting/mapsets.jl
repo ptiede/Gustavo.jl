@@ -30,7 +30,10 @@ averaged = mapsets(groupby(ps, ByScan())) do g
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
     return average(g, ByScan())
 end
-bp = fit(Bandpass(; gauge), ProcessingSet(averaged))
+bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1),
+                         Feed = PerFeed(), prior = OUPrior(; scale = 50e6, σ = 0.1))
+model = GainModel(; phase = (; bandpass), logamp = (; bandpass))
+bp = fit(Bandpass(; model, gauge), ProcessingSet(averaged))
 ```
 """
 function mapsets(f, src; exec::ExecutionConfig = ExecutionConfig())

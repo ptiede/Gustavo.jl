@@ -244,13 +244,13 @@ end
                     closure = FP.Stationization(pfa_max = 1.0e-2),
                     gauge,
                 ),
-                Bandpass(; gauge), AdhocPhase(; gauge),
+                Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(; gauge),
             ),
             ps; exec = ExecutionConfig(),
         )
         @test [s.name for s in sols_full] == [:fringe, :bandpass, :adhoc]
         # Bandpass after the fringe fit alone still solves a :bandpass stage.
-        _, sol_fb = _fit_chain((FringeClosure(; gauge), Bandpass(; gauge)), ps)
+        _, sol_fb = _fit_chain((FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge)), ps)
         @test sol_fb.name === :bandpass && !isempty(sol_fb.components)
 
         # Any real `steer_cells`, and a Float32 station solve, agreeing with the default.
@@ -429,7 +429,7 @@ end
         bp[1, :, :] .= 0
         ps, _ = _build_fringe_ps(; polarizations = products, receptors, noise = 0.3, eltype = ComplexF64, bandpass = bp)
         fr = _fringe_fit(ps, FringeClosure(; gauge))
-        bp_sol = fit(Bandpass(; gauge), _precal(fr, ps))
+        bp_sol = fit(Bandpass(; model = _bandpass_model(), gauge), _precal(fr, ps))
         @test lookup(only(bp_sol[:phase, :bandpass].components).params, Gustavo.Feed) == 1:n
         out = _calibrate_chain([fr, bp_sol], ps; flag_bad = false, apply_flags = false)
         coh = [

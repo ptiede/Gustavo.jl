@@ -173,7 +173,7 @@ component's constructor spelling, never solves to silent zeros), plus
 whole-tree requirements via
 [`validate_model`](@ref Gustavo.Fring.validate_model).
 
-- [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_model(), smoother = ...)`,
+- [`Bandpass`](@ref Gustavo.Bandpass)`(model, smoother = ...)`,
   [`AdhocPhase`](@ref Gustavo.AdhocPhase)`(model = default_adhoc_model(), smoother = ...)`
   and [`FringeClosure`](@ref Gustavo.FringeClosure)`(model = default_fringe_model(), closure = ...)`
   take a `GainModel`; the fringe closure's model has phase components only

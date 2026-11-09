@@ -210,16 +210,16 @@ end
 # matched by name.
 function _flag_unconstrained!(ms::XRadio.MeasurementSet, win::GeometryWindow, solgeom::DataGeometry, flagged)
     isnothing(flagged) && return ms
-    antenna = win.geom.antennas
+    station = Dict(n => i for (i, n) in pairs(win.geom.antennas))
+    unconstrained = Set((station[st], f, s) for (st, f, s) in flagged if haskey(station, st))
     scan = [_solution_scan(solgeom, String(c)) for c in ms[:scan_name]]
     feeds = feed_pairs(ms)
     flag = ms[:flag]
     for (bi, (a, b)) in pairs(win.antennas)
         a == b && continue
-        sa, sb = antenna[a], antenna[b]
         for ti in eachindex(scan), p in axes(feeds, 1)
             fa, fb = feeds[p, bi]
-            ((sa, fa, scan[ti]) in flagged || (sb, fb, scan[ti]) in flagged) || continue
+            ((a, fa, scan[ti]) in unconstrained || (b, fb, scan[ti]) in unconstrained) || continue
             view(flag, Polarization(p), BaselineID(bi), Ti(ti)) .= true
         end
     end
