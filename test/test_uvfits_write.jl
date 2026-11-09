@@ -113,21 +113,25 @@ _quiet_write(path, ps) = Test.@test_logs (:warn, r"earth_orientation") write_uvf
         @test card("CRVAL3") == -1.0 && card("CDELT3") == -1.0
         @test strip(card("BUNIT")) == "JY"
         @test card("BITPIX") == -32
-        data = Base.get_extension(Gustavo, :GustavoFITSFilesExt)._fast_random_read(
-            getfield(hdus[1], :data)
-        )
+        # Reals are written with E exponents, which every FITS reader parses.
+        @test any(c -> occursin(r"= +-?[0-9.]+E[+-]?[0-9]", repr(c)), cards)
+        @test !any(c -> occursin(r"= +-?[0-9.]+D[+-]?[0-9]", repr(c)), cards)
+        lazy = getfield(hdus[1], :data)
+        groups = open(io -> _FITS_EXT.RandomGroups(cards, io, lazy.begpos), lazy.filnam)
+        data = _FITS_EXT._parameters(groups, cards)
+        sample(args...) = _FITS_EXT._sample(groups, args...)
         # Eleven records: the missing cell is not written.
-        @test size(data.data, 1) == 11
+        @test groups.nrecords == 11
         # (time, baseline) order.
         bl = Int.(data.BASELINE)
         @test bl[1:3] == [258, 259, 515]
         @test data[Symbol("UU---SIN")] ≈ args.uvw[:, 1] rtol = _UVW_RTOL
         # On-disk STOKES order is RR, LL; record 1 is AA–BB at the first time,
         # whose LL weight in IF 2 is flagged.
-        @test data.data[1, 3, 2, 1, 2, 1, 1] == -3.0f0
-        w = data.data[3, 3, 2, 1, 1, 1, 1]
+        @test sample(1, 3, 2, 1, 2) == -3.0f0
+        w = sample(3, 3, 2, 1, 1)
         @test iszero(w) && signbit(w)
-        @test iszero(data.data[3, 1, 2, 1, 1, 1, 1])
+        @test iszero(sample(3, 1, 2, 1, 1))
         # DATE is the Julian Date of the day's 0h UT and the fraction of that day.
         @test all(d -> isinteger(d - 0.5), data.DATE[:, 1])
         @test all(0 .<= data.DATE[:, 2] .< 1)

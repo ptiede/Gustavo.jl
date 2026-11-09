@@ -3,6 +3,10 @@ using DimensionalData: DimensionalData, Ti, branches, lookup
 using Dates: Date, DateTime, datetime2julian, unix2datetime
 using XRadio: AbstractMount
 
+# Reals take an E exponent: FITS allows D as well, but FITSIO.jl reads a
+# D-exponent value as a string.
+_card(args...) = Card(args...; exponent = 'E')
+
 # ── Encoders ────────────────────────────────────────────────────────────────
 
 function _encode_aips_baseline(a::Integer, b::Integer)
@@ -451,25 +455,25 @@ function Gustavo.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = 
     instrume = string(get(get(meta, :processor_info, Dict{Symbol, Any}()), :sub_type, ""))
 
     primary_cards = Card[
-        Card("NAXIS", 7), Card("EXTEND", true), Card("BSCALE", 1.0), Card("BZERO", 0.0),
-        Card("OBJECT", only(srcs)), Card("TELESCOP", telescope), Card("INSTRUME", instrume),
-        Card("DATE-OBS", rdate),
+        _card("NAXIS", 7), _card("EXTEND", true), _card("BSCALE", 1.0), _card("BZERO", 0.0),
+        _card("OBJECT", only(srcs)), _card("TELESCOP", telescope), _card("INSTRUME", instrume),
+        _card("DATE-OBS", rdate),
     ]
     bunit = _bunit(units)
-    isnothing(bunit) || push!(primary_cards, Card("BUNIT", bunit))
+    isnothing(bunit) || push!(primary_cards, _card("BUNIT", bunit))
     axis_cards = (
         ("COMPLEX", 1.0, 1.0), ("STOKES", Float64(first(codes)), -1.0),
         ("FREQ", layout.ref_freq, first(layout.ch_width)), ("IF", 1.0, 1.0),
         ("RA", ra, 1.0), ("DEC", dec, 1.0),
     )
-    push!(primary_cards, Card("EQUINOX", 2000.0), Card("EPOCH", 2000.0))
+    push!(primary_cards, _card("EQUINOX", 2000.0), _card("EPOCH", 2000.0))
     for (n, (ctype, crval, cdelt)) in zip(2:7, axis_cards)
         push!(
-            primary_cards, Card("CTYPE$n", ctype), Card("CRVAL$n", crval),
-            Card("CDELT$n", cdelt), Card("CRPIX$n", 1.0), Card("CROTA$n", 0.0),
+            primary_cards, _card("CTYPE$n", ctype), _card("CRVAL$n", crval),
+            _card("CDELT$n", cdelt), _card("CRPIX$n", 1.0), _card("CROTA$n", 0.0),
         )
     end
-    push!(primary_cards, Card("OBSRA", ra), Card("OBSDEC", dec))
+    push!(primary_cards, _card("OBSRA", ra), _card("OBSDEC", dec))
     params = (;
         var"UU---SIN" = uu, var"VV---SIN" = vv, var"WW---SIN" = ww,
         BASELINE = baseline, DATE = date, INTTIM = inttim, data,
@@ -494,16 +498,16 @@ function Gustavo.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = 
     )
     an = HDU(
         Bintable, an_data, Card[
-            Card("EXTNAME", "AIPS AN"), Card("EXTVER", Int32(1)),
-            Card("ARRAYX", 0.0), Card("ARRAYY", 0.0), Card("ARRAYZ", 0.0),
-            Card("ARRNAM", arrnam), Card("FREQ", layout.ref_freq), Card("RDATE", rdate),
-            Card("GSTIA0", Float64(eo.gst_iat0)), Card("DEGPDY", Float64(eo.earth_rot_rate)),
-            Card("UT1UTC", Float64(eo.ut1utc)), Card("POLARX", Float64(eo.polarx)),
-            Card("POLARY", Float64(eo.polary)), Card("DATUTC", Float64(eo.datutc)),
-            Card("TIMSYS", "UTC"), Card("FRAME", "ITRF"),
-            Card("XYZHAND", string(eo.xyzhand)), Card("POLTYPE", string(eo.poltype)),
-            Card("NUMORB", Int32(0)), Card("NO_IF", Int32(layout.nif)),
-            Card("NOPCAL", Int32(0)), Card("FREQID", Int32(1)),
+            _card("EXTNAME", "AIPS AN"), _card("EXTVER", Int32(1)),
+            _card("ARRAYX", 0.0), _card("ARRAYY", 0.0), _card("ARRAYZ", 0.0),
+            _card("ARRNAM", arrnam), _card("FREQ", layout.ref_freq), _card("RDATE", rdate),
+            _card("GSTIA0", Float64(eo.gst_iat0)), _card("DEGPDY", Float64(eo.earth_rot_rate)),
+            _card("UT1UTC", Float64(eo.ut1utc)), _card("POLARX", Float64(eo.polarx)),
+            _card("POLARY", Float64(eo.polary)), _card("DATUTC", Float64(eo.datutc)),
+            _card("TIMSYS", "UTC"), _card("FRAME", "ITRF"),
+            _card("XYZHAND", string(eo.xyzhand)), _card("POLTYPE", string(eo.poltype)),
+            _card("NUMORB", Int32(0)), _card("NO_IF", Int32(layout.nif)),
+            _card("NOPCAL", Int32(0)), _card("FREQID", Int32(1)),
         ]
     )
     fq = HDU(
@@ -513,7 +517,7 @@ function Gustavo.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = 
             var"CH WIDTH" = _fq_column(Float32.(layout.ch_width)),
             var"TOTAL BANDWIDTH" = _fq_column(Float32.(layout.total_bandwidth)),
             SIDEBAND = _fq_column(Int32.(layout.sideband)),
-        ), Card[Card("EXTNAME", "AIPS FQ"), Card("NO_IF", Int32(layout.nif))]
+        ), Card[_card("EXTNAME", "AIPS FQ"), _card("NO_IF", Int32(layout.nif))]
     )
     nscan = length(nx.time)
     nx_hdu = HDU(
@@ -525,7 +529,7 @@ function Gustavo.write_uvfits(path, ps::XRadio.ProcessingSet; overwrite::Bool = 
             var"FREQ ID" = ones(Int32, nscan),
             var"START VIS" = nx.start,
             var"END VIS" = nx.stop,
-        ), Card[Card("EXTNAME", "AIPS NX"), Card("EXTVER", Int32(1))]
+        ), Card[_card("EXTNAME", "AIPS NX"), _card("EXTVER", Int32(1))]
     )
     write(path, HDU[primary, an, fq, nx_hdu])
     return path

@@ -1,6 +1,7 @@
 using FITSFiles
 using FITSFiles: HDU
 using Dates: Dates, Date, DateTime, datetime2julian, @dateformat_str
+using Mmap: Mmap
 using OrderedCollections: OrderedDict
 import XRadio
 using XRadio:
@@ -393,9 +394,41 @@ end
 
 _is_lazy_random(data) = data isa FITSFiles.LazyStructuredData && data.hdu_type === FITSFiles.Random
 
-# The data array as `(record, complex, stokes, channel, IF)`; a file with no IF
-# axis has one IF.
-function _record_cube(cards, data)
+"""
+    RandomGroups{T, A, S}
+
+The random-groups data unit of a UVFITS primary HDU, read in place: `data`
+holds the unit's values in file (big-endian) byte order, typically a memory
+map of the file. Each of the `nrecords` records is `reclen` values: `nparams`
+parameters, then the data array, whose COMPLEX, STOKES, FREQ and IF axes have
+lengths `dims` and element strides `strides`. `scale` and `zero` are the data
+array's BSCALE and BZERO.
+"""
+struct RandomGroups{T, A <: AbstractVector{T}, S <: Real}
+    data::A
+    nparams::Int
+    reclen::Int
+    nrecords::Int
+    dims::NTuple{4, Int}
+    strides::NTuple{4, Int}
+    scale::S
+    zero::S
+end
+
+function _random_groups_type(cards)
+    bitpix = card_value(cards, "BITPIX")
+    bitpix == -32 && return Float32
+    bitpix == -64 && return Float64
+    throw(ArgumentError("load_uvfits: BITPIX = $bitpix; only Float32 (-32) and Float64 (-64) random groups are supported"))
+end
+
+# The data unit of `io` starting at byte `offset`, laid out as `cards` state.
+function RandomGroups(cards, io::IO, offset::Integer)
+    T = _random_groups_type(cards)
+    naxis = _naxis(cards)
+    len = [Int(card_value(cards, "NAXIS$i")) for i in 1:naxis]
+    first(len) == 0 || throw(ArgumentError("load_uvfits: NAXIS1 = $(first(len)); a random-groups primary HDU has NAXIS1 = 0"))
+    stride = cumprod([1; len[2:(end - 1)]])
     function axis(name)
         i = _find_axis(cards, ==(name))
         isnothing(i) && throw(ArgumentError("load_uvfits: the primary HDU has no $name axis"))
@@ -403,33 +436,68 @@ function _record_cube(cards, data)
     end
     complex_, stokes, freq = axis("COMPLEX"), axis("STOKES"), axis("FREQ")
     if_ = _find_axis(cards, ==("IF"))
-    if isnothing(if_)
-        data = reshape(data, size(data)..., 1)
-        if_ = ndims(data)
-    end
-    size(data, complex_) == 3 || throw(
+    len[complex_] == 3 || throw(
         ArgumentError(
-            "load_uvfits: the COMPLEX axis has $(size(data, complex_)) entries; " *
+            "load_uvfits: the COMPLEX axis has $(len[complex_]) entries; " *
                 "a record states real, imaginary and weight"
         )
     )
-    rest = setdiff(2:ndims(data), (complex_, stokes, freq, if_))
-    all(d -> size(data, d) == 1, rest) || throw(
+    rest = setdiff(2:naxis, (complex_, stokes, freq, something(if_, 0)))
+    all(d -> len[d] == 1, rest) || throw(
         ArgumentError("load_uvfits: the data array has more than one pixel along an axis other than COMPLEX, STOKES, FREQ and IF")
     )
-    cube = permutedims(data, (1, complex_, stokes, freq, if_, rest...))
-    return reshape(cube, ntuple(d -> size(cube, d), 5))
+    axes_ = (complex_, stokes, freq)
+    dims = (map(d -> len[d], axes_)..., isnothing(if_) ? 1 : len[if_])
+    strides = (map(d -> stride[d - 1], axes_)..., isnothing(if_) ? 0 : stride[if_ - 1])
+    nparams = Int(something(card_value(cards, "PCOUNT"), 0))
+    reclen = nparams + prod(len[2:end])
+    nrecords = Int(something(card_value(cards, "GCOUNT"), 1))
+    data = Mmap.mmap(io, Vector{T}, nrecords * reclen, offset)
+    scale, zero = promote(something(card_value(cards, "BSCALE"), 1.0), something(card_value(cards, "BZERO"), 0.0))
+    return RandomGroups(data, nparams, reclen, nrecords, dims, strides, scale, zero)
 end
 
-# The spectral windows of one FQ row, each as its setup and its
-# `(record, polarization, channel)` visibilities and weights. IFs of one channel
-# are the channels of one window; IFs of several channels are one window each,
-# channel `k` of IF `i` at `IF FREQ[i] + (k - CRPIX) * CH WIDTH[i]` from the
-# reference frequency.
-function _windows(setup, vis_raw, weights_raw, crpix)
-    nchan = size(vis_raw, 3)
+_record_start(g::RandomGroups, r) = firstindex(g.data) + (r - 1) * g.reclen
+
+# Value `part` (1 real, 2 imaginary, 3 weight) of polarization `p`, channel `c`
+# and IF `i` in record `r`, with BSCALE and BZERO applied in the file's type.
+@inline function _sample(g::RandomGroups{T}, r, part, p, c, i) where {T}
+    s = g.strides
+    x = ntoh(g.data[_record_start(g, r) + g.nparams + (part - 1) * s[1] + (p - 1) * s[2] + (c - 1) * s[3] + (i - 1) * s[4]])
+    return isone(g.scale) && iszero(g.zero) ? x : T(g.zero + g.scale * x)
+end
+
+# The parameters by PTYPE name: a Vector for a unique name and an
+# `nrecords × k` Matrix for a name given `k` times (AIPS writes DATE twice).
+# A parameter with a PSCAL or PZERO is scaled in Float64: a Julian-day PZERO
+# parses as Float32, which has no room for the time of day.
+function _parameters(g::RandomGroups{T}, cards) where {T}
+    raw = Matrix{T}(undef, g.nparams, g.nrecords)
+    for r in axes(raw, 2), j in axes(raw, 1)
+        raw[j, r] = ntoh(g.data[_record_start(g, r) + j - 1])
+    end
+    names = [rstrip(string(card_value(cards, "PTYPE$j"))) for j in 1:g.nparams]
+    columns = map(unique(names)) do name
+        js = findall(==(name), names)
+        values = map(js) do j
+            v = raw[j, :]
+            scale, zero = something(card_value(cards, "PSCAL$j"), 1), something(card_value(cards, "PZERO$j"), 0)
+            isone(scale) && iszero(zero) ? v : Float64(zero) .+ Float64(scale) .* v
+        end
+        Symbol(name) => (length(js) == 1 ? only(values) : reduce(hcat, values))
+    end
+    return (; columns...)
+end
+
+# The spectral windows of one FQ row, each as its setup and the `(channel, IF)`
+# cells of the data array that are its channels. IFs of one channel are the
+# channels of one window; IFs of several channels are one window each, channel
+# `k` of IF `i` at `IF FREQ[i] + (k - CRPIX) * CH WIDTH[i]` from the reference
+# frequency.
+function _windows(setup, data_unit::RandomGroups, crpix)
+    _, _, nchan, nif = data_unit.dims
     if nchan == 1
-        return [(; setup, vis = view(vis_raw, :, :, 1, :), weight = view(weights_raw, :, :, 1, :))]
+        return [(; setup, cells = [(1, i) for i in 1:nif])]
     end
     return map(eachindex(setup.channel_freqs)) do i
         channels = setup.channel_freqs[i] .+ ((1:nchan) .- crpix) .* setup.ch_width[i]
@@ -437,7 +505,7 @@ function _windows(setup, vis_raw, weights_raw, crpix)
             setup.ref_freq, channel_freqs = channels, ch_width = setup.ch_width[i:i],
             total_bandwidth = setup.total_bandwidth[i:i], sideband = setup.sideband[i:i],
         )
-        (; setup = window, vis = view(vis_raw, :, :, :, i), weight = view(weights_raw, :, :, :, i))
+        (; setup = window, cells = [(c, i) for c in 1:nchan])
     end
 end
 
@@ -467,7 +535,8 @@ function _read_uvfits(path, element_type, gap)
                 "visibilities as random groups in the primary HDU; check that the file is UVFITS."
         )
     )
-    dt = _fast_random_read(primary_lazy)
+    data_unit = open(io -> RandomGroups(cards, io, primary_lazy.begpos), primary_lazy.filnam)
+    dt = _parameters(data_unit, cards)
     # Multi-AN-extver files carry one AN table per subarray.
     an_hdus = HDU[]
     fq_hdu = nothing
@@ -485,22 +554,12 @@ function _read_uvfits(path, element_type, gap)
     isempty(an_hdus) && error("load_uvfits: no AIPS AN HDU found in $(path)")
     isnothing(fq_hdu) && error("load_uvfits: no AIPS FQ HDU found in $(path)")
 
-    raw = _record_cube(cards, dt.data)
-    T = isnothing(element_type) ? eltype(raw) : element_type
+    T = isnothing(element_type) ? eltype(data_unit.data) : element_type
 
-    aips_codes, pol_labels, perm = parse_stokes_axis(cards, size(raw, 3))
-    # Read the visibilities verbatim. AIPS random-groups UVFITS shares MSv4's
-    # phase convention — both are the AIPS/CASA/casacore sense, which is the
-    # conjugate of FITS-IDI's V = ⟨E_a1 · conj(E_a2)⟩ (AIPS Memo 114r §2.1;
-    # casacore FitsIDItoMS.cc: "FITS-IDI convention is conjugate of AIPS and CASA
-    # convention"). (u,v,w) and the 256·a1+a2 baseline codes agree too, so only
-    # UVW's units change on this boundary.
-    vis_raw = Complex{T}.(view(raw, :, 1, perm, :, :), view(raw, :, 2, perm, :, :))
-    weights_raw = T.(view(raw, :, 3, perm, :, :))
-
+    aips_codes, pol_labels, perm = parse_stokes_axis(cards, data_unit.dims[2])
     antenna_tables = [_read_antenna_table(h) for h in an_hdus]
     _check_stokes_vs_poltya(aips_codes, first(antenna_tables))
-    freq_setups, fq_frqsels = _read_frequency_setups(cards, fq_hdu.data, size(raw, 5))
+    freq_setups, fq_frqsels = _read_frequency_setups(cards, fq_hdu.data, data_unit.dims[4])
     src_info = _build_source_info(primary_hdu)
 
     # AIPS UVFITS stores DATE as two PTYPE columns, split one of two ways:
@@ -672,6 +731,7 @@ function _read_uvfits(path, element_type, gap)
     isempty(groups) && error("load_uvfits: no records in $(path)")
 
     shared = (;
+        data_unit, stokes_perm = perm, unrecorded = Complex{T}(NaN, NaN),
         uvw_raw, obs_time, bl_pairs, inttim, pol_labels,
         units = _visibility_units(cards, path),
         source = src_info,
@@ -690,7 +750,7 @@ function _read_uvfits(path, element_type, gap)
     freq_axis = _find_axis(cards, ==("FREQ"))
     crpix = Float64(something(card_value(cards, "CRPIX$freq_axis"), 1.0))
     for ((scan, spw, sub), records) in groups
-        windows = _windows(freq_setups[spw], vis_raw, weights_raw, crpix)
+        windows = _windows(freq_setups[spw], data_unit, crpix)
         for (w, window) in pairs(windows)
             spw_id = (spw - 1) * length(windows) + w - 1
             parts = [source_key, "spw_$spw_id"]
@@ -704,102 +764,6 @@ function _read_uvfits(path, element_type, gap)
         end
     end
     return XRadio.ProcessingSet(sets)
-end
-
-# The random-group data section read with one `read!` into a single buffer,
-# where FITSFiles allocates a `Vector` per record. Returns a NamedTuple keyed
-# like `read(io, ::Type{Random}, …)` on the same file: one entry per PTYPE name
-# (Vector for unique names, Matrix for duplicates) plus `:data` of shape
-# `(N, format.shape…)`. The two-method split is a function barrier: the body
-# runs with `T` concrete.
-function _fast_random_read(lazy::FITSFiles.LazyStructuredData)
-    T = lazy.format.type
-    T === Float32 || T === Float64 ||
-        error("_fast_random_read: only Float32/Float64 random groups supported (got $T)")
-    return _fast_random_read(T, lazy)
-end
-
-function _fast_random_read(::Type{T}, lazy::FITSFiles.LazyStructuredData) where {T <: AbstractFloat}
-    fmt = lazy.format
-    fields = lazy.fields::AbstractVector{<:FITSFiles.AbstractField}
-    P = fmt.param::Int
-    N = fmt.group::Int
-    leng_data = prod(fmt.shape)::Int
-    L = P + leng_data
-    total = N * L
-    buf = Vector{T}(undef, total)
-    open(lazy.filnam) do io
-        seek(io, lazy.begpos)
-        read!(io, buf)
-    end
-    for i in eachindex(buf)
-        buf[i] = ntoh(buf[i])
-    end
-    # View the buffer as `(L, N)`: column j holds the j-th record laid
-    # out as `[PTYPE_1, …, PTYPE_P, data_1, …, data_leng_data]`.
-    rec = reshape(buf, L, N)
-
-    data_field = fields[end]
-    # The copy decouples the data block from the PTYPE block so `buf` can be freed.
-    data_view = view(rec, (P + 1):L, :)
-    data_perm = permutedims(data_view, (2, 1))
-    data_block = reshape(data_perm, N, fmt.shape...)
-    # Apply BZERO/BSCALE if present (canonical UVFITS files have unity).
-    if !ismissing(data_field.zero) && !ismissing(data_field.scale)
-        if data_field.zero != 0 || data_field.scale != 1
-            @inbounds @simd for i in eachindex(data_block)
-                data_block[i] = data_field.zero + data_field.scale * data_block[i]
-            end
-        end
-    end
-
-    # Group PTYPE columns by name (duplicate names → Matrix; unique → Vector).
-    name_indices = Dict{String, Vector{Int}}()
-    name_order = String[]
-    for j in 1:P
-        name = String(fields[j].name)
-        if !haskey(name_indices, name)
-            name_indices[name] = Int[]
-            push!(name_order, name)
-        end
-        push!(name_indices[name], j)
-    end
-    pairs = Pair{Symbol, Any}[]
-    for name in name_order
-        ndx = name_indices[name]
-        col = if length(ndx) == 1
-            fld = fields[ndx[1]]
-            v = Vector{T}(undef, N)
-            @inbounds for j in 1:N
-                v[j] = rec[ndx[1], j]
-            end
-            if !ismissing(fld.zero) && !ismissing(fld.scale) &&
-                    (fld.zero != 0 || fld.scale != 1)
-                # Scale in the promoted type, as FITSFiles does.
-                fld.zero .+ fld.scale .* v
-            else
-                v
-            end
-        else
-            m = Matrix{T}(undef, N, length(ndx))
-            @inbounds for (k, fi) in enumerate(ndx)
-                fld = fields[fi]
-                for j in 1:N
-                    m[j, k] = rec[fi, j]
-                end
-                if !ismissing(fld.zero) && !ismissing(fld.scale) &&
-                        (fld.zero != 0 || fld.scale != 1)
-                    for j in 1:N
-                        m[j, k] = fld.zero + fld.scale * m[j, k]
-                    end
-                end
-            end
-            m
-        end
-        push!(pairs, Symbol(name) => col)
-    end
-    push!(pairs, :data => data_block)
-    return (; pairs...)
 end
 
 # Parse `array_obs.rdate` to a Julian Day at 0h UT. Anchors the AIPS NX table,
@@ -879,11 +843,11 @@ function _measurement_set(shared, records, scan_name, spw_id, window, tab)
         throw(ArgumentError("load_uvfits: BASELINE names antenna $a, which the AN table does not number"))
     end
 
-    setup, vis_raw, weights_raw = window.setup, window.vis, window.weight
-    npol, nchan = size(vis_raw, 2), size(vis_raw, 3)
-    C = eltype(vis_raw)
+    setup, cells, data_unit, perm = window.setup, window.cells, shared.data_unit, shared.stokes_perm
+    npol, nchan = length(perm), length(cells)
+    C = typeof(shared.unrecorded)
     shape = (npol, nchan, length(pairs_), length(times))
-    vis = fill(C(NaN, NaN), shape)
+    vis = fill(shared.unrecorded, shape)
     weight = zeros(real(C), shape)
     flag = trues(shape)
     # `Float64` whatever the science arrays are: a VLBI baseline is ~1e7 m and
@@ -911,13 +875,21 @@ function _measurement_set(shared, records, scan_name, spw_id, window, tab)
             uvw[axis, b, k] = (reversed ? -1 : 1) * Float64(shared.uvw_raw[r, axis]) * _C_LIGHT
         end
         isnothing(effective) || (effective[b, k] = shared.inttim[r])
-        for c in 1:nchan, p in 1:npol
-            w = weights_raw[r, p, c]
+        for (c, (f, i)) in pairs(cells), p in 1:npol
+            sample(part) = _sample(data_unit, r, part, perm[p], f, i)
+            w = real(C)(sample(3))
             isfinite(w) || throw(
                 ArgumentError("load_uvfits: record $r carries weight $w, which states neither a weight nor a flag")
             )
             q = reversed ? swapped[p] : p
-            vis[q, c, b, k] = reversed ? conj(vis_raw[r, p, c]) : vis_raw[r, p, c]
+            # Read the visibilities verbatim. AIPS random-groups UVFITS shares MSv4's
+            # phase convention — both are the AIPS/CASA/casacore sense, which is the
+            # conjugate of FITS-IDI's V = ⟨E_a1 · conj(E_a2)⟩ (AIPS Memo 114r §2.1;
+            # casacore FitsIDItoMS.cc: "FITS-IDI convention is conjugate of AIPS and CASA
+            # convention"). (u,v,w) and the 256·a1+a2 baseline codes agree too, so only
+            # UVW's units change on this boundary.
+            v = C(sample(1), sample(2))
+            vis[q, c, b, k] = reversed ? conj(v) : v
             # UVFITS records a flag as a negative weight, `-0.0` included; its
             # magnitude is the weight the sample would have had.
             weight[q, c, b, k] = abs(w)
