@@ -11,7 +11,7 @@ module Fring
 
 using OhMyThreads: tforeach, tmap, DynamicScheduler, SerialScheduler, TaskLocalValue
 using ..Gustavo: Frequency, BaselineID, Feed, FeedNode, Polarization, Scan, AntennaPair, FeedPair, AntennaName,
-    feed_pairs, check_layer_axes, _cell_plane
+    feed_pairs, check_layer_axes, _cell_plane, max_tasks
 using ..Calibration
 import XRadio
 import LinearSolve
@@ -20,20 +20,24 @@ using OrderedCollections: OrderedDict
 using DensityInterface: logdensityof
 using Distributions: LogNormal, Chisq, ccdf
 using ..Calibration: ComponentPlan, GeometryWindow,
-    _flatten_components, _component_leaf, _feed_node, nfeed_blocks, _block_index, component_is_per_scan,
+    _flatten_components, _component_leaf, _feed_node, nfeed_blocks, nparams_per_block, _block_index, component_is_per_scan,
     _segment_lookup, _frequency_segment_lookup, _time_segment_lookup,
     _freq_group_ranges, _init_moments, _call_string, _gauge_system, _gauge_for, _leaf_paths
 # Numeric kernels the model layer keeps off its public surface.
-using ..Calibration: weighted_regularized_least_squares, ConstrainedWLS, FactoredWLS,
+using ..Calibration: weighted_regularized_least_squares, FactoredWLS,
     unwrap_phase_track, connected_components
 using FFTW: fft, fftfreq, plan_fft, MEASURE
 import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack, @d
 using Statistics: median, mean
 using LinearAlgebra
-using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nnz, nzrange, nonzeros, rowvals, CHOLMOD
+using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nnz, nzrange, nonzeros, rowvals, blockdiag, dropzeros!, CHOLMOD
 import Graphs
 using StaticArrays: SMatrix, SVector, MVector, SOneTo, StaticVector
+using DifferentiationInterface: AutoSparse, AutoForwardDiff, prepare_jacobian, jacobian
+using SparseConnectivityTracer: TracerSparsityDetector
+using SparseMatrixColorings: GreedyColoringAlgorithm
+import ForwardDiff
 
 include("Fring/search.jl")
 include("Fring/stationize.jl")
@@ -53,10 +57,11 @@ include("Fring/search_stage.jl")
 include("Fring/model_plans.jl")
 include("Fring/bandpass_stage.jl")
 include("Fring/bandpass_data.jl")
+include("Fring/station_gains.jl")
 include("Fring/bandpass_priors.jl")
 include("Fring/bandpass_map.jl")
 include("Fring/bandpass_solve.jl")
-include("Fring/bandpass_scan.jl")
+include("Fring/joint_gains.jl")
 include("Fring/coherence.jl")
 include("Fring/diagnostics.jl")
 include("Fring/bandpass_diagnostics.jl")
@@ -105,7 +110,6 @@ export Stationization, antenna_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy, OutlierMixture
 export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointKalmanSmoother
 export solve_adhoc_phasing, default_adhoc_model, default_adhoc_prior
-export default_bandpass_model
 export JointSmoother
 export TrackStatus, TrackNoData, TrackSolved, TrackFlat
 export fringe_snr_table, fringe_detections, cat_scans

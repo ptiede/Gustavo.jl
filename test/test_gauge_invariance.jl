@@ -29,7 +29,7 @@ end
 function _fit_each(ps, gauge)
     fringe = _fringe_fit(ps, FringeClosure(; gauge))
     corrected = calibrate(fringe, ps; flag_bad = false, apply_flags = false)
-    bandpass = Bandpass(; gauge, smoother = Gustavo.Fring.JointSmoother(; tolerance = 1.0e-6))
+    bandpass = Bandpass(; model = _bandpass_model(), gauge, smoother = Gustavo.Fring.JointSmoother(; tolerance = 1.0e-6))
     return (;
         fringe, pooled = _fringe_fit(ps, FringeClosure(; model = default_fringe_model(rel_time = CAL.GlobalTime()), gauge)),
         bandpass = fit(bandpass, corrected), adhoc = fit(AdhocPhase(; gauge), corrected),
@@ -43,7 +43,7 @@ end
 
     @testset "baseline products do not depend on the gauge" begin
         pinned = _fit_each(ps64, PinAntenna([3, 1]))
-        # The bandpass gauge enters only through a phase prior, which the default model lacks.
+        # The bandpass gauge moves the phases only along directions the products do not see.
         for name in keys(zs)
             dphase, dlogamp = _baseline_product_difference(zs[name], pinned[name])
             @test dphase < 1.0e-6

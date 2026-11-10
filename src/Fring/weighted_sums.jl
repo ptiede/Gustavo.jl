@@ -82,8 +82,8 @@ The distinct station pairs among `pairs` (antenna-name tuples), ordered by
 would conjugate each other.
 """
 function _canonical_antenna_pairs(pairs, geom::DataGeometry)
-    slot = Dict(n => i for (i, n) in Base.pairs(geom.antennas))
-    antenna(n) = get(slot, n) do
+    index = Dict(n => i for (i, n) in Base.pairs(geom.antennas))
+    antenna(n) = get(index, n) do
         throw(ArgumentError("baseline antenna `$n` is not among the geometry's antennas, " * join(geom.antennas, ", ")))
     end
     order = Dict((a, b) => (antenna(a), antenna(b)) for (a, b) in pairs)

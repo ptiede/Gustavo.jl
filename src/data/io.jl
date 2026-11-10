@@ -26,7 +26,7 @@ when it holds several, each IF is a window of its own, numbered
 `uncalib`); a file with none
 is written `uncalib`, with a warning. Where the file states `INTTIM`, each record's
 value is written to `effective_integration_time` over `(baseline_id, time)`, 0
-for a slot no record fills, and the time axis' nominal `integration_time` is the
+for a cell no record fills, and the time axis' nominal `integration_time` is the
 largest of them; otherwise `effective_integration_time` is absent and
 `integration_time` is the smallest positive spacing of the scan's times.
 
@@ -38,7 +38,7 @@ A record's weight `w` becomes:
 | `w < 0`, `-0.0`  | `abs(w)` | `true`  |
 | no record        | `0`      | `true`  |
 
-with the visibility read as stored, or `NaN` for a (time, baseline) slot no
+with the visibility read as stored, or `NaN` for a (time, baseline) cell no
 record fills.
 
 `element_type` is the real float type the visibilities and weights are stored

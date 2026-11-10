@@ -4,21 +4,21 @@
 # components and implements `solve`, reading the data through `each_group`.
 
 """
-    Bandpass(; gauge = ZeroSumPhase(), model = default_bandpass_model(), smoother = JointSmoother())
+    Bandpass(; model, gauge = ZeroSumPhase(), smoother = JointSmoother())
 
 The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier solutions have already been
 applied, over every scan it is given. What is fit
-is `model`, a [`GainModel`](@ref) — see [`Fring.default_bandpass_model`](@ref) for the
-default and the component form `JointSmoother` accepts; each component's prior
-states how its values relate within a spectral window. How it is solved
+is `model`, a [`GainModel`](@ref) whose every component carries a prior — see
+[`Fring.JointSmoother`](@ref) for the components it accepts; a prior along
+frequency states how a component's values relate within a spectral window. How it is solved
 lives on `smoother`, a [`Fring.JointSmoother`](@ref), which fits the complex visibilities
 against an explicit per-scan source coherence and so does not assume the
 calibrator is unresolved and unpolarized. `gauge`, an
 [`AbstractGauge`](@ref), references the bandpass phase: `JointSmoother`
-imposes its constraints exactly in every step. `JointSmoother` solves one complex gain per
-(station, feed, frequency segment); a phase-only or amplitude-only model holds
-the other half at zero. The model is self-contained, so fitting the bandpass
+moves the solved phases onto its constraints after the fit, along the phases
+the data leave free. A phase-only or amplitude-only model holds the other half
+at zero. The model is self-contained, so fitting the bandpass
 before or after the fringe closure is equally legal.
 
 The phase the data leave free is a spectrum common to every station.
@@ -30,10 +30,10 @@ The bandpass is fit on data the fringe solution has already corrected, for
 example on calibrator scans held in memory:
 
     fr = fit(FringeClosure(; gauge), fit(FringeSearch(), calibrator_scans))
-    bp = fit(Bandpass(; gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
+    bp = fit(Bandpass(; model, gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
 """
 Base.@kwdef struct Bandpass{M <: GainModel, G <: AbstractGauge} <: AbstractSolver
-    model::M = Fring.default_bandpass_model()
+    model::M
     smoother::Fring.JointSmoother = Fring.JointSmoother()
     gauge::G = ZeroSumPhase()
     function Bandpass(model::M, smoother, gauge::G) where {M, G}
@@ -141,13 +141,10 @@ end
 
 model_components(s::Bandpass, spec) = _vet_model(
     s.smoother, s.model,
-    "`JointSmoother` fits `GainComponent(ConstantTerm(); " *
-        "Ti = <GlobalTime, InstrumentScans or TimeBlocks>, Frequency = <any " *
-        "segmentation>, Feed = PerFeed(), prior = <nothing, or a RandomWalkPrior, " *
-        "OUPrior or CARMAPrior along Frequency>)` — a time segmentation whose segments each span " *
-        "several scans; and beside a shape, per-scan terms: any term with " *
-        "`Ti = PerScan()` and no prior. A `PerIntegration` segment is not fitted. See " *
-        "`default_bandpass_model` and `JointSmoother`.",
+    "`JointSmoother` fits components of any term with `Ti = <PerScan, GlobalTime, " *
+        "InstrumentScans or TimeBlocks>` — a time segmentation whose segments are whole " *
+        "scans — and `prior = <an IIDPrior, or an OUPrior, a CARMAPrior or a " *
+        "RandomWalkPrior with an init along Frequency>`. See `JointSmoother`.",
     spec,
 )
 

@@ -1028,7 +1028,7 @@ end
 # change its feed basis by the unitary `U`, in the sums `rbar[bl, product, ap]`.
 function relabel_antenna(rbar, bl_pairs, pols, s; σ = nothing, U = nothing)
     out = copy(rbar)
-    slot = Dict(p => i for (i, p) in pairs(pols))
+    index = Dict(p => i for (i, p) in pairs(pols))
     for (bi, (a, b)) in pairs(bl_pairs), ap in axes(rbar, 3)
         (a == s || b == s) || continue
         Z = zeros(eltype(rbar), 2, 2)
