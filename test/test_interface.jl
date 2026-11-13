@@ -27,7 +27,7 @@ Gustavo.solve(::_BadInfoSolver, ctx) = 1.0
 struct _OpaqueTerm end
 
 # The fringe closure, bandpass and adhoc fits at defaults.
-_full_chain(; gauge = PinAntenna(1)) = (FringeClosure(; gauge), Bandpass(; gauge), AdhocPhase(; gauge))
+_full_chain(; gauge = PinAntenna(1)) = (FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge), Adhoc(; gauge))
 
 # Every parameter of a solution, in component order.
 _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
@@ -59,8 +59,8 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
     end
 
     @testset "built-in solver declarations" begin
-        @test Gustavo.solution_name(Bandpass(; gauge)) == :bandpass
-        @test Gustavo.solution_name(AdhocPhase(; gauge)) == :adhoc
+        @test Gustavo.solution_name(Bandpass(; model = _bandpass_model(), gauge)) == :bandpass
+        @test Gustavo.solution_name(Adhoc(; gauge)) == :adhoc
         # The default fringe model (every term per-scan) closes each scan on
         # its own.
         @test Gustavo._closes_per_scan(default_fringe_model())
@@ -90,20 +90,20 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
         # subset exactly as a fit on the subset alone does only if each of its
         # scans' gains lands on that scan.
         fr3 = _fringe_fit(sub, FringeClosure(; gauge))
-        bp_sub = fit(Bandpass(; gauge), _precal(fr, sub))
-        @test _all_params(bp_sub) ≈ _all_params(fit(Bandpass(; gauge), _precal(fr3, sub))) atol = 1.0e-10
+        bp_sub = fit(Bandpass(; model = _bandpass_model(), gauge), _precal(fr, sub))
+        @test _all_params(bp_sub) ≈ _all_params(fit(Bandpass(; model = _bandpass_model(), gauge), _precal(fr3, sub))) atol = 1.0e-10
         # Noise-free and time-constant: one scan determines the bandpass all three do.
-        @test maximum(abs, _all_params(bp_sub) .- _all_params(fit(Bandpass(; gauge), _precal(fr, ps)))) < 1.0e-6
+        @test maximum(abs, _all_params(bp_sub) .- _all_params(fit(Bandpass(; model = _bandpass_model(), gauge), _precal(fr, ps)))) < 1.0e-6
 
         corrected = _precal(fr, ps)
         calibrate!(bp_sub, corrected; flag_bad = false, apply_flags = false)
-        sol = fit(AdhocPhase(; gauge), corrected)
+        sol = fit(Adhoc(; gauge), corrected)
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
     @testset "every fit defaults to ZeroSumPhase; an unknown antenna is named" begin
         ps, _ = _build_fringe_ps()
-        @test all(s -> s.gauge === ZeroSumPhase(), (FringeClosure(), Bandpass(), AdhocPhase(), AdhocPhase(FP.PerTrackAdhocSmoother())))
+        @test all(s -> s.gauge === ZeroSumPhase(), (FringeClosure(), Bandpass(; model = _bandpass_model()), Adhoc()))
         @test_throws "none of the references [\"ZZ\"] is in antenna table" _fringe_fit(ps, FringeClosure(; gauge = PinAntenna("ZZ")))
     end
 

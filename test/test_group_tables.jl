@@ -60,8 +60,8 @@ end
     group = first(values(DimensionalData.groupby(ps, XRadio.ByScan())))
     exec = SerialScheduler()
     s = FP._ap_sums(group, geom; executor = exec)
-    slot = Dict(n => i for (i, n) in pairs(geom.antennas))
-    @test issorted(lookup(s.rbar, FP.AntennaPair); by = ((a, b),) -> (slot[a], slot[b]))
+    index = Dict(n => i for (i, n) in pairs(geom.antennas))
+    @test issorted(lookup(s.rbar, FP.AntennaPair); by = ((a, b),) -> (index[a], index[b]))
     @test lookup(s.rbar, FP.FeedPair) == [(1, 1), (1, 2), (2, 1), (2, 2)]
     @test lookup(s.rbar, Ti) == geom.times[s.ti]
     @test eltype(s.rbar) == ComplexF32 && eltype(s.wbar) == Float32
@@ -93,24 +93,32 @@ end
     serial = ExecutionConfig(inner_executor = SerialScheduler())
     wide = ExecutionConfig(outer_executor = DynamicScheduler(), inner_executor = DynamicScheduler(; nchunks = 4))
     gauge = PinAntenna(1)
-    for solver in (Bandpass(; gauge), AdhocPhase(; gauge))
+    # The adhoc fit stops within a tenth of a standard error (about 1e-3 rad
+    # here), and the executors' summation orders move where.
+    for (solver, atol) in ((Bandpass(; model = _bandpass_model(), gauge), 1.0e-12), (Adhoc(; gauge), 1.0e-3))
         a = fit(solver, ps; exec = serial)
         b = fit(solver, ps; exec = wide)
-        @test a.components == b.components
+        @test map(c -> (c.path, c.component), a.components) == map(c -> (c.path, c.component), b.components)
+        @test all(zip(a.components, b.components)) do (ca, cb)
+            all(isapprox.(parent(ca.params), parent(cb.params); rtol = 1.0e-8, atol, nans = true))
+        end
         @test a.info.nscans == 3
     end
-    @test fit(Bandpass(; gauge), ps).info.sources == ["SRC1"]
+    @test fit(Bandpass(; model = _bandpass_model(), gauge), ps).info.sources == ["SRC1"]
 
-    # The adhoc solver reports each track's resolved prior, one `Ti` per scan.
-    info = fit(AdhocPhase(; gauge), ps).info
-    pr = info.priors
-    @test DimensionalData.name(dims(pr)) == (:AntennaName, :Feed, :Ti)
-    @test size(pr, Ti) == 3 && issorted(lookup(pr, Ti))
-    fitted = filter(!isnothing, vec(parent(pr)))
-    @test !isempty(fitted)
-    @test all(p -> p isa OUPrior && CAL.is_fixed_hyper(p.scale) && CAL.is_fixed_hyper(p.σ), fitted)
-    # Feed-common model: both feeds of a station share one track and its prior.
-    @test isequal(parent(pr[Feed = 1]), parent(pr[Feed = 2]))
+    # The adhoc solver reports each track's resolved priors, per observable,
+    # one `Ti` per scan.
+    info = fit(Adhoc(; gauge), ps).info
+    @test keys(info.priors) == (:phase, :logamp)
+    for pr in values(info.priors)
+        @test DimensionalData.name(dims(pr)) == (:AntennaName, :Feed, :Ti)
+        @test size(pr, Ti) == 3 && issorted(lookup(pr, Ti))
+        fitted = filter(!isnothing, vec(parent(pr)))
+        @test !isempty(fitted)
+        @test all(p -> p isa OUPrior && CAL.is_fixed_hyper(p.scale) && CAL.is_fixed_hyper(p.σ), fitted)
+        # Feed-common model: both feeds of a station share one track and its prior.
+        @test isequal(parent(pr[Feed = 1]), parent(pr[Feed = 2]))
+    end
 end
 
 # Each scan's visibilities rotated by its own phase per baseline, as a source
@@ -139,7 +147,7 @@ end
         nant = 4, nspw = 2, nchan = 8, ntime = 6, nscans = 3,
         bandpass = 0.3 .* randn(rng, 4, 2, 16), seed = 3,
     )
-    solver = Bandpass(; gauge = PinAntenna(1))
+    solver = Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1))
     solved_θ(sol) = vcat((vec(parent(c.params)) for c in sol.components)...)
     θ = solved_θ(fit(solver, ps))
     θoff = solved_θ(fit(solver, _offset_scans(ps, 4)))

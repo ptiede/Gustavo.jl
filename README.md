@@ -62,7 +62,7 @@ sols = mapsets(groupby(ps, ByScan())) do g      # g: one scan, in memory
     foreach(normalize_by_autocorrelations!, values(g))
     fr = fit(BaselineFringeFit(; gauge), g)
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
-    ad = fit(AdhocPhase(; gauge), g)
+    ad = fit(Adhoc(; gauge), g)
     return (; fr, ad)
 end
 ```
@@ -70,7 +70,9 @@ end
 A bandpass is fit over the whole track: each scan group is fringe-corrected
 and averaged over the scan (`average(g, ByScan())`, one sample per scan), and
 the bandpass is fit on the averaged groups, so one scan group is in memory at
-a time. The bandpass solution applies to the unaveraged data:
+a time. Every bandpass component states its prior; here a
+per-channel value that varies smoothly across each spectral window. The
+bandpass solution applies to the unaveraged data:
 
 ```julia
 averaged = mapsets(groupby(ps, ByScan())) do g
@@ -79,14 +81,17 @@ averaged = mapsets(groupby(ps, ByScan())) do g
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
     return average(g, ByScan())
 end
-bp = fit(Bandpass(; gauge), ProcessingSet(averaged))
+bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1),
+                         Feed = PerFeed(), prior = OUPrior(; scale = 50e6, σ = 0.1))
+model = GainModel(; phase = (; bandpass), logamp = (; bandpass))
+bp = fit(Bandpass(; model, gauge), ProcessingSet(averaged))
 
 sols = mapsets(groupby(ps, ByScan())) do g
     foreach(normalize_by_autocorrelations!, values(g))
     calibrate!(bp, g; flag_bad = false, apply_flags = false)
     fr = fit(BaselineFringeFit(; gauge), g)
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
-    return (; fr, ad = fit(AdhocPhase(; gauge), g))
+    return (; fr, ad = fit(Adhoc(; gauge), g))
 end
 ```
 

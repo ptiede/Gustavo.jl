@@ -173,8 +173,8 @@ component's constructor spelling, never solves to silent zeros), plus
 whole-tree requirements via
 [`validate_model`](@ref Gustavo.Fring.validate_model).
 
-- [`Bandpass`](@ref Gustavo.Bandpass)`(model = default_bandpass_model(), smoother = ...)`,
-  [`AdhocPhase`](@ref Gustavo.AdhocPhase)`(model = default_adhoc_model(), smoother = ...)`
+- [`Bandpass`](@ref Gustavo.Bandpass)`(model, smoother = ...)`,
+  [`Adhoc`](@ref Gustavo.Adhoc)`(model = default_adhoc_model(), gauge = ...)`
   and [`FringeClosure`](@ref Gustavo.FringeClosure)`(model = default_fringe_model(), closure = ...)`
   take a `GainModel`; the fringe closure's model has phase components only
   ([`default_fringe_model`](@ref Gustavo.Fring.default_fringe_model)).
@@ -193,7 +193,7 @@ multiplicatively across fits.
 
 ## The standard model, component by component
 
-The fringe closure `FringeClosure()`, `Bandpass()` and `AdhocPhase()`, fit in
+The fringe closure `FringeClosure()`, `Bandpass()` and `Adhoc()`, fit in
 turn, solve the following phase components
 — this is the standard VLBI calibration model, and each tying below is a
 physics decision:
@@ -233,15 +233,18 @@ changes from scan to scan; `JointSmoother` fits them with the bandpass (see
 [`JointSmoother`](@ref Gustavo.Fring.JointSmoother)).
 
 **`adhoc` — per-integration constant phase, feed-common** (the
-`AdhocPhase` solver). Residual atmospheric phase is non-birefringent
+`Adhoc` solver). Residual atmospheric phase is non-birefringent
 (common to every feed), so it is solved feed-common — which both denoises it
 and contributes exactly zero inter-feed phase in any feed basis. A `PerFeed`
 adhoc lets per-AP solve noise differ between feeds and scatters the inter-feed
 phase on top of the real instrumental offset. Its prior along time is an
 `OUPrior` with weakly informative hyperpriors by default
-([`default_adhoc_prior`](@ref Gustavo.Fring.default_adhoc_prior)); each
-track's weighted mean over a scan is removed, since a per-station constant
-trades against the source terms and so is a gauge rather than a parameter.
+([`default_adhoc_phase_prior`](@ref Gustavo.Fring.default_adhoc_phase_prior)); the
+priors and the gauge set each track's constant over a scan, since a
+per-station constant trades against the source coherences. Its log-amplitude
+half, `logamp.adhoc`, has the same form and tying, with an `OUPrior` of its own
+([`default_adhoc_logamp_prior`](@ref Gustavo.Fring.default_adhoc_logamp_prior));
+`default_adhoc_model(; logamp = nothing)` leaves it out.
 
 And one log-amplitude component:
 

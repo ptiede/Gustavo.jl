@@ -23,17 +23,16 @@ function _baseline_product_difference(sol1, sol2)
 end
 
 # The fringe fit one scan at a time and pooled, then `Bandpass` and
-# `AdhocPhase` (with each smoother) on data the first corrected. The bandpass is
+# `Adhoc` (with each smoother) on data the first corrected. The bandpass is
 # converged well inside its default tolerance, at which two gauges stop at
 # different points within 0.01 of a standard error.
 function _fit_each(ps, gauge)
     fringe = _fringe_fit(ps, FringeClosure(; gauge))
     corrected = calibrate(fringe, ps; flag_bad = false, apply_flags = false)
-    bandpass = Bandpass(; gauge, smoother = Gustavo.Fring.JointSmoother(; tolerance = 1.0e-6))
+    bandpass = Bandpass(; model = _bandpass_model(), gauge, smoother = Gustavo.Fring.JointSmoother(; tolerance = 1.0e-6))
     return (;
         fringe, pooled = _fringe_fit(ps, FringeClosure(; model = default_fringe_model(rel_time = CAL.GlobalTime()), gauge)),
-        bandpass = fit(bandpass, corrected), adhoc = fit(AdhocPhase(; gauge), corrected),
-        adhoc_joint = fit(AdhocPhase(Gustavo.Fring.JointKalmanSmoother(); gauge), corrected),
+        bandpass = fit(bandpass, corrected), adhoc = fit(Adhoc(; gauge), corrected),
     )
 end
 
@@ -43,7 +42,7 @@ end
 
     @testset "baseline products do not depend on the gauge" begin
         pinned = _fit_each(ps64, PinAntenna([3, 1]))
-        # The bandpass gauge enters only through a phase prior, which the default model lacks.
+        # The bandpass gauge moves the phases only along directions the products do not see.
         for name in keys(zs)
             dphase, dlogamp = _baseline_product_difference(zs[name], pinned[name])
             @test dphase < 1.0e-6
@@ -54,10 +53,11 @@ end
     @testset "Float32 visibilities agree with Float64" begin
         ps32, _ = _build_fringe_ps(; eltype = ComplexF32, nscans = 4, noise = 0.5)
         zs32 = _fit_each(ps32, ZeroSumPhase())
+        # The adhoc solve stops within a tenth of a standard error, as for phase.
         for name in keys(zs)
             dphase, dlogamp = _baseline_product_difference(zs[name], zs32[name])
             @test dphase < 1.0e-3
-            @test dlogamp < 1.0e-5
+            @test dlogamp < (name === :adhoc ? 1.0e-3 : 1.0e-5)
         end
     end
 end

@@ -4,21 +4,21 @@
 # components and implements `solve`, reading the data through `each_group`.
 
 """
-    Bandpass(; gauge = ZeroSumPhase(), model = default_bandpass_model(), smoother = JointSmoother())
+    Bandpass(; model, gauge = ZeroSumPhase(), smoother = JointSmoother())
 
 The bandpass stage: the time-global phase / log-amplitude station bandpass,
 solved from the residual of whichever earlier solutions have already been
 applied, over every scan it is given. What is fit
-is `model`, a [`GainModel`](@ref) — see [`Fring.default_bandpass_model`](@ref) for the
-default and the component form `JointSmoother` accepts; each component's prior
-states how its values relate within a spectral window. How it is solved
+is `model`, a [`GainModel`](@ref) whose every component carries a prior — see
+[`Fring.JointSmoother`](@ref) for the components it accepts; a prior along
+frequency states how a component's values relate within a spectral window. How it is solved
 lives on `smoother`, a [`Fring.JointSmoother`](@ref), which fits the complex visibilities
 against an explicit per-scan source coherence and so does not assume the
 calibrator is unresolved and unpolarized. `gauge`, an
 [`AbstractGauge`](@ref), references the bandpass phase: `JointSmoother`
-imposes its constraints exactly in every step. `JointSmoother` solves one complex gain per
-(station, feed, frequency segment); a phase-only or amplitude-only model holds
-the other half at zero. The model is self-contained, so fitting the bandpass
+moves the solved phases onto its constraints after the fit, along the phases
+the data leave free. A phase-only or amplitude-only model holds the other half
+at zero. The model is self-contained, so fitting the bandpass
 before or after the fringe closure is equally legal.
 
 The phase the data leave free is a spectrum common to every station.
@@ -30,10 +30,10 @@ The bandpass is fit on data the fringe solution has already corrected, for
 example on calibrator scans held in memory:
 
     fr = fit(FringeClosure(; gauge), fit(FringeSearch(), calibrator_scans))
-    bp = fit(Bandpass(; gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
+    bp = fit(Bandpass(; model, gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
 """
 Base.@kwdef struct Bandpass{M <: GainModel, G <: AbstractGauge} <: AbstractSolver
-    model::M = Fring.default_bandpass_model()
+    model::M
     smoother::Fring.JointSmoother = Fring.JointSmoother()
     gauge::G = ZeroSumPhase()
     function Bandpass(model::M, smoother, gauge::G) where {M, G}
@@ -44,40 +44,45 @@ end
 solution_name(::Bandpass) = :bandpass
 
 """
-    AdhocPhase(; gauge = ZeroSumPhase(), model = default_adhoc_model(), smoother = PerTrackAdhocSmoother())
-    AdhocPhase(smoother; gauge = ZeroSumPhase())
+    Adhoc(; model = default_adhoc_model(), gauge = ZeroSumPhase(), hyper_optimizer = LBFGSB(m = 20))
 
-The per-integration atmospheric-phase stage (adhoc phasing): solves the
-globally-closing per-AP station phase on the fringe/bandpass residual. What is
-fit is `model`, a [`GainModel`](@ref) holding the single adhoc component and
-its prior along time — see [`Fring.default_adhoc_model`](@ref) for the default
-(feed-common, OU prior) form. How the tracks are fit under that prior lives on
-`smoother`, a pluggable [`Fring.AbstractAdhocSmoother`](@ref)
-([`Fring.PerTrackAdhocSmoother`](@ref) or [`Fring.JointKalmanSmoother`](@ref), which
-requires the feed-common (`SharedFeeds`) model). The one-argument form takes
-the smoother and keeps the default model. `gauge`, an
-[`AbstractGauge`](@ref), sets each AP's convention after smoothing, so the
-applied correction does not depend on it: `PinAntenna` holds the first of its
-references present in that AP at 0, and `ZeroSumPhase` centers every AP on the
-stations covered throughout the scan.
+The per-integration station-gain stage (adhoc): solves each scan's per-AP
+station phases and log-amplitudes on the fringe/bandpass residual. What is fit
+is `model`, a [`GainModel`](@ref) holding the adhoc phase component, an
+optional adhoc logamp component, and their priors — see
+[`Fring.default_adhoc_model`](@ref) for the default (feed-common, OU priors
+along time) form. Each scan is one joint solve ([`Fring.solve_joint_gains!`](@ref))
+of the scan's frequency-averaged visibilities, with the source coherence per
+station pair and feed pair profiled out and the priors' hyperparameters
+resolved per (station, feed node, scan). The data see only the phase
+differences within an AP, so the priors hold each AP's common phase; `gauge`,
+an [`AbstractGauge`](@ref), then sets it, so the applied correction does not
+depend on it: `PinAntenna` holds the reference at 0, and `ZeroSumPhase`
+centers every AP on zero mean. The source coherence is constant over the scan,
+so a change of the source's flux within a scan lands on the stations'
+log-amplitudes.
 
-The solution's info holds `nscans` and `priors`: the prior each (station, feed)
-track was fit under, its hyperparameters resolved, over `(AntennaName, Feed, Ti)` with
-one `Ti` value per scan, its first AP epoch.
+The solution's info holds `nscans` and `priors`: per observable (`phase`,
+`logamp`) the prior each (station, feed) was fit under, its hyperparameters
+resolved, over `(AntennaName, Feed, Ti)` with one `Ti` value per scan, its
+first AP epoch (`nothing` where not fit).
+
+The priors' hyperparameters are at their type-II MAP, fit by `hyper_optimizer`,
+an [Optimization.jl](https://docs.sciml.ai/Optimization/stable/) optimizer that
+takes a gradient and bounds (L-BFGS-B by default), on their Laplace evidence.
 """
-Base.@kwdef struct AdhocPhase{M <: GainModel, S <: Fring.AbstractAdhocSmoother, G <: AbstractGauge} <: AbstractSolver
+Base.@kwdef struct Adhoc{M <: GainModel, G <: AbstractGauge, O} <: AbstractSolver
     model::M = Fring.default_adhoc_model()
-    smoother::S = Fring.PerTrackAdhocSmoother()
     gauge::G = ZeroSumPhase()
-    function AdhocPhase(model::M, smoother::S, gauge::G) where {M, S, G}
+    hyper_optimizer::O = Fring.LBFGSB(m = 20)
+    function Adhoc(model::M, gauge::G, hyper_optimizer::O) where {M, G, O}
         _check_solver_gauge(gauge, model)
-        return new{M, S, G}(model, smoother, gauge)
+        return new{M, G, O}(model, gauge, hyper_optimizer)
     end
 end
-AdhocPhase(smoother::Fring.AbstractAdhocSmoother; gauge = ZeroSumPhase()) = AdhocPhase(; smoother, gauge)
-solution_name(::AdhocPhase) = :adhoc
+solution_name(::Adhoc) = :adhoc
 
-solver_gauge(s::Union{Bandpass, AdhocPhase}) = s.gauge
+solver_gauge(s::Union{Bandpass, Adhoc}) = s.gauge
 
 # Every component path of `model` without its `:phase`/`:logamp` root, over the
 # base tree and each station entry.
@@ -141,24 +146,24 @@ end
 
 model_components(s::Bandpass, spec) = _vet_model(
     s.smoother, s.model,
-    "`JointSmoother` fits `GainComponent(ConstantTerm(); " *
-        "Ti = <GlobalTime, InstrumentScans or TimeBlocks>, Frequency = <any " *
-        "segmentation>, Feed = PerFeed(), prior = <nothing, or a RandomWalkPrior, " *
-        "OUPrior or CARMAPrior along Frequency>)` — a time segmentation whose segments each span " *
-        "several scans; and beside a shape, per-scan terms: any term with " *
-        "`Ti = PerScan()` and no prior. A `PerIntegration` segment is not fitted. See " *
-        "`default_bandpass_model` and `JointSmoother`.",
+    "`JointSmoother` fits components of any term with `Ti = <PerScan, GlobalTime, " *
+        "InstrumentScans or TimeBlocks>` — a time segmentation whose segments are whole " *
+        "scans — and `prior = <an IIDPrior, or an OUPrior, a CARMAPrior or a " *
+        "RandomWalkPrior with an init along Frequency>`. See `JointSmoother`.",
     spec,
 )
 
 supports_antenna_heterogeneity(::Bandpass) = true
 
-model_components(s::AdhocPhase, spec) = _vet_model(
-    s.smoother, s.model,
-    "The adhoc smoothers fit `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
+Fring.can_fit(::Adhoc, tc, geom) = Fring._fits_adhoc_track(tc)
+Fring.validate_model(::Adhoc, model) = Fring._validate_adhoc_model(model)
+
+model_components(s::Adhoc, spec) = _vet_model(
+    s, s.model,
+    "`Adhoc` fits a phase and an optional logamp `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
         "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed(), prior = " *
-        "<nothing, or a RandomWalkPrior or OUPrior along Ti>)` " *
-        "(`JointKalmanSmoother`: `SharedFeeds()` and an `OUPrior` only) — see `default_adhoc_model`.",
+        "<an IIDPrior, or an OUPrior, a CARMAPrior or a RandomWalkPrior with an init along Ti>)` " *
+        "— see `default_adhoc_model`.",
     spec,
 )
 
@@ -216,19 +221,20 @@ function solve(s::Bandpass, ctx::SolveContext)
     )
 end
 
-# ── AdhocPhase: per-scan per-AP phase solve ──────────────────────────────────
+# ── Adhoc: per-scan per-AP phase solve ──────────────────────────────────
 
-_group_setup(::AdhocPhase, ctx::SolveContext) = Fring._adhoc_plan(ctx.model, ctx.layout)
+_group_setup(::Adhoc, ctx::SolveContext) = (; ctx.layout, plans = Fring._adhoc_plans(ctx.model, ctx.layout))
 
-_solve_group(s::AdhocPhase, ctx::SolveContext, adhoc_plan, group) = Fring.adhoc_scan!(
-    ctx.θ, group, ctx.geom, adhoc_plan, s.smoother, ctx.gauge;
-    executor = inner_executor(ctx.exec),
+_solve_group(s::Adhoc, ctx::SolveContext, setup, group) = Fring.adhoc_scan!(
+    ctx.θ, group, ctx.geom, setup, ctx.gauge;
+    executor = inner_executor(ctx.exec), s.hyper_optimizer,
 )
 
-function solve(s::AdhocPhase, ctx::SolveContext)
-    adhoc_plan = _group_setup(s, ctx)
-    results = each_group(group -> _solve_group(s, ctx, adhoc_plan, group), ctx)
+function solve(s::Adhoc, ctx::SolveContext)
+    setup = _group_setup(s, ctx)
+    results = each_group(group -> _solve_group(s, ctx, setup, group), ctx)
     isempty(results) && return (; nscans = 0)
-    sort!(results; by = r -> only(lookup(r, Ti)))
-    return (; nscans = length(results), priors = cat(results...; dims = Ti))
+    sort!(results; by = r -> only(lookup(r.phase, Ti)))
+    priors = DimensionalData.DimStack(map(obs -> cat((r[obs] for r in results)...; dims = Ti), (; phase = :phase, logamp = :logamp)))
+    return (; nscans = length(results), priors)
 end

@@ -18,25 +18,26 @@
 # them in the basin they start in, and the exact Hessian once they are small.
 
 """
-    BandpassCells(r, w, edge, slot_pairs; nchunks)
+    BandpassCells(r, w, edge, gain_pairs; nchunks)
 
 The correlations of a joint bandpass solve that carry data, grouped by their
 (scan, station pair, feed pair) `J`: per cell the summed visibility `r`, weight
-`w`, slot pair `e` (an index into `slot_pairs`) and its two slots `na`, `nb`;
-per `J` its cells `ranges[j]`; and the `J`s in `nchunks` contiguous `chunks` of
-about equal size, the units the passes over the cells are split into.
+`w`, station-gain pair `e` (an index into `gain_pairs`) and its two station
+gains `na`, `nb`; per `J` its cells `ranges[j]`; and the `J`s in `nchunks`
+contiguous `chunks` of about equal size, the units the passes over the cells
+are split into.
 """
-struct BandpassCells{C, T}
-    r::Vector{C}
-    w::Vector{T}
-    e::Vector{Int32}
-    na::Vector{Int32}
-    nb::Vector{Int32}
-    ranges::Vector{UnitRange{Int}}
+struct BandpassCells{R <: AbstractVector, W <: AbstractVector, I <: AbstractVector{Int32}, U <: AbstractVector{UnitRange{Int}}}
+    r::R
+    w::W
+    e::I
+    na::I
+    nb::I
+    ranges::U
     chunks::Vector{UnitRange{Int}}
 end
 
-function BandpassCells(r, w, edge, slot_pairs; nchunks::Integer)
+function BandpassCells(r, w, edge, gain_pairs; nchunks::Integer)
     rp, wp = parent(r), parent(w)
     rs, ws = eltype(rp)[], eltype(wp)[]
     es, na, nb = Int32[], Int32[], Int32[]
@@ -47,7 +48,7 @@ function BandpassCells(r, w, edge, slot_pairs; nchunks::Integer)
             I = CartesianIndex(J, c)
             e = edge[I]
             (iszero(e) || !(wp[I] > 0)) && continue
-            a, b = slot_pairs[e]
+            a, b = gain_pairs[e]
             push!(rs, rp[I]); push!(ws, wp[I]); push!(es, e); push!(na, a); push!(nb, b)
         end
         length(es) >= first_cell && push!(ranges, first_cell:length(es))
@@ -69,7 +70,38 @@ function _balanced_chunks(ranges, n)
     return chunks
 end
 
-# `S` (one entry per `J` of `cells`) at its optimum for the slot gains `g`.
+"""
+    ChunkAccumulators(cells::BandpassCells, prototypes...)
+    ChunkAccumulators(accs::ChunkAccumulators...)
+
+Per-chunk accumulators for the passes over `cells`: for each of its chunks, an
+array shaped like each of `prototypes`. A pass over the cells
+(`_reduce_chunks!`) adds into one chunk's arrays at a time and sums them into
+its outputs, so the arrays carry over from pass to pass instead of being made
+for each. The second form joins the arrays of several, shared, not copied.
+One pass at a time may use them.
+"""
+struct ChunkAccumulators{B <: Tuple}
+    buffers::B
+end
+
+ChunkAccumulators(cells::BandpassCells, prototypes::AbstractArray...) =
+    ChunkAccumulators(map(p -> [zero(p) for _ in cells.chunks], prototypes))
+ChunkAccumulators(acc::ChunkAccumulators, accs::ChunkAccumulators...) =
+    ChunkAccumulators(mapreduce(a -> a.buffers, (x, y) -> (x..., y...), accs; init = acc.buffers))
+
+# `outs` set to the sum over the chunks of `cells` of what `f!(bufs, js)` adds
+# into one chunk's arrays `bufs` of `acc`, zeroed first, from that chunk's `J`s
+# `js`.
+function _reduce_chunks!(f!, outs::NTuple{N, Any}, acc::ChunkAccumulators{<:NTuple{N, Any}}, cells::BandpassCells, executor) where {N}
+    tforeach(eachindex(cells.chunks); scheduler = executor) do i
+        f!(map(b -> fill!(b[i], zero(eltype(b[i]))), acc.buffers), cells.chunks[i])
+    end
+    map(_sum_into!, outs, acc.buffers)
+    return outs
+end
+
+# `S` (one entry per `J` of `cells`) at its optimum for the station gains `g`.
 function _source!(S, g, cells::BandpassCells, executor)
     (; r, w, na, nb) = cells
     tforeach(cells.chunks; scheduler = executor) do js
@@ -86,7 +118,7 @@ function _source!(S, g, cells::BandpassCells, executor)
     return S
 end
 
-# The χ² of the visibilities with `S` at its optimum for the slot gains `g`.
+# The χ² of the visibilities with `S` at its optimum for the station gains `g`.
 function _profiled_chi2(g, cells::BandpassCells, executor)
     (; r, w, na, nb) = cells
     parts = tmap(cells.chunks; scheduler = executor) do js
@@ -109,21 +141,23 @@ function _profiled_chi2(g, cells::BandpassCells, executor)
     return sum(parts)
 end
 
-# The χ² to second order in each slot's log-gain about the gains `g`, with `S`
-# (one entry per `J`) held. A correlation's model `m = g_a·S·conj(g_b)` moves to
-# `m·(1 + δℓ_a + δℓ_b + i(δφ_a − δφ_b))`, so with `u = r/(w·m) − 1` and weight
-# `q = w·|m|²`, `Re u` measures `δℓ_a + δℓ_b` and `Im u` measures `δφ_a − δφ_b`,
-# and the two observables decouple. Returns each slot pair's weight `q`, each
-# slot's `c = Σ q·u` (with `conj(u)` at a second end), whose real and imaginary
-# parts are the log-amplitude and phase gradients, and its total weight `W`:
-# `1 + c/W` is the slot's own gain estimate given every other gain and `S`,
-# relative to its current one.
-function _linearize(g, S, cells::BandpassCells, nslots, npairs, executor)
+# The χ² to second order in each station's log-gain about the gains `g`, with
+# `S` (one entry per `J`) held. A correlation's model `m = g_a·S·conj(g_b)`
+# moves to `m·(1 + δℓ_a + δℓ_b + i(δφ_a − δφ_b))`, so with `u = r/(w·m) − 1` and
+# weight `q = w·|m|²`, `Re u` measures `δℓ_a + δℓ_b` and `Im u` measures
+# `δφ_a − δφ_b`, and the two observables decouple. Returns each station-gain
+# pair's weight `q`, each gain's `c = Σ q·u` (with `conj(u)` at a second end),
+# whose real and imaginary parts are the log-amplitude and phase gradients, and
+# its total weight `W`: `1 + c/W` is the gain's own estimate given every other
+# gain and `S`, relative to its current one. The chunks add into `acc`, and the
+# result into `lin`.
+function _linearize(
+        g, S, cells::BandpassCells, ngains, npairs, executor,
+        acc = ChunkAccumulators(cells, zeros(npairs), zeros(ComplexF64, ngains), zeros(ngains)),
+        lin = (; q = zeros(npairs), c = zeros(ComplexF64, ngains), W = zeros(ngains)),
+    )
     (; r, w, e, na, nb) = cells
-    parts = tmap(cells.chunks; scheduler = executor) do js
-        q = zeros(npairs)
-        c = zeros(ComplexF64, nslots)
-        W = zeros(nslots)
+    _reduce_chunks!(values(lin), acc, cells, executor) do (q, c, W), js
         for j in js
             s = S[j]
             for k in cells.ranges[j]
@@ -140,23 +174,21 @@ function _linearize(g, S, cells::BandpassCells, nslots, npairs, executor)
                 W[b] += qk
             end
         end
-        (; q, c, W)
     end
-    return (; q = sum(p -> p.q, parts), c = sum(p -> p.c, parts), W = sum(p -> p.W, parts))
+    return lin
 end
 
-# `ys = (Δ − L)·xs` over slot vectors for one observable (`σ = −1` phase, `+1`
-# log-amplitude): the exact Hessian of the profiled χ²/2 less the held-`S`
-# Gauss–Newton curvature `H` (`_data_curvature!`). Per `J`, with
+# `ys = (Δ − L)·xs` over station-gain vectors for one observable (`σ = −1`
+# phase, `+1` log-amplitude): the exact Hessian of the profiled χ²/2 less the
+# held-`S` Gauss–Newton curvature `H` (`_data_curvature!`). Per `J`, with
 # `z_c = conj(u_c)·r_c`, `p_c = w_c|u_c|²`, `D = Σ p_c` and `S = Σ z_c / D`,
 # the phase Hessian is `diag(Re(S̄z_c)) − Re(z zᴴ)/D` and the log-amplitude
 # Hessian `diag(2|S|²p_c − Re(S̄z_c)) − Re(z zᴴ)/D + 2(t pᵀ + p tᵀ)/D −
 # 4|S|²ppᵀ/D` with `t = Re(S̄z)`, over each cell's `x_a + σ·x_b`; `H` is
 # `diag(|S|²p_c)`.
-function _profile_product!(ys, xs, g, S, cells::BandpassCells, σ, executor)
+function _profile_product!(ys, xs, g, S, cells::BandpassCells, σ, executor, acc = ChunkAccumulators(cells, ys))
     (; r, w, na, nb) = cells
-    parts = tmap(cells.chunks; scheduler = executor) do js
-        y = zeros(length(ys))
+    _reduce_chunks!((ys,), acc, cells, executor) do (y,), js
         for j in js
             rng = cells.ranges[j]
             s = S[j]
@@ -192,20 +224,19 @@ function _profile_product!(ys, xs, g, S, cells::BandpassCells, σ, executor)
                 y[b] += σ * coef
             end
         end
-        y
     end
-    return _sum_into!(ys, parts)
+    return ys
 end
 
 # `(Δ − L)·x` over both observables at once (`_profile_product!`), with the
 # Hessian's cross block between them: in each cell's `ρ_c = ℓ_a + ℓ_b` and
 # `θ_c = φ_a − φ_b`, `∂²/∂ρ_c∂θ_d` of the profiled χ²/2 is
 # `−Im(z̄_c z_d)/D − δ_cd·Im(S̄z_c) + 2p_c·Im(S̄z_d)/D`, which vanishes where the
-# model fits the data. Writes `yφ` and `yℓ` from the slot vectors `xφ` and `xℓ`.
-function _joint_profile_product!(yφ, yℓ, xφ, xℓ, g, S, cells::BandpassCells, executor)
+# model fits the data. Writes `yφ` and `yℓ` from the station-gain vectors `xφ`
+# and `xℓ`.
+function _joint_profile_product!(yφ, yℓ, xφ, xℓ, g, S, cells::BandpassCells, executor, acc = ChunkAccumulators(cells, yφ, yℓ))
     (; r, w, na, nb) = cells
-    parts = tmap(cells.chunks; scheduler = executor) do js
-        φy, ℓy = zeros(length(yφ)), zeros(length(yℓ))
+    _reduce_chunks!((yφ, yℓ), acc, cells, executor) do (φy, ℓy), js
         for j in js
             rng = cells.ranges[j]
             s = S[j]
@@ -251,13 +282,6 @@ function _joint_profile_product!(yφ, yℓ, xφ, xℓ, g, S, cells::BandpassCell
                 ℓy[b] += yρ / D
             end
         end
-        (φy, ℓy)
-    end
-    fill!(yφ, 0.0)
-    fill!(yℓ, 0.0)
-    for (φy, ℓy) in parts
-        yφ .+= φy
-        yℓ .+= ℓy
     end
     return yφ, yℓ
 end
@@ -265,10 +289,9 @@ end
 # `ys = −Σ_J q (qᵀ xs) / q_J`, the Gauss–Newton form of `_profile_product!`, with
 # `q_c = w|u_c|²|S|²` and `q_J = Σ_c q_c`: the Schur complement of `S`, which is
 # the profile's correction wherever the model fits the data.
-function _gauss_newton_product!(ys, xs, g, S, cells::BandpassCells, σ, executor)
+function _gauss_newton_product!(ys, xs, g, S, cells::BandpassCells, σ, executor, acc = ChunkAccumulators(cells, ys))
     (; w, na, nb) = cells
-    parts = tmap(cells.chunks; scheduler = executor) do js
-        y = zeros(length(ys))
+    _reduce_chunks!((ys,), acc, cells, executor) do (y,), js
         for j in js
             rng = cells.ranges[j]
             s2 = abs2(S[j])
@@ -286,47 +309,42 @@ function _gauss_newton_product!(ys, xs, g, S, cells::BandpassCells, σ, executor
                 y[nb[k]] -= σ * qt
             end
         end
-        y
     end
-    return _sum_into!(ys, parts)
+    return ys
 end
 
 function _sum_into!(ys, parts)
-    fill!(ys, 0.0)
+    fill!(ys, zero(eltype(ys)))
     foreach(p -> ys .+= p, parts)
     return ys
 end
 
-# The profile of one observable at the current linearization: the slot gains
-# `g`, `S`, the cells, `σ`, the system's free slots in unknown order (`slots[i]`
-# is unknown `i`), slot-vector buffers, whether its curvature is the exact
-# Hessian (`_profile_product!`) or the Gauss–Newton one
-# (`_gauss_newton_product!`), and the scheduler of its passes.
-struct Profile{C, X}
-    g::Vector{ComplexF64}
-    S::Vector{ComplexF64}
+# The profile of one observable at the current linearization: the station gains
+# `g`, `S`, the cells, `σ`, the system's `J` from its unknowns `θ` to the station
+# gains, station-gain-vector buffers, whether its curvature is the exact Hessian
+# (`_profile_product!`) or the Gauss–Newton one (`_gauss_newton_product!`), the
+# scheduler of its passes and their accumulators, one station-gain vector per
+# chunk.
+struct Profile{G <: AbstractVector, C, M, V <: AbstractVector, X, A}
+    g::G
+    S::G
     cells::C
     σ::Float64
-    slots::Vector{Int}
-    xs::Vector{Float64}
-    ys::Vector{Float64}
+    J::M
+    xs::V
+    ys::V
     exact::Bool
     executor::X
+    acc::A
 end
-Profile(g, S, cells, σ, free, exact, executor) =
-    Profile(g, S, cells, Float64(σ), findall(free), zeros(length(g)), zeros(length(g)), exact, executor)
 
 # The profile's correction (`_profile_product!` or `_gauss_newton_product!`)
-# times `x` over the free slots, the first entries of `x`.
+# times `x` over the unknowns `θ`, the first entries of `x`, carried to the
+# station gains by `J` and back by `Jᵀ`.
 function _profile_apply!(y, p::Profile, x)
-    fill!(p.xs, 0.0)
-    for (i, n) in pairs(p.slots)
-        p.xs[n] = x[i]
-    end
-    (p.exact ? _profile_product! : _gauss_newton_product!)(p.ys, p.xs, p.g, p.S, p.cells, p.σ, p.executor)
-    for (i, n) in pairs(p.slots)
-        y[i] = p.ys[n]
-    end
+    mul!(p.xs, p.J, view(x, axes(p.J, 2)))
+    (p.exact ? _profile_product! : _gauss_newton_product!)(p.ys, p.xs, p.g, p.S, p.cells, p.σ, p.executor, p.acc)
+    mul!(view(y, axes(p.J, 2)), p.J', p.ys)
     return y
 end
 
@@ -335,16 +353,17 @@ end
 
 The Hessian of the profiled objective over a system's unknowns: `K`, the
 held-`S` Gauss–Newton quadratic with the priors (and any damping), plus the
-profile's correction on the free slots, which are the first unknowns
+profile's correction on the parameters, which are the first unknowns
 (`_profile_product!`). Applied matrix-free, one pass over the cells per
-product; its entries are not stored, and indexing it throws.
+product; its entries are not stored, and indexing it throws. A later step's
+profile replaces `profile` in place (`_renew!`).
 """
-struct ProfiledCurvature{M, P} <: AbstractMatrix{Float64}
-    K::M
+mutable struct ProfiledCurvature{M, P} <: AbstractMatrix{Float64}
+    const K::M
     profile::P
-    buffer::Vector{Float64}
+    const buffer::Vector{Float64}
 end
-ProfiledCurvature(K, profile::Profile) = ProfiledCurvature(K, profile, zeros(length(profile.slots)))
+ProfiledCurvature(K, profile::Profile) = ProfiledCurvature(K, profile, zeros(size(profile.J, 2)))
 
 Base.size(A::ProfiledCurvature) = size(A.K)
 Base.size(A::ProfiledCurvature, d::Integer) = size(A.K, d)
@@ -363,12 +382,12 @@ end
 The exact Hessian of the profiled objective over both observables' unknowns,
 the phase's first: the held-`S` quadratics `Kφ` and `Kℓ` with their priors (and
 any damping), plus the profile's correction with its cross block between the
-observables (`_joint_profile_product!`) on the free slots of the profiles `φ`
-and `ℓ`. Applied matrix-free, as [`ProfiledCurvature`](@ref).
+observables (`_joint_profile_product!`) on the parameters of the profiles
+`φ` and `ℓ`. Applied matrix-free, as [`ProfiledCurvature`](@ref).
 """
-struct JointCurvature{Mφ, Mℓ, P} <: AbstractMatrix{Float64}
-    Kφ::Mφ
-    Kℓ::Mℓ
+mutable struct JointCurvature{Mφ, Mℓ, P} <: AbstractMatrix{Float64}
+    const Kφ::Mφ
+    const Kℓ::Mℓ
     φ::P
     ℓ::P
 end
@@ -387,16 +406,15 @@ function LinearAlgebra.mul!(y::AbstractVector, A::JointCurvature, x::AbstractVec
     return y
 end
 
-# Adds the joint profile correction (`_joint_profile_product!`) at the free slots
-# `xφ`, `xℓ` (the first entries of each) to `yφ`, `yℓ`.
+# Adds the joint profile correction (`_joint_profile_product!`) at the unknowns
+# `xφ`, `xℓ` (the first entries of each, carried by each profile's `J`) to
+# `yφ`, `yℓ`.
 function _joint_apply!(yφ, yℓ, φ::Profile, ℓ::Profile, xφ, xℓ)
-    fill!(φ.xs, 0.0)
-    fill!(ℓ.xs, 0.0)
-    foreach(((i, n),) -> φ.xs[n] = xφ[i], pairs(φ.slots))
-    foreach(((i, n),) -> ℓ.xs[n] = xℓ[i], pairs(ℓ.slots))
-    _joint_profile_product!(φ.ys, ℓ.ys, φ.xs, ℓ.xs, φ.g, φ.S, φ.cells, φ.executor)
-    foreach(((i, n),) -> yφ[i] += φ.ys[n], pairs(φ.slots))
-    foreach(((i, n),) -> yℓ[i] += ℓ.ys[n], pairs(ℓ.slots))
+    mul!(φ.xs, φ.J, view(xφ, axes(φ.J, 2)))
+    mul!(ℓ.xs, ℓ.J, view(xℓ, axes(ℓ.J, 2)))
+    _joint_profile_product!(φ.ys, ℓ.ys, φ.xs, ℓ.xs, φ.g, φ.S, φ.cells, φ.executor, ChunkAccumulators(φ.acc, ℓ.acc))
+    mul!(view(yφ, axes(φ.J, 2)), φ.J', φ.ys, true, true)
+    mul!(view(yℓ, axes(ℓ.J, 2)), ℓ.J', ℓ.ys, true, true)
     return yφ, yℓ
 end
 
@@ -424,65 +442,57 @@ held-`S` quadratic `K` (its factor `F`) on the complement of the coarse space
 
 with `U = A·Z`. `Z` holds the constant of each track whose prior holds it:
 `S` absorbs those constants, so `A` sees them through the priors alone while
-`K` sees them through every correlation of the track.
+`K` sees them through every correlation of the track. `F` and `U` are read
+where they are, so a refactorization of `F` and a new `U` in place carry over
+once `E` is refactored (`_refactor_coarse!`).
 """
-struct ProfilePreconditioner{F, E}
-    F::F
-    Z::SparseMatrixCSC{Float64, Int}
-    U::Matrix{Float64}
+mutable struct ProfilePreconditioner{F, E}
+    const F::F
+    const Z::SparseMatrixCSC{Float64, Int}
+    const U::Matrix{Float64}
     E::E
+    const c::Vector{Float64}
+    const t::Vector{Float64}
+    const v::Vector{Float64}
+    const w::Vector{Float64}
 end
 
-ProfilePreconditioner(F, Z, U) = ProfilePreconditioner(F, Z, U, cholesky(Symmetric(Matrix(Z' * U))))
+function ProfilePreconditioner(F, Z, U)
+    n, m = size(U)
+    E = cholesky!(Symmetric(Matrix(Z' * U)))
+    return ProfilePreconditioner(F, Z, U, E, zeros(m), zeros(m), zeros(n), zeros(n))
+end
+
+_refactor_coarse!(P::ProfilePreconditioner) = (P.E = cholesky!(Symmetric(mul!(P.E.factors, P.Z', P.U))); P)
 
 function LinearAlgebra.ldiv!(y::AbstractVector, P::ProfilePreconditioner, x::AbstractVector)
-    c = P.E \ (P.Z' * x)
-    v = P.F \ (x - P.U * c)
+    c = ldiv!(P.E, mul!(P.c, P.Z', x))
+    v = ldiv!(P.v, P.F, mul!(copyto!(P.w, x), P.U, c, -1, true))
     copyto!(y, v)
-    mul!(y, P.Z, c - P.E \ (P.U' * v), true, true)
+    t = ldiv!(P.E, mul!(P.t, P.U', v))
+    t .= c .- t
+    mul!(y, P.Z, t, true, true)
     return y
 end
 
-# `M⁻¹` of `P`, factoring the system `K`, as a function of a pair of unknowns
-# `(i, j)` on `K`'s sparsity pattern (`_selected_inverse`): the posterior
-# covariance the preconditioner approximates.
-function _covariance(P::ProfilePreconditioner, K)
-    selected = _selected_inverse(P.F, K)
-    Einv = inv(P.E)
-    G = (P.F \ P.U) * Einv
-    Z = Matrix(P.Z)
-    B = Einv + G' * P.U * Einv
-    Zt, Gt, ZBt = permutedims(Z), permutedims(G), permutedims(Z * B)
-    return function (i, j)
-        zi, zj = view(Zt, :, i), view(Zt, :, j)
-        return selected(i, j) - dot(zi, view(Gt, :, j)) - dot(view(Gt, :, i), zj) + dot(view(ZBt, :, i), zj)
+# The coarse space `Z` of `ProfilePreconditioner` for the system `sys`
+# (`_coarse_basis`) and its image under the curvature, `(K − H)·Z + λ·D·Z`, the
+# priors' curvature along it (`layout.prior`) plus the damping, `D` as
+# `_reduce!` last wrote it.
+# `S` absorbs the constants, so the data's curvature along them is zero. The
+# image is in a buffer of `sys` the next call overwrites.
+function _coarse_space!(sys, λ)
+    (; layout, coarse, damping) = sys
+    (; Z, U) = coarse
+    K = layout.K
+    fill!(U, 0.0)
+    for g in axes(Z, 2), q in nzrange(Z, g)
+        j, zj = rowvals(Z)[q], nonzeros(Z)[q]
+        for p in nzrange(K, j)
+            U[rowvals(K)[p], g] += zj * layout.prior[p]
+        end
+        j in eachindex(damping) && (U[j, g] += λ * damping[j] * zj)
     end
-end
-
-# The coarse space of `ProfilePreconditioner` for the system `sys` and its image
-# under the curvature: one column per track that holds its constant by a level
-# (`held`), one on its free slots, and `(K − H)·Z + λ·Z`, the priors' curvature
-# along it plus the damping. `S` absorbs the constant, so the data's curvature
-# along it is zero.
-function _coarse_space(sys, tracks, λ)
-    (; layout) = sys
-    unknown = cumsum(sys.free)
-    I, J = Int[], Int[]
-    m = 0
-    for t in tracks
-        t.held > 0 || continue
-        rows = [unknown[n] for n in t.slots if sys.free[n]]
-        isempty(rows) && continue
-        m += 1
-        append!(I, rows)
-        append!(J, fill(m, length(rows)))
-    end
-    n = size(layout.K, 1)
-    Z = sparse(I, J, ones(length(I)), n, m)
-    prior = SparseMatrixCSC(n, n, layout.K.colptr, rowvals(layout.K), nonzeros(layout.K) .- layout.base)
-    U = Matrix(prior * Z)
-    nf = length(sys.xf)
-    U[1:nf, :] .+= λ .* Matrix(Z[1:nf, :])
     return Z, U
 end
 
@@ -490,199 +500,248 @@ end
 const _FORCING = 0.1
 
 """
-    _profiled_step(s, tracks, λ, linsolve; abstol, z0 = _current_unknowns(s.sys)) -> (; z, x′, decrease, iterations, P, K)
+    _profiled_step(s, λ, linsolve; abstol, z0 = _current_unknowns(s.sys)) -> (; z, x′, decrease, iterations)
 
 One damped Newton step of the profiled objective for the system `s` of one
-observable (`_profiled_systems`): the minimum over its
-unknowns of the held-`S` quadratic plus the profile's correction (exact or
-Gauss–Newton, as `profile` holds), plus `λ/2·‖x′ − x‖²` over the free slots.
-It is solved by `linsolve`, a Krylov method of LinearSolve.jl, preconditioned by
-`ProfilePreconditioner` over the constants of `tracks`, from the current point
-`z0`, by default the free slots with the latent unknowns at their optimum given
+observable (`_profiled_systems`): the minimum over its unknowns of the held-`S`
+quadratic plus the profile's correction (exact or Gauss–Newton, as `profile`
+holds), plus `λ/2·Σ d_j(θ′_j − θ_j)²` over the parameters, `d` their curvatures
+(`_reduce!`). It is solved by
+`linsolve`, a Krylov method of LinearSolve.jl, preconditioned by
+`ProfilePreconditioner` over the constants of its tracks, from the current point
+`z0`, by default the parameters with the latent unknowns at their optimum given
 them (`_current_unknowns`). There the initial residual is the objective's
-negative gradient (`_step_residual`), and the solve stops once the residual in the preconditioned norm, which
-measures the error in the step's own standard errors, falls below `abstol` or a
-tenth of its start (an inexact Newton step; Eisenstat & Walker 1996). Returns
-the unknowns, the new slot values, the decrease the undamped model predicts,
-the Krylov iterations taken, the preconditioner, and the damped system it
-factors. The decrease is `−gᵀδ − δᵀ(A − λ)δ/2` from the gradient `g` and the
-increment `δ`: the model's own values are differences of terms of the order
-of the stiffest prior's curvature, and lose the decrease to rounding.
+negative gradient (`_step_residual`), and the solve stops once the residual in
+the preconditioned norm, which measures the error in the step's own standard
+errors, falls below `abstol` or a tenth of its start (an inexact Newton step;
+Eisenstat & Walker 1996). Returns the unknowns, the new gain values (in a
+buffer of the system the next step overwrites), the decrease the undamped model
+predicts and the Krylov iterations taken. The decrease is
+`−gᵀδ − δᵀ(A − λ)δ/2` from the gradient `g` and the increment `δ`: the model's
+own values are differences of terms of the order of the stiffest prior's
+curvature, and lose the decrease to rounding.
 """
-function _profiled_step(s, tracks, λ, linsolve; abstol, z0 = _current_unknowns(s.sys))
+function _profiled_step(s, λ, linsolve; abstol, z0 = _current_unknowns(s.sys))
     (; sys) = s
     K, _, _ = _reduce!(sys, s.c, λ)
     F = _refactor!(sys, K)
-    nf = length(sys.xf)
-    P = ProfilePreconditioner(F, _coarse_space(sys, tracks, λ)...)
-    A = ProfiledCurvature(K, s.profile)
+    nθ = length(sys.θ)
+    Z, U = _coarse_space!(sys, λ)
     z = copy(z0)
     residual = _step_residual(s, z)
-    sol = LinearSolve.solve(LinearSolve.LinearProblem(A, residual), linsolve; Pl = P, abstol, reltol = _FORCING, maxiters = 10 * size(K, 1))
+    A, _, sol = _krylov_solve!(s.krylov, s.profile, residual, linsolve; abstol) do
+        ProfiledCurvature(K, s.profile), ProfilePreconditioner(F, Z, U)
+    end
+    δ = sol.u
+    z .+= δ
+    decrease = _predicted_decrease(A, residual, δ, ((1:nθ, λ, sys.damping),))
+    return (; z, x′ = _gains_at!(sys, z), decrease, iterations = sol.iters)
+end
+
+# `A·δ = r` solved by `linsolve`, preconditioned by `P`, to `abstol` or a tenth
+# of the starting residual, from a LinearSolve cache kept in `state` with `A`
+# and `P`, which `make()` gives on the first call: a later call renews them in
+# place for its `profiles` (`_renew!`), with the factor and the coarse space
+# they read already rewritten, so the Krylov workspace carries over. Returns
+# `A`, `P` and the solution, whose `u` the next call overwrites.
+function _krylov_solve!(make, state, profiles, r, linsolve; abstol)
+    if isnothing(state[])
+        A, P = make()
+        cache = LinearSolve.init(LinearSolve.LinearProblem(A, r), linsolve; Pl = P, abstol, reltol = _FORCING, maxiters = 10 * length(r))
+        state[] = (; A, P, cache)
+    else
+        (; A, P, cache) = state[]
+        _renew!(A, P, profiles)
+        cache.b = r
+        cache.abstol = abstol
+    end
+    (; A, P, cache) = state[]
+    sol = LinearSolve.solve!(cache)
     LinearSolve.SciMLBase.successful_retcode(sol.retcode) || error(
         "the profiled bandpass step did not converge: $(nameof(typeof(linsolve))) returned $(sol.retcode) " *
             "after $(sol.iters) iterations",
     )
-    δ = sol.u
-    z .+= δ
-    x′ = copy(sys.x)
-    x′[sys.free] .= view(z, 1:nf)
-    decrease = _predicted_decrease(A, residual, δ, (1:nf,), (λ,))
-    return (; z, x′, decrease, iterations = sol.iters, P, K)
+    return A, P, sol
 end
 
+_renew!(A::ProfiledCurvature, P::ProfilePreconditioner, profile) = (A.profile = profile; _refactor_coarse!(P))
+function _renew!(A::JointCurvature, P::BlockPreconditioner, (φ, ℓ))
+    A.φ, A.ℓ = φ, ℓ
+    _refactor_coarse!(P.φ)
+    _refactor_coarse!(P.ℓ)
+    return A
+end
+
+# The station-gain values of `sys` at the unknowns `z`, whose first are its `θ`,
+# in a buffer of `sys` the next call overwrites.
+_gains_at!(sys, z) = mul!(sys.gains, sys.J, view(z, eachindex(sys.θ)))
+
 # The negative gradient of system `s`'s objective at the unknowns `z`, whose
-# slots are at their current values: the data's `b` on the slots less the
-# priors' gradient (`_prior_gradient`).
+# station gains are at their current values: the data's `b` on the gains less
+# the priors' gradient (`_prior_gradient!`), in a buffer of `s.sys` the next
+# call overwrites.
 function _step_residual(s, z)
-    r = -_prior_gradient(s.sys.layout, s.priors, z)
-    view(r, eachindex(s.sys.bf)) .+= s.sys.bf
+    r = _prior_gradient!(s.sys.residual, s.sys.layout, s.priors, z)
+    r .= .-r
+    view(r, eachindex(s.sys.bθ)) .+= s.sys.bθ
     return r
 end
 
 """
-    _joint_step(φ, ℓ, tracks, λ, linsolve; abstol, z0) -> (; z, x′, decrease, iterations)
+    _joint_step(φ, ℓ, λ, linsolve; abstol, z0, state) -> (; z, x′, decrease, iterations)
 
 `_profiled_step` over both observables at once, with the exact Hessian's cross
 block between them (`JointCurvature`): `φ` and `ℓ` are the observables' systems
-(`_profiled_systems`), `tracks` their acting tracks, `λ` their dampings and
-`z0` their unknowns at the current point, as `(; phase, amp)`.
+(`_profiled_systems`), `λ` their dampings and
+`z0` their unknowns at the current point, as `(; phase, amp)`. Its LinearSolve
+cache is kept in `state` (`_krylov_solve!`).
 Away from the mode, where the model leaves residuals as large as the signal, the
 cross block is as large as the diagonal ones.
 """
-function _joint_step(φ, ℓ, tracks, λ, linsolve; abstol, z0 = map(s -> _current_unknowns(s.sys), (; phase = φ, amp = ℓ)))
+function _joint_step(φ, ℓ, λ, linsolve; abstol, z0 = map(s -> _current_unknowns(s.sys), (; phase = φ, amp = ℓ)), state)
     Kφ, _, _ = _reduce!(φ.sys, φ.c, λ.phase)
     Kℓ, _, _ = _reduce!(ℓ.sys, ℓ.c, λ.amp)
-    Pφ = ProfilePreconditioner(_refactor!(φ.sys, Kφ), _coarse_space(φ.sys, tracks.phase, λ.phase)...)
-    Pℓ = ProfilePreconditioner(_refactor!(ℓ.sys, Kℓ), _coarse_space(ℓ.sys, tracks.amp, λ.amp)...)
+    Fφ, Fℓ = _refactor!(φ.sys, Kφ), _refactor!(ℓ.sys, Kℓ)
+    Zφ, Uφ = _coarse_space!(φ.sys, λ.phase)
+    Zℓ, Uℓ = _coarse_space!(ℓ.sys, λ.amp)
     nφ = size(Kφ, 1)
-    A = JointCurvature(Kφ, Kℓ, φ.profile, ℓ.profile)
-    P = BlockPreconditioner(Pφ, Pℓ, nφ)
     z = [z0.phase; z0.amp]
     residual = [_step_residual(φ, z0.phase); _step_residual(ℓ, z0.amp)]
-    sol = LinearSolve.solve(LinearSolve.LinearProblem(A, residual), linsolve; Pl = P, abstol, reltol = _FORCING, maxiters = 10 * length(z))
-    LinearSolve.SciMLBase.successful_retcode(sol.retcode) || error(
-        "the profiled bandpass step did not converge: $(nameof(typeof(linsolve))) returned $(sol.retcode) " *
-            "after $(sol.iters) iterations",
-    )
+    A, _, sol = _krylov_solve!(state, (φ.profile, ℓ.profile), residual, linsolve; abstol) do
+        P = BlockPreconditioner(ProfilePreconditioner(Fφ, Zφ, Uφ), ProfilePreconditioner(Fℓ, Zℓ, Uℓ), nφ)
+        JointCurvature(Kφ, Kℓ, φ.profile, ℓ.profile), P
+    end
     δ = sol.u
     z .+= δ
     zφ, zℓ = view(z, 1:nφ), view(z, (nφ + 1):length(z))
-    decrease = _predicted_decrease(A, residual, δ, (1:length(φ.sys.xf), nφ .+ (1:length(ℓ.sys.xf))), (λ.phase, λ.amp))
-    x′(s, z) = (x = copy(s.sys.x); x[s.sys.free] .= view(z, eachindex(s.sys.xf)); x)
-    return (; z = (; phase = collect(zφ), amp = collect(zℓ)), x′ = (; phase = x′(φ, zφ), amp = x′(ℓ, zℓ)), decrease, iterations = sol.iters)
+    decrease = _predicted_decrease(
+        A, residual, δ, ((1:length(φ.sys.θ), λ.phase, φ.sys.damping), (nφ .+ (1:length(ℓ.sys.θ)), λ.amp, ℓ.sys.damping)),
+    )
+    return (;
+        z = (; phase = collect(zφ), amp = collect(zℓ)), x′ = (; phase = _gains_at!(φ.sys, zφ), amp = _gains_at!(ℓ.sys, zℓ)),
+        decrease, iterations = sol.iters,
+    )
 end
 
-# The decrease of the quadratic with curvature `A`, less the damping `λs[i]` on
-# the unknowns `slots[i]`, along the increment `δ` from a point where its
-# negative gradient is `residual`.
-function _predicted_decrease(A, residual, δ, slots, λs)
-    damping = sum(((s, λ),) -> λ * sum(abs2, view(δ, s)), zip(slots, λs))
+# The decrease of the quadratic with curvature `A`, less the damping `λ·d` on
+# the unknowns `s` of each `(s, λ, d)` of `damped`, along the increment `δ` from
+# a point where its negative gradient is `residual`.
+function _predicted_decrease(A, residual, δ, damped)
+    damping = sum(((s, λ, d),) -> λ * sum(k -> d[k] * δ[s[k]]^2, eachindex(s, d); init = 0.0), damped)
     return dot(residual, δ) - (dot(δ, mul!(similar(δ), A, δ)) - damping) / 2
 end
 
-# Each observable's MAP system at the gains `x` (`(; phase, amp)` slot values):
-# `(; sys, c, profile, scale, priors)`, `scale` its largest data curvature and
-# `priors` its tracks' resolved priors, or `nothing`
-# where the observable is not fit, with the linearization `lin`, `S` re-solved.
-# `ctx` is the solve's fixed structure (built in `solve_joint_bandpass!`), and
-# `exact` chooses the profile's curvature.
-function _profiled_systems(x, ctx, priors, S; exact)
-    (; cells, fitted, free, filled, tracks, acting, key) = ctx
-    g = exp.(complex.(x.amp, x.phase))
-    _source!(S, g, cells, ctx.executor)
-    lin = _linearize(g, S, cells, ctx.nslots, ctx.npairs, ctx.executor)
+# Each observable's MAP system at the station gains `x` (`(; phase, amp)`
+# values): `(; sys, c, profile, priors)`, `priors` its tracks' resolved priors,
+# or `nothing` where the observable is not fit, with the linearization `lin`,
+# `S` re-solved. `ctx` is the solve's fixed structure (`solve_joint_gains!`):
+# each observable's unknowns are its parameters `ctx.params[obs].θ`, carried to
+# the station gains by its `J`. `exact` chooses the profile's curvature. The
+# gains, `S`, the linearization and the profiles' vectors are buffers of `ctx`
+# the next call overwrites.
+function _profiled_systems(x, ctx, priors; exact)
+    (; cells, fitted, tracks, params, buffers) = ctx
+    g = _gains!(buffers.g, x)
+    S = _source!(buffers.S, g, cells, ctx.executor)
+    lin = _linearize(g, S, cells, ctx.ngains, ctx.npairs, ctx.executor, ctx.accumulators.linearize, buffers.lin)
     H = (; phase = _data_curvature!(ctx.Hφ, ctx.hpos, lin.q, -1), amp = _data_curvature!(ctx.Hℓ, ctx.hpos, lin.q, 1))
-    b = (; phase = imag.(lin.c), amp = real.(lin.c))
+    b = (; phase = map!(imag, buffers.b.phase, lin.c), amp = map!(real, buffers.b.amp, lin.c))
     systems = map((; phase = :phase, amp = :amp)) do obs
         fitted[obs] || return nothing
-        d = diag(H[obs])
-        scale = maximum(d; init = 0.0)
-        moving = free[obs] .& ((d .> eps() * scale) .| filled[obs])
-        sys = _cached_system!(ctx.systems, obs, H[obs], b[obs], x[obs], moving, tracks[obs][acting[obs]], key)
+        p = params[obs]
+        sys = _cached_system!(ctx.systems, obs, H[obs], b[obs], p.J, p.θ, tracks[obs], p.key; p.ridge)
         c = _assemble!(sys.layout, priors[obs])
-        profile = Profile(g, S, cells, obs === :phase ? -1 : 1, moving, exact, ctx.executor)
-        return (; sys, c, profile, scale, priors = priors[obs])
+        xs, ys = buffers.profile[obs]
+        profile = Profile(g, S, cells, obs === :phase ? -1.0 : 1.0, p.J, xs, ys, exact, ctx.executor, ctx.accumulators[obs])
+        return (; sys, c, profile, priors = priors[obs], krylov = ctx.krylov[obs])
     end
     return systems, lin
+end
+
+# The station gains `exp(ℓ + iφ)` of the values `x` (`(; phase, amp)`), written into `g`.
+_gains!(g, x) = (g .= exp.(complex.(x.amp, x.phase)))
+
+# Writes each observable's parameters `θ` in `params` from the unknowns `z`,
+# whose first they are.
+function _set_parameters!(params, z)
+    for obs in keys(params)
+        isnothing(z[obs]) || (params[obs].θ .= view(z[obs], eachindex(params[obs].θ)))
+    end
+    return params
 end
 
 """
     _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ = 1e-3, exact = false) -> NamedTuple
 
-The MAP of the gains `x` (`(; phase, amp)` slot values, updated in place) under
-the resolved `priors`, by Levenberg–Marquardt on an objective over the slots
-and the tracks' latent unknowns: χ²/2 with `S` at its optimum plus the acting
-tracks' prior energy at those unknowns (`_prior_energy`). The latent unknowns
-start at their optimum given the slots (`_current_unknowns`) and move with
-each step, so the energies compared are sums of whitened innovations at given
-states; re-minimizing over the states for each trial would perturb them by the
-rounding of a solve as stiff as the stiffest prior. Each step is
-`_profiled_step`, damped by `μ` times the largest data curvature of its
-observable, with `μ` following how well the step's model predicted the
-objective's decrease (Madsen, Nielsen & Tingleff 2004, §3.2). The steps take
-the Gauss–Newton curvature until one moves no slot by more than one standard
-error, or by fewer than ten while the objective falls by more than 1.5 times
-the model's prediction, and the exact Hessian from then on; with `exact`, a
-start already in the mode's basin, from the first step. The solve stops
-once the undamped step moves no slot by `tolerance` of its standard error from
-the data, or once no damping lowers the objective. The undamped step is checked
-after a step that moves no slot by `tolerance` or lowers the objective by less
-than `tolerance²/2`.
+The MAP of the parameters `ctx.params` under the resolved `priors`, with the
+station gains `x = J·θ` (`(; phase, amp)` values) kept with them, both updated
+in place, by Levenberg–Marquardt on an objective over the parameters and the
+tracks' latent unknowns: χ²/2 with `S` at its optimum plus the tracks' prior
+energy at those unknowns (`_prior_energy`). The latent unknowns start at their
+optimum given the parameters (`_current_unknowns`) and move
+with each step, so the energies compared are sums of whitened innovations at
+given states; re-minimizing over the states for each trial would perturb them by
+the rounding of a solve as stiff as the stiffest prior. Each step is
+`_profiled_step`, damped by `μ` times each parameter's curvature, with `μ`
+following how well the step's model predicted the
+objective's decrease (Madsen, Nielsen & Tingleff 2004, §3.2). The steps take the
+Gauss–Newton curvature until one moves no gain by more than one standard error,
+or by fewer than ten while the objective falls by more than 1.5 times the
+model's prediction, and the exact Hessian from then on; with `exact`, a start
+already in the mode's basin, from the first step. The solve stops once the
+undamped step moves no gain by `tolerance` of its standard error from the data,
+or once no damping lowers the objective. The undamped step is checked after a
+step that moves no gain by `tolerance` or lowers the objective by less than
+`tolerance²/2`.
 
 Returns `(; converged, stalled, change, worst, iterations, krylov, μ, objective,
 weights)`: the largest weighted change of the last step, undamped where no
-damping lowered the objective, and its slot, the steps and Krylov iterations
-taken, the damping of the last accepted step, the final objective, and each slot's
-data weight at the last linearization, the inverse square of its standard
-error.
+damping lowered the objective, and its station gain, the steps and Krylov
+iterations taken, the damping of the last accepted step, the final objective,
+and each gain's data weight at the last linearization, the inverse square of
+its standard error.
 """
 function _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ = 1.0e-3, exact::Bool = false)
-    (; cells, fitted, tracks, acting) = ctx
-    S = zeros(ComplexF64, length(cells.ranges))
+    (; cells, fitted) = ctx
     observables = (; phase = :phase, amp = :amp)
     energy(systems, z) = sum(obs -> isnothing(systems[obs]) ? 0.0 : _prior_energy(systems[obs].sys.layout, priors[obs], z[obs]), keys(observables))
-    objective(systems, x, z) = _profiled_chi2(exp.(complex.(x.amp, x.phase)), cells, ctx.executor) / 2 + energy(systems, z)
+    objective(systems, x, z) = _profiled_chi2(_gains!(ctx.buffers.trial, x), cells, ctx.executor) / 2 + energy(systems, z)
     abstol = tolerance / 10
     change, worst, stalled, converged, near = Inf, 0, false, false, false
     ν, iterations, krylov = 2.0, 0, 0
-    O0, z, layout_of_z = Inf, nothing, nothing
+    O0, z = Inf, nothing
     μ_accepted = μ
     local lin
     for _ in 1:max_iterations
         iterations += 1
-        systems, lin = _profiled_systems(x, ctx, priors, S; exact)
-        free = map(s -> isnothing(s) ? nothing : copy(s.sys.free), systems)
-        if free != layout_of_z
+        systems, lin = _profiled_systems(x, ctx, priors; exact)
+        if isnothing(z)
             z = map(s -> isnothing(s) ? nothing : _current_unknowns(s.sys), systems)
-            layout_of_z = free
             O0 = objective(systems, x, z)
         end
         function propose(μ)
             if exact && all(fitted)
-                λ = map(s -> μ * s.scale, systems)
-                acting_tracks = map(obs -> tracks[obs][acting[obs]], observables)
-                step = _joint_step(systems.phase, systems.amp, acting_tracks, λ, linsolve; abstol, z0 = z)
+                step = _joint_step(systems.phase, systems.amp, (; phase = μ, amp = μ), linsolve; abstol, z0 = z, state = ctx.krylov.joint)
                 krylov += step.iterations
                 return step.x′, step.decrease, step.z
             end
             steps = map(keys(observables)) do obs
                 s = systems[obs]
                 isnothing(s) && return (x′ = x[obs], decrease = 0.0, iterations = 0, z = nothing)
-                return _profiled_step(s, tracks[obs][acting[obs]], μ * s.scale, linsolve; abstol, z0 = z[obs])
+                return _profiled_step(s, μ, linsolve; abstol, z0 = z[obs])
             end
             krylov += steps[1].iterations + steps[2].iterations
             return (; phase = steps[1].x′, amp = steps[2].x′), steps[1].decrease + steps[2].decrease, (; phase = steps[1].z, amp = steps[2].z)
         end
         if near
             x1, _, _ = propose(eps())
-            change, worst = _largest_weighted_change(x1.amp .- x.amp, x1.phase .- x.phase, lin.W)
+            change, worst = _largest_weighted_change(x1, x, lin.W)
             change < tolerance && (converged = true; break)
         end
         accepted, decrease = false, Inf
         while isfinite(μ)
             x1, predicted, z1 = propose(μ)
-            change, worst = _largest_weighted_change(x1.amp .- x.amp, x1.phase .- x.phase, lin.W)
+            change, worst = _largest_weighted_change(x1, x, lin.W)
             _within_rounding(x1.amp, x.amp) && _within_rounding(x1.phase, x.phase) && break
             O1 = objective(systems, x1, z1)
             # The objective is known to its rounding.
@@ -692,6 +751,7 @@ function _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ 
                 x.amp .= x1.amp
                 x.phase .= x1.phase
                 z, O0 = z1, O1
+                _set_parameters!(ctx.params, z)
                 # A step accepted at the objective's rounding can have `ρ ≤ 0`; it
                 # doubles `μ`, as a rejection does.
                 μ = max(μ * max(1 / 3, 1 - (2 * max(ρ, 0) - 1)^3), eps())
@@ -710,7 +770,7 @@ function _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ 
         # ending there is not a stall.
         if !accepted
             x1, _, _ = propose(eps())
-            change, worst = _largest_weighted_change(x1.amp .- x.amp, x1.phase .- x.phase, lin.W)
+            change, worst = _largest_weighted_change(x1, x, lin.W)
             stalled = change >= tolerance && change^2 / 2 > 16 * eps(abs(O0))
             converged = !stalled
             break
@@ -718,63 +778,17 @@ function _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, μ 
         near = change < tolerance || decrease < tolerance^2 / 2
         exact |= change < 1
     end
-    return (; converged, stalled, change, worst, iterations, krylov, μ = μ_accepted, objective = O0, weights = lin.W)
+    return (; converged, stalled, change, worst, iterations, krylov, μ = μ_accepted, objective = O0, weights = copy(lin.W))
 end
 
-"""
-    _em_hypers!(priors, x, ctx; linsolve, tolerance) -> Float64
-
-One EM update of the hyperparameters the acting tracks' priors give as
-densities, at the MAP gains `x`: the E-step takes the moments of each track's
-state chain under the Gaussian posterior at the MAP, with the curvature
-`ProfilePreconditioner` inverts (held-`S`, except on the track constants,
-which keep their prior variance); the M-step
-maximizes each track's expected log prior density plus its hyperprior over the
-log hyperparameters. Writes the new hyperparameters into `priors` and returns
-the largest change of a log hyperparameter.
-"""
-function _em_hypers!(priors, x, ctx; linsolve, tolerance)
-    (; tracks, acting) = ctx
-    S = zeros(ComplexF64, length(ctx.cells.ranges))
-    systems, _ = _profiled_systems(x, ctx, priors, S; exact = true)
-    Δ = 0.0
-    for obs in (:phase, :amp)
-        s = systems[obs]
-        isnothing(s) && continue
-        estimating = [k for (k, i) in pairs(acting[obs]) if _hyper_count(tracks[obs][i].prior) > 0]
-        isempty(estimating) && continue
-        step = _profiled_step(s, tracks[obs][acting[obs]], 0.0, linsolve; abstol = tolerance / 10)
-        cov = _covariance(step.P, step.K)
-        for k in estimating
-            chains = s.sys.chains[k]
-            mom = _chain_moments(chains, step.z, cov, first(chains).dim)
-            priors[obs][k], δ = _m_step(tracks[obs][acting[obs][k]].prior, priors[obs][k], chains, mom)
-            Δ = max(Δ, δ)
-        end
-    end
-    return Δ
-end
-
-# Each slot's summed data weight over the cells.
-function _slot_weights(cells::BandpassCells, nslots)
-    out = zeros(nslots)
+# Each station gain's summed data weight over the cells.
+function _gain_weights(cells::BandpassCells, ngains)
+    out = zeros(ngains)
     for (k, wk) in pairs(cells.w)
         out[cells.na[k]] += wk
         out[cells.nb[k]] += wk
     end
     return out
-end
-
-# Amplitude track `t` with the constant `S` absorbs held: by its first acting
-# level group (`held`) under a proper prior, which the prior then sets; else by
-# its slot of most data `weight`, marked in `pins`. `held` is `0` where no level
-# group holds it. Phase tracks are held by `_hold_phase_constants!`.
-function _hold_track_constant!(pins, t, hasdata, weight)
-    j = findfirst(t.active)
-    !isnothing(j) && _proper_prior(t.prior) && return merge(t, (; held = _level_group(t, t.prior, j)))
-    measured = [n for n in t.slots if hasdata[n]]
-    isempty(measured) || (pins[measured[argmax(weight[measured])]] = true)
-    return merge(t, (; held = 0))
 end
 
 # The M-step for one track: `prior` (resolved from the `spec` that gives some
@@ -787,7 +801,7 @@ end
 # places each log hyperparameter within about `√(2·atol)` of the maximum.
 function _m_step(spec, prior, chains, mom)
     sums = _moment_sums(chains, mom)
-    box = _log_hyper_box(spec, _piece_extent([ch.u for ch in chains], [ch.h for ch in chains])...)
+    box = _track_box(spec, chains)
     function f(lθ)
         _in_box(lθ, box) || return convert(eltype(lθ), Inf)
         v = _expected_log_prior(_with_log_hypers(spec, lθ), sums, eltype(lθ)) + _log_hyperprior(spec, lθ)
@@ -798,17 +812,269 @@ function _m_step(spec, prior, chains, mom)
     return _with_log_hypers(spec, lθ1), maximum(abs, lθ1 .- lθ0)
 end
 
-# The hyperparameters the acting tracks' priors give as densities, as
-# `(observable, position in acting)` pairs.
-_estimated(ctx) = [(obs, k) for obs in (:phase, :amp) for (k, i) in pairs(ctx.acting[obs]) if _hyper_count(ctx.tracks[obs][i].prior) > 0]
+# The hyperparameters the tracks' priors give as densities, as `(observable,
+# track)` pairs.
+_estimated(ctx) = [(obs, k) for obs in (:phase, :amp) for k in eachindex(ctx.tracks[obs]) if _hyper_count(ctx.tracks[obs][k].prior) > 0]
 
 _log_hyper_vector(priors, ctx, est) =
-    reduce(vcat, [_log_hypers(ctx.tracks[obs][ctx.acting[obs][k]].prior, priors[obs][k]) for (obs, k) in est]; init = Float64[])
+    reduce(vcat, [_log_hypers(ctx.tracks[obs][k].prior, priors[obs][k]) for (obs, k) in est]; init = Float64[])
+
+# The support of `_log_hyper_vector` (`_track_box`), from the chains of the
+# systems in `ctx`.
+_log_hyper_boxes(ctx, est) =
+    reduce(vcat, [_track_box(ctx.tracks[obs][k].prior, ctx.systems[obs].chains[k]) for (obs, k) in est]; init = NTuple{2, Float64}[])
+
+"""
+    _hyper_objective(priors, x, ctx, solved, est; linsolve, abstol) -> (L, ∇L, C)
+
+The log posterior density `L` of the hyperparameters of `priors`, up to a
+constant, by Laplace's method at the MAP `x` that `solved` (`_profiled_map!`)
+reports, and its gradient over the log hyperparameters of the tracks `est`
+(`_estimated`). `L = −O − N − ½ log det A + log p(ψ)`, with `O` the MAP
+objective (`χ²/2` with `S` at its optimum plus the prior energy), `N` the
+priors' log normalizer (`_prior_log_normalizer`), `A` the curvature of the
+profiled objective in its Gauss–Newton form (`_joint_curvature!`), and `p(ψ)`
+the hyperpriors over the log hyperparameters. Its gradient is in two parts.
+With `L`'s other terms held at the MAP, the Fisher identity's: each track's
+expected log prior density under the Gaussian posterior there, covariance
+`A⁻¹`, plus its hyperprior, differentiated in its own log hyperparameters
+(`_hyper_gradient`). Then the MAP moving with `ψ`, which changes `log det A`
+through the cells' weights: with `Λ` the observables' summed `log det A`,
+`dz*/dψ = −H⁻¹ ∂²O/∂z∂ψ` gives `½ ∂/∂ψ (aᵀ ∇z E)` with `a = H⁻¹ ∇z Λ`, `H` the
+exact Hessian of the profiled objective (`_hessian_solve`, by `linsolve` to
+`abstol`) and `E` the prior energy (`_logdet_gain_gradient`,
+`_track_gradient_dot`). `C` is each log hyperparameter's curvature of the
+expected log prior plus hyperprior (the M-step's objective), the complete
+data's information about it, at least the evidence's own. A curvature that
+cannot be factored is an error.
+"""
+function _hyper_objective(priors, x, ctx, solved, est; linsolve, abstol)
+    systems, _ = _profiled_systems(x, ctx, priors; exact = true)
+    (; cells) = ctx
+    L = -solved.objective
+    dΛdq = zeros(length(cells.w))
+    curvatures = map((; phase = :phase, amp = :amp)) do obs
+        s = systems[obs]
+        isnothing(s) && return nothing
+        L -= _prior_log_normalizer(s.sys.layout, priors[obs])
+        joint = _joint_curvature!(s.sys, s.profile, ctx.hpos)
+        L -= joint.logdet / 2
+        cov = joint.inverse()
+        dΛdq .+= joint.weight_gradient(cov)
+        return (; z = _current_unknowns(s.sys), cov)
+    end
+    dΛ = _logdet_gain_gradient(cells, systems, dΛdq)
+    v = map((; phase = :phase, amp = :amp)) do obs
+        s = systems[obs]
+        isnothing(s) && return nothing
+        return [s.sys.J' * dΛ[obs]; zeros(size(s.sys.layout.K, 1) - length(s.sys.θ))]
+    end
+    a = _hessian_solve(systems, v, ctx; linsolve, abstol)
+    grads = map(est) do (obs, k)
+        spec, s = ctx.tracks[obs][k].prior, systems[obs]
+        chains, terms = s.sys.chains[k], s.sys.layout.terms[k]
+        lθ = _log_hypers(spec, priors[obs][k])
+        L += _log_hyperprior(spec, lθ)
+        (; z, cov) = curvatures[obs]
+        fisher, curvature = _hyper_gradient(spec, lθ, chains, _chain_moments(chains, z, cov, first(chains).dim))
+        moving = gradient(l -> _track_gradient_dot(spec, l, terms, z, a[obs]), AutoForwardDiff(), lθ)
+        return fisher .+ moving ./ 2, curvature
+    end
+    return L, reduce(vcat, first.(grads); init = Float64[]), reduce(vcat, last.(grads); init = Float64[])
+end
+
+# `H⁻¹v` over each fitted observable's unknowns, `v` and the result as
+# `(; phase, amp)`, with `H` the exact Hessian of the profiled objective at the
+# systems' point, both observables' with its cross block between them where both
+# are fit (`JointCurvature`): the step `_profiled_step` and `_joint_step` take
+# undamped, with `v` for the residual, by `linsolve` to `abstol`.
+function _hessian_solve(systems, v, ctx; linsolve, abstol)
+    function prepare(s)
+        K, _, _ = _reduce!(s.sys, s.c, 0.0)
+        return K, _refactor!(s.sys, K), _coarse_space!(s.sys, 0.0)...
+    end
+    φ, ℓ = systems.phase, systems.amp
+    if !isnothing(φ) && !isnothing(ℓ)
+        Kφ, Fφ, Zφ, Uφ = prepare(φ)
+        Kℓ, Fℓ, Zℓ, Uℓ = prepare(ℓ)
+        nφ = size(Kφ, 1)
+        _, _, sol = _krylov_solve!(ctx.krylov.joint, (φ.profile, ℓ.profile), [v.phase; v.amp], linsolve; abstol) do
+            P = BlockPreconditioner(ProfilePreconditioner(Fφ, Zφ, Uφ), ProfilePreconditioner(Fℓ, Zℓ, Uℓ), nφ)
+            JointCurvature(Kφ, Kℓ, φ.profile, ℓ.profile), P
+        end
+        return (; phase = sol.u[1:nφ], amp = sol.u[(nφ + 1):end])
+    end
+    solution = map((; phase = :phase, amp = :amp)) do obs
+        s = systems[obs]
+        isnothing(s) && return nothing
+        K, F, Z, U = prepare(s)
+        _, _, sol = _krylov_solve!(s.krylov, s.profile, v[obs], linsolve; abstol) do
+            ProfiledCurvature(K, s.profile), ProfilePreconditioner(F, Z, U)
+        end
+        return copy(sol.u)
+    end
+    return solution
+end
+
+# `aᵀ ∇z E` for one track's chain `terms` (`_chain_terms`) under `spec` with the
+# log hyperparameters `l`, at the unknowns `z`.
+function _track_gradient_dot(spec, l, terms, z, a)
+    T = eltype(l)
+    return _with_piece_models(_with_log_hypers(spec, l), first(terms).dim, T) do model
+        # A loop, as in `_assemble!`.
+        out = zero(T)
+        for t in terms
+            out += _chain_gradient_dot(t, model(t.h), z, a, T)
+        end
+        out
+    end
+end
+
+# The gradient of `Λ`, the observables' summed `log det A` (`_joint_curvature!`),
+# over each observable's station-gain values, `(; phase, amp)`, from its
+# gradient `dΛdq` over the cells' weights `q_c = w|u_c|²|S_J|²`,
+# `u_c = g_a conj(g_b)`, with `S_J = N_J/P_J` at its optimum, `N_J = Σ conj(u_k) r_k`
+# and `P_J = Σ w_k|u_k|²`: `∂ log q_c = 2∂(ℓ_a + ℓ_b) + 2∂ log|N_J| − 2∂ log P_J`.
+function _logdet_gain_gradient(cells::BandpassCells, systems, dΛdq)
+    (; g, S) = something(systems.phase, systems.amp).profile
+    (; r, w, na, nb) = cells
+    dφ, dℓ = zeros(length(g)), zeros(length(g))
+    for (j, rng) in pairs(cells.ranges)
+        N, P, GJ = zero(ComplexF64), 0.0, 0.0
+        for k in rng
+            u = g[na[k]] * conj(g[nb[k]])
+            N += conj(u) * r[k]
+            P += w[k] * abs2(u)
+            q = w[k] * abs2(u * S[j])
+            GJ += dΛdq[k] * q
+            dℓ[na[k]] += 2 * dΛdq[k] * q
+            dℓ[nb[k]] += 2 * dΛdq[k] * q
+        end
+        (abs2(N) > 0 && P > 0) || continue
+        for k in rng
+            u = g[na[k]] * conj(g[nb[k]])
+            ρ = conj(N) * conj(u) * r[k] / abs2(N)
+            p = w[k] * abs2(u) / P
+            dℓ[na[k]] += 2GJ * (real(ρ) - 2p)
+            dℓ[nb[k]] += 2GJ * (real(ρ) - 2p)
+            dφ[na[k]] += 2GJ * imag(ρ)
+            dφ[nb[k]] -= 2GJ * imag(ρ)
+        end
+    end
+    return (; phase = dφ, amp = dℓ)
+end
+
+# The gradient over the log hyperparameters `lθ` of the hyperparameters `spec`
+# gives as densities of the chains' expected log prior density under the state
+# moments `mom` (`_chain_moments`), plus the hyperprior, and the negative of
+# its curvature along each of them.
+function _hyper_gradient(spec, lθ, chains, mom)
+    sums = _moment_sums(chains, mom)
+    f(l) = _expected_log_prior(_with_log_hypers(spec, l), sums, eltype(l)) + _log_hyperprior(spec, l)
+    return gradient(f, AutoForwardDiff(), lθ), -diag(hessian(f, AutoForwardDiff(), lθ))
+end
+
+# The Gauss–Newton curvature of the profiled objective over the unknowns of
+# `sys`, `A = K − B D⁻¹ Bᵀ`, through `M = [K B; Bᵀ D]`: per `J` of the
+# profile's cells, `D_J = Σ q_c` and `B_J = Jᵀ Σ q_c (e_a + σ e_b)` with
+# `q_c = w|g_a S_J conj(g_b)|²`, the held-`S` curvature with `S`'s
+# log-amplitude (or phase) as an unknown. A `J` with `D_J = 0` has no such
+# unknown: its row of `M` is the identity's. Returns `logdet`,
+# `log det A = log det M − log det D`, an error where `M` cannot be factored;
+# `inverse()`, the entries of `M⁻¹` on its pattern (`SelectedInverse`), which
+# on `K`'s are those of `A⁻¹`, as a function of a pair of unknowns;
+# and `weight_gradient(Σ)`, from those entries the gradient of `log det A` over
+# the cells' `q_c`, `Σ_p (M⁻¹)_p ∂M_p/∂q_c − 1/D_J` over `M`'s stored values
+# `p`. `M`'s pattern, the maps from the `q_c` to its values, the factor's
+# symbolic analysis and the selected inverse's plan are kept in `sys.evidence`
+# (`_evidence_layout`, with `hpos` the pattern of the data curvature), and the
+# results read buffers the next call overwrites.
+function _joint_curvature!(sys, profile, hpos)
+    ev = sys.evidence[]
+    isnothing(ev) && (ev = sys.evidence[] = _evidence_layout(sys, profile.cells, profile.σ, hpos))
+    return _joint_curvature_at!(sys, profile, ev)
+end
+
+function _joint_curvature_at!(sys, profile, ev)
+    (; g, S, cells) = profile
+    (; M, kpos, dpos, qmap, q, D) = ev
+    fill!(D, 0.0)
+    for (j, rng) in pairs(cells.ranges), k in rng
+        q[k] = cells.w[k] * abs2(g[cells.na[k]] * S[j] * conj(g[cells.nb[k]]))
+        D[j] += q[k]
+    end
+    Mv = nonzeros(M)
+    fill!(Mv, 0.0)
+    view(Mv, kpos) .= nonzeros(sys.layout.K)
+    mul!(Mv, qmap, q, true, true)
+    for (j, p) in pairs(dpos)
+        D[j] > 0 || (Mv[p] = 1.0)
+    end
+    F = ev.factor[]
+    F = isnothing(F) ? cholesky(Symmetric(M); check = false) : cholesky!(F, Symmetric(M); check = false)
+    ev.factor[] = F
+    function inverse()
+        Σ = ev.selected[]
+        return ev.selected[] = isnothing(Σ) ? SelectedInverse(F, M) : _selected_inverse!(Σ, F)
+    end
+    function weight_gradient(Σ)
+        out = ev.weights' * nonzeros(Σ.Σ)
+        for (j, rng) in pairs(cells.ranges)
+            D[j] > 0 && (view(out, rng) .-= 1 / D[j])
+        end
+        return out
+    end
+    issuccess(F) || error(
+        "the Gauss–Newton curvature of the gains and source terms is not positive definite at the MAP, " *
+            "so the Laplace evidence is undefined there",
+    )
+    return (; logdet = logdet(F) - sum(d -> d > 0 ? log(d) : 0.0, D), inverse, weight_gradient)
+end
+
+# The fixed structure of `_joint_curvature!` for `sys` over `cells`, with `σ`
+# the sign of a cell's second gain and `hpos` the positions of each station-gain
+# pair's entries in the data curvature (`_curvature_pattern`): `M`'s pattern, the
+# positions of `K`'s stored values and of each `D_J` in it, the map `qmap` from
+# the cells' `q_c` to `M`'s values in `B`, `Bᵀ` and `D`, the map `weights` from
+# them to every value of `M` they enter (those and the data's part of `K`),
+# buffers for the `q_c` and `D`, and places for the factor and the selected
+# inverse.
+function _evidence_layout(sys, cells, σ, hpos)
+    K = sys.layout.K
+    n, m = size(K, 1), length(cells.ranges)
+    rows = sparse(sys.J')
+    Ik, Jk, _ = findnz(K)
+    entries = Tuple{Int, Int, Int, Float64}[]
+    for (j, rng) in pairs(cells.ranges), k in rng, (gain, s) in ((cells.na[k], 1.0), (cells.nb[k], σ))
+        for r in nzrange(rows, gain)
+            push!(entries, (rowvals(rows)[r], n + j, k, s * nonzeros(rows)[r]))
+        end
+    end
+    Is = [Ik; first.(entries); getindex.(entries, 2); n .+ (1:m)]
+    Js = [Jk; getindex.(entries, 2); first.(entries); n .+ (1:m)]
+    M = sparse(Is, Js, ones(length(Is)), n + m, n + m)
+    kpos = [_position(M, i, j) for (i, j) in zip(Ik, Jk)]
+    dpos = [_position(M, n + j, n + j) for j in 1:m]
+    pos = [[_position(M, i, j) for (i, j, _, _) in entries]; [_position(M, j, i) for (i, j, _, _) in entries]; dpos[[j for (j, rng) in pairs(cells.ranges) for _ in rng]]]
+    cell = [getindex.(entries, 3); getindex.(entries, 3); [k for rng in cells.ranges for k in rng]]
+    coef = [last.(entries); last.(entries); ones(length(cells.w))]
+    qmap = sparse(pos, cell, coef, nnz(M), length(cells.w))
+    ncells = length(cells.w)
+    hcell = sparse(
+        [p for k in 1:ncells for p in hpos[cells.e[k]]], repeat(1:ncells; inner = 4), repeat([1.0, 1.0, σ, σ], ncells),
+        size(sys.data_map, 2), ncells,
+    )
+    Ik, Jc, Vk = findnz(sys.data_map * hcell)
+    weights = qmap + sparse(kpos[Ik], Jc, Vk, nnz(M), ncells)
+    return (; M, kpos, dpos, qmap, weights, q = zeros(ncells), D = zeros(m),
+        factor = Ref{Union{Nothing, CHOLMOD.Factor{Float64, Int}}}(nothing), selected = Ref{Any}(nothing),
+    )
+end
 
 function _set_log_hypers!(priors, ctx, est, ψ)
     i = 0
     for (obs, k) in est
-        spec = ctx.tracks[obs][ctx.acting[obs][k]].prior
+        spec = ctx.tracks[obs][k].prior
         n = _hyper_count(spec)
         priors[obs][k] = _with_log_hypers(spec, ψ[(i + 1):(i + n)])
         i += n
@@ -817,99 +1083,115 @@ function _set_log_hypers!(priors, ctx, est, ψ)
 end
 
 """
-    _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_iterations, linsolve)
-        -> (; solved, converged, evaluations, unconverged, moved)
+    _fit_hypers!(priors, x, ctx, solved; tolerance, max_iterations, max_hyper_iterations, linsolve, optimizer,
+                 warmup = 5) -> (; solved, converged, evaluations, unconverged, remaining)
 
-The hyperparameters the priors give as densities by MAP-EM, accelerated by
-SQUAREM (Varadhan & Roland 2008, scheme S3) over their logs, written into
-`priors` with the gains `x` at their MAP under them. One EM map is the MAP of
-the gains (`_profiled_map!`, warm from the last, with the exact Hessian)
-followed by `_em_hypers!`.
-Each cycle takes two EM maps from `ψ₀`, extrapolates along them by the step
-`α = −‖r‖/‖v‖`, bounded by a length that grows after each step it bounds, and
-takes one EM map from there. EM is slow where the data barely determine a
-direction, so a plain EM step understates the distance to its fixed point. The
-cycles stop once one moves no gain by `tolerance` of its standard error, from
-the MAP it starts at to the converged MAP at the extrapolated hyperparameters
-(`moved`, the largest such change), or after `max_em_iterations` EM maps: the
-hyperparameters the gains no longer depend on are left where EM has taken them.
-`solved` is the MAP at the starting hyperparameters, and the result's the MAP at
-the final ones; `unconverged` counts the EM maps whose MAP stopped at
+The hyperparameters the priors give as densities at their type-II MAP, written
+into `priors` with the gains `x` at their MAP under them. The evidence can
+have more than one maximum along a track's hyperparameters (a smooth track,
+or one held nearly rigid at the sample spacing), so `warmup` EM maps
+(`_em_step!`, each after the MAP at the last) first move each track toward
+what its posterior moments support. From there `optimizer`, an
+Optimization.jl optimizer that takes a gradient and bounds, maximizes the
+Laplace log evidence (`_hyper_objective`) over the log hyperparameters within
+their support (`_log_hyper_boxes`), each scaled by the square root of its
+curvature `C` there, so that one unit of each is about one standard error.
+
+Each evaluation is the MAP of the gains (`_profiled_map!`, warm from the last,
+with the exact Hessian) and the evidence and its gradient there. The fit stops
+once the evidence an exact Newton step would still gain, `½ Σ g²/C` over the
+gradient `g` projected onto the support (`remaining`), is below
+`tolerance²/2`, the rule the MAP solve applies to its objective; when the
+optimizer stops on its own; or after
+`max_hyper_iterations` iterations, the EM maps among them, where `converged` is
+false. `solved` is the MAP at the starting hyperparameters, and the result's
+the MAP at the final ones; `unconverged` counts the MAPs that stopped at
 `max_iterations`.
 """
-function _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_iterations, linsolve)
+function _fit_hypers!(priors, x, ctx, solved; tolerance, max_iterations, max_hyper_iterations, linsolve, optimizer, warmup = 5)
     est = _estimated(ctx)
-    evaluations, unconverged = 0, 0
-    function em_map(ψ)
+    boxes = _log_hyper_boxes(ctx, est)
+    lo, hi = first.(boxes), last.(boxes)
+    nem = min(warmup, max_hyper_iterations)
+    for i in 1:nem
+        i == 1 || (solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, solved.μ, exact = true))
+        _em_step!(priors, x, ctx, solved, est)
+    end
+    ψ0 = _into_box(_log_hyper_vector(priors, ctx, est), boxes)
+    mapped, at = (nem > 0 ? fill(NaN, length(ψ0)) : _log_hyper_vector(priors, ctx, est)), Float64[]
+    L, G, C = -Inf, Float64[], Float64[]
+    evaluations, unconverged, remaining = 0, 0, Inf
+    function evaluate!(ψ)
+        ψ == at && return nothing
         _set_log_hypers!(priors, ctx, est, ψ)
-        solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, solved.μ, exact = true)
-        unconverged += !(solved.converged || solved.stalled)
-        _em_hypers!(priors, x, ctx; linsolve, tolerance)
-        evaluations += 1
-        return _log_hyper_vector(priors, ctx, est)
-    end
-    ψ0 = _log_hyper_vector(priors, ctx, est)
-    # The MAP at ψ0 is current: the first map needs no new MAP.
-    _em_hypers!(priors, x, ctx; linsolve, tolerance)
-    evaluations += 1
-    ψ1 = _log_hyper_vector(priors, ctx, est)
-    αmax, converged, moved = 1.0, false, Inf
-    while evaluations + 2 <= max_em_iterations
-        start = map(copy, x)
-        ψ2 = em_map(ψ1)
-        r, v = ψ1 - ψ0, ψ2 - 2ψ1 + ψ0
-        α = norm(v) > 0 ? -norm(r) / norm(v) : -1.0
-        bounded = α < -αmax
-        α = clamp(α, -αmax, -1.0)
-        ψ′ = ψ0 - 2α * r + α^2 * v
-        ψ3 = em_map(ψ′)
-        bounded && (αmax *= 4)
-        moved, _ = _largest_weighted_change(x.amp .- start.amp, x.phase .- start.phase, solved.weights)
-        ψ0 = ψ3
-        if moved < tolerance && solved.converged
-            converged = true
-            break
+        if ψ != mapped
+            solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, solved.μ, exact = true)
+            unconverged += !(solved.converged || solved.stalled)
+            mapped = copy(ψ)
         end
-        ψ1 = em_map(ψ0)
+        L, G, C = _hyper_objective(priors, x, ctx, solved, est; linsolve, abstol = tolerance / 10)
+        at = copy(ψ)
+        evaluations += 1
+        remaining = sum(eachindex(ψ, G, C); init = 0.0) do i
+            held = (ψ[i] <= lo[i] && G[i] < 0) || (ψ[i] >= hi[i] && G[i] > 0)
+            return held ? 0.0 : G[i]^2 / (2 * max(C[i], eps()))
+        end
+        remaining < tolerance^2 / 2 && solved.converged && throw(HyperparametersSettled())
+        return nothing
     end
-    _set_log_hypers!(priors, ctx, est, ψ0)
-    solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, solved.μ, exact = true)
-    return (; solved, converged, evaluations, unconverged, moved)
+    converged = try
+        evaluate!(ψ0)
+        if nem < max_hyper_iterations
+            D = sqrt.(max.(C, 1.0))
+            objective(u, _) = (evaluate!(u ./ D); -L)
+            gradient!(out, u, _) = (evaluate!(u ./ D); out .= .-G ./ D)
+            problem = Optimization.OptimizationProblem(
+                Optimization.OptimizationFunction(objective; grad = gradient!), ψ0 .* D; lb = lo .* D, ub = hi .* D,
+            )
+            result = Optimization.solve(problem, optimizer; maxiters = max_hyper_iterations - nem)
+            evaluate!(result.u ./ D)
+            Optimization.SciMLBase.successful_retcode(result.retcode)
+        else
+            false
+        end
+    catch e
+        e isa HyperparametersSettled || rethrow()
+        true
+    end
+    return (; solved, converged, evaluations, unconverged, remaining)
 end
 
-# `_posterior_system` of one observable, its structure kept in `cache[obs]` while
-# the free slots and the fixed slots' values are unchanged and its values
-# rewritten for the curvature `H`, the gradient `b` and the free slots' values
-# `x`: the prior terms' pattern, their constants from the fixed slots and the
-# factor's symbolic analysis carry over. `H` keeps one sparsity pattern
-# throughout (`_curvature_pattern`).
-function _cached_system!(cache, obs, H, b, x, free, tracks, key)
-    entry = get(cache, obs, nothing)
-    if isnothing(entry) || entry.sys.free != free || any(n -> !free[n] && entry.sys.x[n] != x[n], eachindex(x, free))
-        sys = _posterior_system(H, b, x, free, tracks, key)
-        Is, Js, _ = findnz(H[free, free])
-        cache[obs] = (; sys, data = [_position(sys.layout.K, i, j) for (i, j) in zip(Is, Js)])
-        return sys
+# One EM map of the hyperparameters `est` (`_estimated`) at the MAP `x` that
+# `solved` reports, written into `priors`: each track's state moments under the
+# Gaussian posterior there, covariance `A⁻¹` (`_joint_curvature!`), and its
+# hyperparameters at the maximum of their expected log prior plus hyperprior
+# within their support (`_m_step`).
+function _em_step!(priors, x, ctx, solved, est)
+    systems, _ = _profiled_systems(x, ctx, priors; exact = true)
+    posterior = map((; phase = :phase, amp = :amp)) do obs
+        s = systems[obs]
+        isnothing(s) && return nothing
+        joint = _joint_curvature!(s.sys, s.profile, ctx.hpos)
+        return (; z = _current_unknowns(s.sys), cov = joint.inverse())
     end
-    sys = _update_system(entry.sys, entry.data, H, b, x)
-    cache[obs] = (; sys, entry.data)
-    return sys
+    for (obs, k) in est
+        chains = systems[obs].sys.chains[k]
+        (; z, cov) = posterior[obs]
+        priors[obs][k], _ = _m_step(ctx.tracks[obs][k].prior, priors[obs][k], chains, _chain_moments(chains, z, cov, first(chains).dim))
+    end
+    return priors
 end
 
-function _update_system(sys, data, H, b, x)
-    (; layout, free) = sys
-    Hf = H[free, free]
-    sys.x .= x
-    sys.xf .= view(x, free)
-    sys.bf .= view(b, free)
-    fill!(layout.base, 0.0)
-    for (p, v) in zip(data, nonzeros(Hf))
-        layout.base[p] += v
-    end
-    nf = length(sys.xf)
-    Hx = Hf * sys.xf
-    fill!(layout.h0, 0.0)
-    view(layout.h0, 1:nf) .= view(b, free) .+ Hx
-    c0 = dot(sys.xf, Hx) / 2 + dot(view(b, free), sys.xf)
-    return merge(sys, (; layout = merge(layout, (; c0))))
+# Thrown by `_fit_hypers!`'s objective to end the optimizer's run once the
+# evidence left to gain is below its tolerance.
+struct HyperparametersSettled <: Exception end
+
+# `_posterior_system` of one observable, kept in `cache[obs]` and its values
+# rewritten for the curvature `H`, the gradient `b` and the parameters `θ`
+# (`_set_data!`): the pattern, the factor's symbolic analysis and the buffers
+# carry over. `H` keeps one sparsity pattern throughout (`_curvature_pattern`).
+function _cached_system!(cache, obs, H, b, J, θ, tracks, key; kw...)
+    sys = get(cache, obs, nothing)
+    isnothing(sys) && return cache[obs] = _posterior_system(H, b, J, θ, tracks, key; kw...)
+    return _set_data!(sys, H, b, θ)
 end

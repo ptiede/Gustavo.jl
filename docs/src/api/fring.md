@@ -1,8 +1,8 @@
 # Fring
 
-The solver stages and their pluggable smoothers: the fringe
+The solver stages and the bandpass smoother: the fringe
 search, stationization, the bandpass solve, and
-adhoc phasing.
+the adhoc solve.
 
 ```@autodocs
 Modules = [Gustavo.Fring]

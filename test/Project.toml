@@ -16,7 +16,7 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 XRadio = "8f21e5d1-474f-4c64-bef4-ed78edb0e816"
 
 [sources]
-FITSFiles = {url = "https://github.com/ptiede/FITSFiles.jl", rev = "ptiede-uvfixes"}
+FITSFiles = {url = "https://github.com/ptiede/FITSFiles.jl", rev = "ptiede-uvfixes-rebased"}
 
 [compat]
 Distributions = "0.25"

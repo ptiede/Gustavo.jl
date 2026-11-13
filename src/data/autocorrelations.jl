@@ -25,11 +25,11 @@ function normalize_by_autocorrelations!(ms::XRadio.MeasurementSet)
             for p in axes(feeds, 1) if allequal(feeds[p, bi])
     ]
     isempty(autos) && return ms
-    slot = Dict(first(x) => k for (k, x) in pairs(autos))
+    index = Dict(first(x) => k for (k, x) in pairs(autos))
     # Each (product, baseline) cell's two autocorrelations, as indices into
     # `autos` (0 for one the set lacks), or `(-1, -1)` for an autocorrelation.
     ends = [
-        a == b ? (-1, -1) : (get(slot, (a, feeds[p, bi][1]), 0), get(slot, (b, feeds[p, bi][2]), 0))
+        a == b ? (-1, -1) : (get(index, (a, feeds[p, bi][1]), 0), get(index, (b, feeds[p, bi][2]), 0))
             for p in axes(feeds, 1), (bi, (a, b)) in pairs(antennas)
     ]
     layers = map(_storage_order, (ms[:visibility], ms[:weight], ms[:flag]))

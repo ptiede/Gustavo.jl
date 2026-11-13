@@ -7,7 +7,7 @@
     @testset "fit, then calibrate" begin
         ps, _ = _build_fringe_ps()
         gauge = PinAntenna(1)
-        sols = _fit_chain((FringeClosure(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
+        sols = _fit_chain((FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge), Adhoc(; gauge)), ps)
         @test all(s -> s isa CAL.CalibrationSolution, sols)
         @test all(s -> length(s.geom.antennas) == 4, sols)
         @test [s.name for s in sols] == [:fringe, :bandpass, :adhoc]
@@ -45,7 +45,7 @@
         ps, _ = _build_fringe_ps()
         # A standalone Bandpass fit needs no fringe fit, no anchor check, and
         # no fringe-estimator diagnostics.
-        sol = fit(Bandpass(; gauge = PinAntenna(2)), ps)
+        sol = fit(Bandpass(; model = _bandpass_model(), gauge = PinAntenna(2)), ps)
         @test sol.name === :bandpass
         @test !haskey(sol.info, :search)
         @test length(sol.geom.antennas) == 4
@@ -69,15 +69,16 @@
         @test f.closure == FP.Stationization()
         @test FringeSearch().steer_cells == 9.0
 
-        b = Bandpass(; gauge = PinAntenna(1))
-        @test b.model == default_bandpass_model()
+        # A bandpass has no default model: its components' priors are the user's.
+        @test_throws UndefKeywordError Bandpass(; gauge = PinAntenna(1))
+        model = _bandpass_model()
+        b = Bandpass(; model, gauge = PinAntenna(1))
+        @test b.model == model
         @test b.smoother isa FP.JointSmoother
-        @test isnothing(b.model.phase.bandpass.prior) && isnothing(b.model.logamp.bandpass.prior)
 
-        t = AdhocPhase(; gauge = PinAntenna(1))
+        t = Adhoc(; gauge = PinAntenna(1))
         @test t.model == default_adhoc_model()
-        @test t.smoother == FP.PerTrackAdhocSmoother()
-        @test t.model.phase.adhoc.prior == FP.default_adhoc_prior()
+        @test t.model.phase.adhoc.prior == FP.default_adhoc_phase_prior()
     end
 end
 
@@ -89,7 +90,7 @@ end
     ps, _ = _build_fringe_ps()
 
     @testset "SolveContext" begin
-        ff = Bandpass(; gauge = PinAntenna(1))
+        ff = Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1))
         geom = CAL.DataGeometry(ps)
         groups = XRadio.groupby(ps, XRadio.ByScan())
         sizes = [Gustavo._group_bytes(g) for g in values(groups)]
@@ -153,7 +154,7 @@ end
         # Wired through real fits: each fit's stage is named in the log.
         buf4 = IOBuffer()
         sols = _fit_chain(
-            (FringeClosure(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps;
+            (FringeClosure(; gauge = PinAntenna(1)), Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1))), ps;
             exec = ExecutionConfig(progress = ProgressLogger(min_interval = 0, io = buf4)),
         )
         @test all(s -> s isa CAL.CalibrationSolution, sols)
@@ -180,7 +181,7 @@ end
 # rewrap them — e.g. over a view — and the whole apply path must be indifferent to that.
 @testset "rewrapped parameters correct data identically" begin
     ps, _ = _build_fringe_ps()
-    sol = last(_fit_chain((FringeClosure(; gauge = PinAntenna(1)), Bandpass(; gauge = PinAntenna(1))), ps))
+    sol = last(_fit_chain((FringeClosure(; gauge = PinAntenna(1)), Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1))), ps))
     rewrapped = [
         CAL.ComponentFit(
             c.path, c.component,

@@ -174,7 +174,7 @@ end
 # resolution) canonicalizes before layout: per component name, stations are
 # grouped by identical `(term, Ti, Frequency, Feed)` signature, and each group
 # gets its own rectangular leaf whose `:AntennaName` axis spans just that group's
-# stations. Priors are not part of the signature: each station's plan slot
+# stations. Priors are not part of the signature: each station's plan entry
 # carries its own. θ is ragged across groups; segment lookup is per (station, time)
 # through each group's own plan tables. A name whose single signature covers
 # every station stays a plain `ComponentPlan` — the grouped machinery has zero

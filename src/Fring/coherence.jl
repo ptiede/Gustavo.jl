@@ -282,7 +282,7 @@ function _collapse_axis(
         Fl::AbstractArray{Bool, 4}, axis::Int,
     )
     nchan, nti, nbl, npol = size(V)
-    # The collapsed axis keeps a length-1 slot; the surviving one keeps the
+    # The collapsed axis keeps length 1; the surviving one keeps the
     # cube's own axis, so a caller's axes flow into the result.
     kept, gone = axis == 1 ? (axes(V, 2), axes(V, 1)) : (axes(V, 1), axes(V, 2))
     Vbar = fill(ComplexF64(NaN), axis == 1 ? 1 : nchan, axis == 1 ? nti : 1, nbl, npol)

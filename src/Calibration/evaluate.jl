@@ -45,15 +45,18 @@ end
     gi == 1 && return _node_value(first(plans), θ, ant, feed, ti, c)
     return _grouped_value(Base.tail(plans), gi - 1, θ, ant, feed, ti, c)
 end
-@inline function _node_value(plan::ComponentPlan, θ, ant, feed, ti, c)
+@inline _node_value(plan::ComponentPlan, θ, ant, feed, ti, c) =
+    _leaf_value(plan, _component_leaf(plan, θ), ant, feed, ti, c)
+
+# A component's term at one (ant, feed, ti, c) cell from its shaped leaf.
+@inline function _leaf_value(plan::ComponentPlan, leaf, ant, feed, ti, c)
     t = plan.term
     @inbounds ts = plan.tseg_id[ti]
     @inbounds fs = plan.fseg_id[c]
     x = _cell_coordinates(t, plan, ti, c)
     @inbounds shapes = param_shapes(t, plan.nchan_seg[fs])
-    leaf = _component_leaf(plan, θ)
     node = _feed_node(plan.tying, feed)
-    node == 0 && return zero(eltype(θ))
+    node == 0 && return zero(eltype(leaf))
     return term_eval(t, _block_params(shapes, _leaf_block(leaf, node, fs, ts, ant)), x)
 end
 

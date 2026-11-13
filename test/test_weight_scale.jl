@@ -17,8 +17,8 @@
         # baselines (station solve, bandpass, adhoc).
         gauge = PinAntenna(1)
         specs = (
-            FringeClosure(; gauge), Bandpass(; gauge),
-            AdhocPhase(; model = default_adhoc_model(; prior = nothing), gauge),
+            FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge),
+            Adhoc(; model = default_adhoc_model(; phase = IIDPrior(10.0)), gauge),
         )
         base = let sols = _fit_chain(specs, ps)
             (sols, _calibrate_chain(sols, ps))

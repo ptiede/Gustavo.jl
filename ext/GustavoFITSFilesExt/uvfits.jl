@@ -88,6 +88,9 @@ function card_value(cards, key)
         rstrip(string(card.key)) == target || continue
         v = card.value
         v isa AbstractString && return strip(v)
+        # A real keeps every digit its card states, whatever float type the
+        # FITS reader narrowed it to.
+        v isa AbstractFloat && return parse(Float64, replace(_card_text_value(string(card)), r"[dD]" => "E"))
         return v
     end
     # Fall back to scanning the serialized card text for callers that pass a
@@ -96,9 +99,8 @@ function card_value(cards, key)
     for card in cards
         s = string(card)
         startswith(s, prefix) || continue
-        parts = split(s, "="; limit = 2)
-        length(parts) == 2 || continue
-        raw = strip(first(split(parts[2], "/"; limit = 2)))
+        occursin("=", s) || continue
+        raw = _card_text_value(s)
         if startswith(raw, "'") && endswith(raw, "'")
             return strip(raw[2:(end - 1)])
         end
@@ -116,6 +118,9 @@ function card_value(cards, key)
     end
     return nothing
 end
+
+# The value field of a card's text: after the `=`, before any `/` comment.
+_card_text_value(s) = strip(first(split(last(split(s, "="; limit = 2)), "/"; limit = 2)))
 
 _naxis(cards) = Int(something(card_value(cards, "NAXIS"), 0))
 
@@ -629,7 +634,7 @@ function _read_uvfits(path, element_type, gap)
         ones(Int32, length(obs_time))
     end
     if hasproperty(dt, :FREQSEL) || hasproperty(dt, :FREQID) || length(nx_freqid) > 0
-        # Densify FRQSEL slots to 1..nrows index when the FQ FRQSELs are sparse.
+        # Densify FRQSEL values to 1..nrows index when the FQ FRQSELs are sparse.
         if fq_frqsels != 1:nfreq
             remap = Dict{Int32, Int32}()
             for (i, f) in enumerate(fq_frqsels)

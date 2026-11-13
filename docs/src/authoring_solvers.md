@@ -7,7 +7,7 @@ CurrentModule = Gustavo
 A solver reads the data itself: it declares the gain
 model it solves and fits it, reading each scan group through
 [`each_group`](@ref) as many times as its solve needs. This page is the solver contract, followed by a
-worked example: the shipped per-integration phase solver, [`AdhocPhase`](@ref).
+worked example: the shipped per-integration gain solver, [`Adhoc`](@ref).
 
 A solver is an [`AbstractSolver`](@ref), which solves gains. Corrections, which
 change the data a later fit reads, are functions that modify a Measurement Set
@@ -21,7 +21,7 @@ An `AbstractSolver` subtype implements [`solve`](@ref) and some of these hooks:
 | Hook | Answers | Default |
 |:-----|:--------|:--------|
 | [`model_components`](@ref) | what gain model does this solver solve? | no components |
-| [`solution_name`](@ref) | the solver's solution slot name (`sol[:name]`) | `:nothing` |
+| [`solution_name`](@ref) | the name of the solver's solution (`sol[:name]`) | `:nothing` |
 | [`solver_gauge`](@ref) | the gauge that fixes the solver's undetermined station values | `nothing` |
 | [`solve`](@ref) | fill θ; return diagnostics | required |
 | [`supports_antenna_heterogeneity`](@ref) | can the solver loop over ragged station blocks? | `false` |
@@ -47,74 +47,79 @@ The execution model behind them:
   private copy instead of writing into the other's.
 - **`f` may run concurrently across groups.** It returns each scan's
   contribution and `solve` combines the returned vector, so a solver needs no
-  locking. Per-scan θ slots are disjoint, so `f` may also write the θ slots
+  locking. Per-scan θ entries are disjoint, so `f` may also write the θ entries
   of its own scan directly.
 
 ## Worked example: the adhoc solver
 
-[`AdhocPhase`](@ref) solves a per-integration station phase on data the
+[`Adhoc`](@ref) solves a per-integration station phase and log-amplitude on data the
 fringe (and bandpass) solutions have already corrected. A new gain term, if an effect needs one, is authored
 separately (see [Authoring a new gain term](@ref authoring-terms)); this solver
 uses the ordinary `ConstantTerm`.
 
 ### The declaration and its model
 
-The solver carries the `GainModel` it solves and the smoother that solves it:
+The solver carries the `GainModel` it solves and the gauge that sets each
+AP's common phase:
 
 ```julia
-Base.@kwdef struct AdhocPhase{M <: GainModel, S <: Fring.AbstractAdhocSmoother} <: AbstractSolver
+Base.@kwdef struct Adhoc{M <: GainModel, G <: AbstractGauge} <: AbstractSolver
     model::M = Fring.default_adhoc_model()
-    smoother::S = Fring.PerTrackAdhocSmoother()
+    gauge::G = ZeroSumPhase()
 end
-solution_name(::AdhocPhase) = :adhoc
+solution_name(::Adhoc) = :adhoc
 ```
 
 `model_components` returns that model after vetting it against the solver,
 before any data is read: every component must pass
-[`can_fit`](@ref Gustavo.Fring.can_fit) for the smoother, and the whole tree
+[`can_fit`](@ref Gustavo.Fring.can_fit) for the solver, and the whole tree
 must pass [`validate_model`](@ref Gustavo.Fring.validate_model). A rejected
 component throws, naming what the solver accepts, rather than leaving a θ
 block at zero:
 
 ```julia
-model_components(s::AdhocPhase, spec) = _vet_model(
-    s.smoother, s.model,
-    "The adhoc smoothers fit `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
-        "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed())` ...",
+Fring.can_fit(::Adhoc, tc, geom) = Fring._fits_adhoc_track(tc)
+Fring.validate_model(::Adhoc, model) = Fring._validate_adhoc_model(model)
+
+model_components(s::Adhoc, spec) = _vet_model(
+    s, s.model,
+    "`Adhoc` fits a phase and an optional logamp `GainComponent(ConstantTerm(); Ti = PerIntegration(), " *
+        "Frequency = GlobalFrequency(), Feed = SharedFeeds() or PerFeed(), prior = " *
+        "<an IIDPrior, or an OUPrior, a CARMAPrior or a RandomWalkPrior with an init along Ti>)` " *
+        "— see `default_adhoc_model`.",
     spec,
 )
-
-can_fit(::AbstractAdhocSmoother, tc, geom) =
-    tc.term isa ConstantTerm && tc.Ti isa PerIntegration &&
-    tc.Frequency isa GlobalFrequency && (tc.Feed isa PerFeed || tc.Feed isa SharedFeeds) &&
-    _is_time_prior(resolve_prior(tc))
 ```
 
 ### The solve
 
-`solve` locates the solver's θ block once, then solves each scan group. The
-adhoc phase is per scan, so each group writes only its own θ slots and the
+`solve` locates the solver's θ blocks once, then solves each scan group. The
+adhoc gains are per scan, so each group writes only its own θ entries and the
 per-group function writes θ directly. It fixes the per-scan constant with
 `ctx.gauge`, the solver's own gauge. The returned `NamedTuple` is the solver's
 diagnostics:
 
 ```julia
-function solve(s::AdhocPhase, ctx::SolveContext)
-    adhoc_plan = Fring._adhoc_plan(ctx.model, ctx.layout)
-    results = each_group(ctx) do group
-        Fring.adhoc_scan!(
-            ctx.θ, group, ctx.geom, adhoc_plan, s.smoother, ctx.gauge;
-            executor = inner_executor(ctx.exec),
-        )
-    end
+_group_setup(::Adhoc, ctx::SolveContext) =
+    (; ctx.layout, plans = Fring._adhoc_plans(ctx.model, ctx.layout))
+
+_solve_group(s::Adhoc, ctx::SolveContext, setup, group) = Fring.adhoc_scan!(
+    ctx.θ, group, ctx.geom, setup, ctx.gauge;
+    executor = inner_executor(ctx.exec),
+)
+
+function solve(s::Adhoc, ctx::SolveContext)
+    setup = _group_setup(s, ctx)
+    results = each_group(group -> _solve_group(s, ctx, setup, group), ctx)
     isempty(results) && return (; nscans = 0)
-    sort!(results; by = r -> only(lookup(r, Ti)))
-    return (; nscans = length(results), priors = cat(results...; dims = Ti))
+    sort!(results; by = r -> only(lookup(r.phase, Ti)))
+    priors = DimensionalData.DimStack(map(obs -> cat((r[obs] for r in results)...; dims = Ti), (; phase = :phase, logamp = :logamp)))
+    return (; nscans = length(results), priors)
 end
 ```
 
-`_adhoc_plan` is a **signature router**: a `findfirst` over the compiled
-components' types (here, the one with a `PerIntegration` time segmentation),
+`_adhoc_plans` is a **signature router**: a `findfirst` over the compiled
+components' types (here, the ones with a `PerIntegration` time segmentation),
 never a hardcoded index. It only has to be unambiguous within the solver's own
 model, which `can_fit` has already restricted. A solver whose model names the
 component it needs can skip routers and reach it through
@@ -159,7 +164,7 @@ selection. To fit a subset of the scans, fit that subset, then
 divide its solution out of the full data before the next fit:
 
     fr = fit(FringeClosure(; gauge), fit(FringeSearch(), data))
-    bp = fit(Bandpass(; gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
+    bp = fit(Bandpass(; model, gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
     corrected = calibrate(fr, data; flag_bad = false, apply_flags = false)
     calibrate!(bp, corrected; flag_bad = false, apply_flags = false)
-    ad = fit(AdhocPhase(; gauge), corrected)
+    ad = fit(Adhoc(; gauge), corrected)
