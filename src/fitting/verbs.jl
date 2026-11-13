@@ -24,7 +24,7 @@ end
     fit(solver::AbstractSolver, ps::ProcessingSet; exec = ExecutionConfig()) -> CalibrationSolution
     fit(solver::AbstractSolver, ms::MeasurementSet; exec = ExecutionConfig()) -> CalibrationSolution
 
-Solve `solver` ([`Bandpass`](@ref), [`AdhocPhase`](@ref) or a third-party
+Solve `solver` ([`Bandpass`](@ref), [`Adhoc`](@ref) or a third-party
 `AbstractSolver`) on `ps`, one scan group
 (`groupby(ps, ByScan())`) at a time. `ps` is never modified. Narrow the data by
 subsetting `ps` first. A Measurement Set is fit as a processing set of one.
@@ -86,7 +86,7 @@ gauge = PinAntenna("AA")
 fr = fit(FringeClosure(; gauge), fit(FringeSearch(), ps))
 mapsets(groupby(ps, ByScan())) do g
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
-    fit(AdhocPhase(; gauge), g)
+    fit(Adhoc(; gauge), g)
 end
 ```
 

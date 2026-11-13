@@ -15,6 +15,8 @@ using ..Gustavo: Frequency, BaselineID, Feed, FeedNode, Polarization, Scan, Ante
 using ..Calibration
 import XRadio
 import LinearSolve
+import Optimization
+using OptimizationLBFGSB: LBFGSB
 import SelectedInversion
 using OrderedCollections: OrderedDict
 using DensityInterface: logdensityof
@@ -29,12 +31,12 @@ using ..Calibration: weighted_regularized_least_squares, FactoredWLS,
 using FFTW: fft, fftfreq, plan_fft, MEASURE
 import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack, @d
-using Statistics: median, mean
+using Statistics: median, mean, quantile
 using LinearAlgebra
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nnz, nzrange, nonzeros, rowvals, blockdiag, dropzeros!, CHOLMOD
 import Graphs
-using StaticArrays: SMatrix, SVector, MVector, SOneTo, StaticVector
-using DifferentiationInterface: AutoSparse, AutoForwardDiff, prepare_jacobian, jacobian
+using StaticArrays: SMatrix, SVector, SOneTo, StaticVector
+using DifferentiationInterface: AutoSparse, AutoForwardDiff, prepare_jacobian, jacobian, gradient, hessian
 using SparseConnectivityTracer: TracerSparsityDetector
 using SparseMatrixColorings: GreedyColoringAlgorithm
 import ForwardDiff
@@ -108,8 +110,7 @@ export AbstractSearchAlgorithm, FullGrid, HierarchicalMBD
 export FringeSearchMap, FringeDelay, FringeRate, baseline_fringe_map, fringe_search_map, fringe_pfa, fringe_snr_cut
 export Stationization, antenna_closure_residuals
 export AbstractRobustLoss, LeastSquares, SoftL1, Huber, Cauchy, OutlierMixture
-export AbstractAdhocSmoother, AdhocOptions, PerTrackAdhocSmoother, JointKalmanSmoother
-export solve_adhoc_phasing, default_adhoc_model, default_adhoc_prior
+export solve_adhoc, default_adhoc_model, default_adhoc_phase_prior, default_adhoc_logamp_prior
 export JointSmoother
 export TrackStatus, TrackNoData, TrackSolved, TrackFlat
 export fringe_snr_table, fringe_detections, cat_scans

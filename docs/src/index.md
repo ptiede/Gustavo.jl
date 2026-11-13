@@ -55,7 +55,7 @@ sols = mapsets(groupby(ps, ByScan())) do g      # g: one scan, in memory
     foreach(normalize_by_autocorrelations!, values(g))
     fr = fit(FringeClosure(; gauge), fit(FringeSearch(), g))
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
-    ad = fit(AdhocPhase(; gauge), g)
+    ad = fit(Adhoc(; gauge), g)
     return (; fr, ad)
 end
 ```
@@ -98,7 +98,7 @@ sols = mapsets(groupby(ps, ByScan())) do g
     calibrate!(bp, g; flag_bad = false, apply_flags = false)
     fr = fit(FringeClosure(; gauge), fit(FringeSearch(), g))
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
-    return (; fr, ad = fit(AdhocPhase(; gauge), g))
+    return (; fr, ad = fit(Adhoc(; gauge), g))
 end
 ```
 
@@ -128,7 +128,7 @@ store stays on disk until a fit reads it. Narrow the data by subsetting the
 [`FringeClosure`](@ref) (station delay and rate, from the baseline detections
 of a [`FringeSearch`](@ref Gustavo.Fring.FringeSearch)),
 [`Bandpass`](@ref) (time-stable station bandpass), and
-[`AdhocPhase`](@ref) (per-integration atmospheric phase). [`fit`](@ref)
+[`Adhoc`](@ref) (per-integration station phase and amplitude). [`fit`](@ref)
 solves one on the data it is given and never modifies that data. To fit on
 data an earlier solution has corrected, correct the data first,
 either on data held in memory or inside [`mapsets`](@ref), which reads one
@@ -185,7 +185,7 @@ loaded, write `DimensionalData.End`.
 **Models.** Each fit separates WHAT it solves — a gain model, built
 from the vocabulary in [Specifying gain models](@ref specifying-models) —
 from HOW it is solved (the specification's options, or a pluggable smoother
-object).
+object on the bandpass).
 
 **Verbs.** [`fit`](@ref) solves and returns a
 [`CalibrationSolution`](@ref Gustavo.Calibration.CalibrationSolution) without
@@ -216,9 +216,8 @@ Three seams, in increasing scope:
 
 - a new **gain term** — a physical effect in the forward model:
   [Authoring a new gain term](@ref authoring-terms);
-- a new **smoother** behind an existing solver — a different way to solve the
-  same model: see
-  [`AbstractAdhocSmoother`](@ref Gustavo.Fring.AbstractAdhocSmoother);
+- a new **smoother** behind the bandpass solver — a different way to solve the
+  same model: see [`JointSmoother`](@ref Gustavo.Fring.JointSmoother);
 - a new **solver** — one that reads the data through
   [`each_group`](@ref Gustavo.each_group):
   [Authoring a solver](@ref authoring-solvers).

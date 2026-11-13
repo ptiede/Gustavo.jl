@@ -32,10 +32,10 @@ data. The spacing ``x_{k+1} - x_k`` need not be uniform.
 For the bandpass, a track is one spectral window of one (station, feed, time
 segment), sampled at the frequency segments' mean channel frequencies, and
 ``L`` is the level component's value for that window; a phase may also carry a
-delay, which adds ``2\pi\tau(x_k - f_0)`` to ``L`` (see [The mean](@ref prior-level)). For the adhoc phase, a
+delay, which adds ``2\pi\tau(x_k - f_0)`` to ``L`` (see [The mean](@ref prior-level)). For the adhoc phase and log-amplitude, a
 track is one (station, feed node) over the accumulation periods (APs) of one
-scan, and ``L`` is the per-scan constant, a gauge that the adhoc solver removes
-afterwards (see [`solve_adhoc_phasing`](@ref)).
+scan, and ``L`` is the per-scan constant, which the priors and the gauge set (see
+[`solve_adhoc`](@ref)).
 
 ## The OU prior and its MAP values
 
@@ -205,7 +205,7 @@ The hyperpriors must be proper. With a flat hyperprior, the likelihood alone
 drives ``\sigma \to 0`` on a track whose structure is below the noise, so a weak
 track would be fit as a constant regardless of what it is. A proper
 hyperprior on ``\sigma`` keeps it at a plausible value. The adhoc default,
-[`default_adhoc_prior`](@ref), puts LogNormal hyperpriors on ``\tau`` (median
+[`default_adhoc_phase_prior`](@ref), puts LogNormal hyperpriors on ``\tau`` (median
 10 s) and ``\sigma`` (median 0.3 rad), each with log-standard deviation 1.
 
 ## The random-walk prior
@@ -453,21 +453,13 @@ A track whose level is free, under a flat start or beside a level, is finally
 moved by the multiple of ``2\pi`` that keeps it nearest its input, so an
 iterative solve does not see it jump by whole turns between iterations.
 
-### The hyperparameters over every branch
+### The hyperparameters of a phase track
 
-A phase track's hyperparameters can be estimated by the type-II MAP above with the likelihood
-summed over the branch histories, ``\log \sum_h w_h``, in place of the
-likelihood of one lifted track. Where several tracks share a mean, the pooled
-restricted likelihood of their most probable lifts is used, plus, for each track,
-the log of its histories' total weight relative to its most probable one's
-(`_branch_pooled_loglik`); without a shared mean that is exactly the summed
-likelihood. Each evaluation of the objective runs the filter again at the trial
-hyperparameters, so the branches and the hyperparameters are estimated together.
-The random walk's search starts from the ``m``-th differences reduced modulo
-``2\pi``, which their integer coefficients make well defined.
-The bandpass solve uses this for the track alone to start its hyperparameters,
-then fits them by EM on the chosen branches together with every other track's
-(see [The bandpass posterior](@ref bandpass-posterior)).
+The joint solve starts a phase track's hyperparameters from one lift: the
+track is put on its most probable history at the hyperprior medians, and the
+hyperparameters start at the type-II MAP of that lift alone. They are then fit
+on the chosen branches together with every other track's (see
+[The bandpass posterior](@ref bandpass-posterior)).
 
 ### Limits
 
@@ -690,56 +682,84 @@ rule, a tenth of that residual, bounds the step's error relative to the step.
 
 ### Hyperparameters
 
-A hyperparameter ``\psi`` given as a density is estimated by MAP-EM: the
+A hyperparameter ``\psi`` given as a density is at its type-II MAP: the
 maximum of the hyperprior density times the marginal likelihood of the data,
-the gains integrated out, by the EM algorithm (Dempster, Laird & Rubin 1977) with
-the posterior of the gains at given ``\psi`` approximated by a Gaussian at its
-mode (Laplace; Tierney & Kadane 1986). Each EM map
-
-1. finds the MAP of the gains under the current ``\psi`` (the step above);
-2. takes, for each chain, the posterior means and second moments of its
-   states, ``v_k = (s_k, s_{k-1})``, under the Gaussian whose precision is the
-   preconditioner's curvature: held-``S``, except on the chains' scan
-   constants, which keep their prior variance;
-3. maximizes, for each chain, its expected log prior density plus its
-   hyperprior over the log hyperparameters, within the hyperprior's support,
+the gains integrated out, with the posterior of the gains at given ``\psi``
+approximated by a Gaussian at its mode (Laplace; Tierney & Kadane 1986),
 
 ```math
-\psi' = \arg\max_\psi\; \log p(\psi) + \sum_k \Big(-\tfrac12 \log\det(2\pi Q_k)
+L(\psi) = -O(z^*; \psi) - N(\psi) - \tfrac12 \log\det A(z^*; \psi) + \log p(\psi),
+```
+
+with ``z^*`` the MAP of the unknowns (the step above), ``O`` its objective,
+``\chi^2/2`` with ``S`` at its optimum plus the prior energy,
+``N = \tfrac12 \sum_k \log\det(2\pi Q_k)`` (and the start's term) the priors'
+log normalizer, and ``A`` the Gauss–Newton curvature of the profiled
+objective. With ``S`` as unknowns beside the gains the held-``S`` system is
+sparse, ``M = [K\; B;\, B^\top\; D]`` with ``D`` diagonal, one entry per
+``S_J``, and ``A = K - B D^{-1} B^\top``, so
+``\log\det A = \log\det M - \sum_J \log D_J`` takes one sparse factorization.
+
+Its gradient over the log hyperparameters has two parts. With the MAP held,
+the Fisher identity gives the gradient of each chain's expected log prior
+density plus its hyperprior,
+
+```math
+\mathrm{E}_\psi\big[\log p(s \mid \psi')\big] =
+\sum_k \Big(-\tfrac12 \log\det(2\pi Q_k)
   - \tfrac12 \operatorname{tr}\big(Q_k^{-1} G_k\, \mathrm{E}[v_k v_k^\top]\, G_k^\top\big)\Big),
 \qquad G_k = [I, -A_k],
 ```
 
-a two-parameter search for an OU prior. A CARMA prior's latent states depend
-on its roots, so the moments are taken in the basis of the current ``\psi``
-and the expected log prior evaluated in that of ``\psi'``. EM holds all the
-same: for any family of joint densities ``f_\psi(y, s)`` over the same ``s``
-that integrate to the marginal likelihood, Jensen's inequality gives
+at ``\psi' = \psi``, with ``v_k = (s_k, s_{k-1})`` and its moments under the
+Gaussian of precision ``A``. They need only the covariances of unknowns that
+share a term, which lie on the sparsity pattern of the system and so of its
+Cholesky factor; the recursion of Takahashi, Fagan & Chen (1973), in its
+supernodal form (SelectedInversion.jl), gives those entries of ``M^{-1}``,
+whose gains block is ``A^{-1}``, without forming the rest. The expected log
+prior is linear in the moments, so they are summed once per distinct step, and
+each evaluation costs one transition per distinct step, not one per sample.
+Then the MAP moves with ``\psi``, and ``\log\det A`` with it, through the
+cells' weights ``q = w|g_a S_J g_b^*|^2``: with
+``dz^*/d\psi = -H^{-1} \partial^2 O/\partial z\, \partial\psi``, ``H`` the exact
+Hessian, this adds ``\tfrac12\, \partial_\psi (a^\top \nabla_z E)`` with
+``a = H^{-1} \nabla_z \log\det A`` and ``E`` the prior energy. Without it the
+gradient is off by up to several times along the hyperparameters of a weakly
+measured station.
+
+``L`` is maximized by `hyper_optimizer`, an Optimization.jl optimizer that
+takes a gradient and bounds, by default L-BFGS-B (Byrd, Lu, Nocedal & Zhu
+1995), over the log hyperparameters, each scaled by the square root of its
+curvature ``C`` in the expected log prior plus hyperprior, the complete data's
+information about it. The search is held to the support the samples measure
+(a scale within the sample spacing and the span) and to the hyperprior's
+support, between its quantiles at ``10^{-9}`` and ``1 - 10^{-9}``. ``L`` can
+have more than one maximum along a track's hyperparameters, a smooth track or
+one held nearly rigid at the sample spacing, so five EM maps come first: each
+finds the MAP under the current ``\psi`` and then maximizes, for each chain, its
+expected log prior density plus its hyperprior under those moments, which moves
+each track toward what its posterior supports. A CARMA prior's latent states
+depend on its roots, so the moments are taken in the basis of the current
+``\psi`` and the expected log prior evaluated in that of ``\psi'``. EM holds all
+the same: for any family of joint densities ``f_\psi(y, s)`` over the same
+``s`` that integrate to the marginal likelihood, Jensen's inequality gives
 ``\log \int f_{\psi'} \ge \mathrm{E}_\psi[\log f_{\psi'} - \log f_\psi] +
 \log \int f_\psi``, and the data enter only through the first entry, which is
-the same in every basis. The second moments need only the
-covariances of unknowns that share a term, which lie on the sparsity pattern of
-the system and so of its Cholesky factor; the recursion of Takahashi, Fagan &
-Chen (1973), in its supernodal form (SelectedInversion.jl), gives those entries
-of the inverse without forming the rest. The expected log prior is linear in
-the moments, so they are summed once per distinct step before the search, and
-each evaluation in it costs one transition per distinct step, not one per
-sample.
+the same in every basis.
 
-The E-step's expectation carries the posterior's spread, so EM does not
-collapse a prior onto its mode as a joint MAP over the gains and ``\psi``
-would, where ``-\tfrac12 \log\det Q_k`` grows without bound as ``\sigma \to 0``.
-EM converges linearly, slowly where the data barely determine a direction, as
-for the array-wide R–L spectrum, so the maps are accelerated by SQUAREM
-(Varadhan & Roland 2008, scheme S3) over the log hyperparameters. EM stops once
-a SQUAREM cycle moves no gain by more than `tolerance` of its standard error:
-the gains are what the solve is for, and the hyperparameters they no longer
-depend on, which the data barely measure, would take EM many more cycles. The
-hyperparameters start from type-II MAP on each chain alone, taking each
-station gain's own estimate given every other gain and ``S`` as an independent
-measurement of the chain's parameter, with the scan constants integrated out;
-for a phase chain that start is summed over the branch histories. A chain's
-parameters must each be one station gain's value for that start.
+The fit stops once the evidence an exact Newton step would still gain,
+``\tfrac12 \sum_i g_i^2 / C_i`` over the gradient projected onto the support,
+is below ``\texttt{tolerance}^2/2``, the rule the MAP solve applies to its own
+objective, or after `max_hyper_iterations` iterations, the EM maps among
+them. The expectation in ``L`` carries the posterior's spread, so the fit does
+not collapse a prior onto its mode as a joint MAP over the gains and ``\psi``
+would, where ``-\tfrac12 \log\det Q_k`` grows without bound as
+``\sigma \to 0``. The hyperparameters start from type-II MAP on each chain
+alone, taking each station gain's own estimate given every other gain and
+``S`` as an independent measurement of the chain's parameter, with the scan
+constants integrated out; for a phase chain that start is summed over the
+branch histories. A chain's parameters must each be one station gain's value
+for that start.
 
 ### Branches
 
@@ -747,11 +767,15 @@ The phase branches are chosen once per chain, from the station-gain estimates at
 under the starting hyperparameters (see
 [Phase tracks and their 2π branches](@ref phase-branches)). The data are
 fringe-corrected before the bandpass, so phase steps along frequency are small,
-and the MAP and EM then move the phases continuously on those branches.
+and the MAP and the hyperparameter fit then move the phases continuously on
+those branches.
 
 **References.**
 B. M. Bell (1994), The iterated Kalman smoother as a Gauss–Newton method,
 *SIAM Journal on Optimization* 4(3), 626–636.
+R. H. Byrd, P. Lu, J. Nocedal, and C. Zhu (1995), A limited memory algorithm for
+bound constrained optimization, *SIAM Journal on Scientific Computing* 16(5),
+1190–1208.
 A. P. Dempster, N. M. Laird, and D. B. Rubin (1977), Maximum likelihood from
 incomplete data via the EM algorithm, *Journal of the Royal Statistical Society
 B* 39(1), 1–38.
@@ -771,9 +795,6 @@ the 8th Power Industry Computer Applications (PICA) Conference*.
 L. Tierney and J. B. Kadane (1986), Accurate approximations for posterior
 moments and marginal densities, *Journal of the American Statistical
 Association* 81(393), 82–86.
-R. Varadhan and C. Roland (2008), Simple and globally convergent methods for
-accelerating the convergence of any EM algorithm, *Scandinavian Journal of
-Statistics* 35(2), 335–353.
 
 ## Where the solvers use this
 
@@ -783,43 +804,14 @@ spectral window, and the solve maximizes the posterior of every component's
 parameters at once, with the per-scan source term profiled out, as described in
 [The bandpass posterior](@ref bandpass-posterior) above. Each phase chain is put
 on its most probable branches once, at the start, and the hyperparameters are
-fit by MAP-EM around the MAP solve.
+at their type-II MAP around the MAP solve.
 
-**Adhoc phase, [`PerTrackAdhocSmoother`](@ref).** After the per-AP solve, each
-(station, feed node) track of a scan is fit on its own: hyperparameters per
-(station, node, scan) with the level integrated out, then the level plus the
-MAP of the zero-mean part. The per-scan mean is then removed from every track,
-since a per-station constant trades against the baseline source terms.
-
-**Adhoc phase, [`JointKalmanSmoother`](@ref).** The state stacks every
-station's state under its own prior: its phase ``\theta_i`` for an OU prior,
-or ``(\theta_i, \theta_i', \dots)`` for a random walk with an `init`. The
-stations are independent, so the transition is block diagonal, one block per
-station. Each gated (baseline, correlation product) cell at an AP is an
-observation
-
-```math
-y_{ab} = \theta_a - \theta_b + \varepsilon_{ab}, \qquad
-\varepsilon_{ab} \sim \mathcal N\!\big(0, 1/\mathrm{SNR}_{ab}^2\big),
-```
-
-with its source term already removed. The same filter and smoother, in matrix
-form ([`kalman_mv_filter`](@ref), [`rts_smooth_mv`](@ref)), give the
-posterior mean of every station's track from the baseline data directly,
-without first solving each AP. Differences leave the sum of all station
-phases unconstrained; only the priors hold it near zero, which is why every
-station needs a proper prior (an OU prior or a walk with an `init`), and the result is
-re-referenced to the anchor station at every AP afterwards. Each observed phase
-is moved by a multiple of 2π toward the current model before the filter runs,
-and this is repeated a few times as the model improves.
-
-Each station's hyperparameters are resolved by type-II MAP on its track from
-the per-AP solve, with the level integrated out, and the track is centered on
-its level for the filter. The anchor's per-AP track is zero by construction,
-and an unobserved station has none, so both take the median of the resolved
-values of the stations whose prior has the same form (OU, or a walk of the same
-order), unless their own are fixed.
-
-In both adhoc solvers, the complex-domain refinement (see
-[`AdhocOptions`](@ref)) repeats the fit on observations linearized around the
-current tracks, re-resolving the hyperparameters each pass.
+**Adhoc.** Each scan is one joint solve, with one phase chain and one
+log-amplitude chain per (station, feed node) along the APs of the scan, each
+under its own prior, so the stations are independent. The per-(station pair, feed pair)
+source coherence is profiled out. Each phase chain is put on its most probable
+branches once, at the start, and the hyperparameters per (station, feed node,
+scan) are at their type-II MAP around the MAP solve, as for the bandpass. The data
+see only phase differences within an AP, so the priors hold each AP's common
+phase and every station needs a proper prior (an OU prior, or a walk with an
+`init`); the gauge then sets the common phase.

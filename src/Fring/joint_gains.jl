@@ -36,7 +36,11 @@ station gains share, as a per-scan component splits them, at their mean), and
 solves for the
 parameters nearest those estimates under the priors. The MAP is found by
 Levenberg–Marquardt with the damping scaled by each parameter's curvature, and
-hyperparameters given as densities by MAP-EM (`_squarem!`). The gauge then
+hyperparameters given as densities at their type-II MAP, by `hyper_optimizer`
+(an Optimization.jl optimizer that takes a gradient and bounds; L-BFGS-B by
+default) on their Laplace evidence within their support (`_fit_hypers!`),
+stopping once the evidence a Newton step would still gain is below
+`tolerance²/2` or after `max_hyper_iterations` iterations. The gauge then
 moves the phases along the freedoms the data leave, at least cost in prior
 energy (`_meet_phase_gauge!`).
 
@@ -53,9 +57,46 @@ not solved and keeps its value.
 """
 function solve_joint_gains!(
         components, data, geom::DataGeometry;
-        cover, gauge::AbstractGauge, max_iterations::Integer = 200, max_em_iterations::Integer = 100,
-        tolerance::Real = 0.01, linsolve = LinearSolve.KrylovJL_CG(; linesearch = true), executor = SerialScheduler(),
+        cover, gauge::AbstractGauge, max_iterations::Integer = 200, max_hyper_iterations::Integer = 100,
+        tolerance::Real = 0.01, linsolve = LinearSolve.KrylovJL_CG(; linesearch = true), hyper_optimizer = LBFGSB(m = 20),
+        executor = SerialScheduler(),
     )
+    (; ctx, priors, x, solved, sg, parts, hasdata, weight, observables) =
+        _joint_setup(components, data, geom; cover, max_iterations, tolerance, linsolve, executor)
+    (; cells, fitted, tracks, params) = ctx
+    hyper_converged, hyper_remaining = true, 0.0
+    if !isempty(_estimated(ctx))
+        hyper = _fit_hypers!(priors, x, ctx, solved; tolerance, max_iterations, max_hyper_iterations, linsolve, optimizer = hyper_optimizer)
+        solved, hyper_converged, hyper_remaining = hyper.solved, hyper.converged, hyper.remaining
+    end
+    (; converged, stalled, change) = solved
+    stalled && @warn "solve_joint_gains! stopped at a step that could not lower its MAP objective at any " *
+        "damping; that step would have moved a gain by $change of its standard error."
+    stalled || converged || @warn "solve_joint_gains! did not converge in $max_iterations iterations: the " *
+        "last step moved a gain by $change of its standard error, against a tolerance of $tolerance."
+    hyper_converged || @warn "the hyperparameter fit of solve_joint_gains! stopped at $max_hyper_iterations " *
+        "iterations with $hyper_remaining nats of log evidence left to gain, against $(tolerance^2 / 2)."
+
+    fitted.amp && _warn_free_amplitudes(cells, sg, geom)
+
+    fitted.phase && _meet_phase_gauge!(params.phase, tracks.phase, priors.phase, gauge, cells, sg, components.phase)
+    for (obs, o) in pairs(observables)
+        fitted[obs] && _write_params!(components[o], sg.params[o][parts[obs].kept], params[obs].θ)
+    end
+    x = map(p -> [hasdata[n] ? v : NaN for (n, v) in pairs(p.J * p.θ)], params)
+    fits = map(parts, priors, x, (; phase = true, amp = false)) do part, priors, x, phase
+        xs, _ = _with_merged(x, weight, part.merged; phase)
+        map((t, prior) -> (; t.chain..., prior, t.pieces, values = xs[t.gains]), part.gain_tracks, priors)
+    end
+    return (; fits.phase, fits.amp, gains = (; sg, x.phase, x.amp), converged, stalled)
+end
+
+# The structure of `solve_joint_gains!` up to its hyperparameter fit: the
+# station gains and cells, the chains, the start (each gain's estimate, the
+# branches, the seeded priors and the parameters nearest the estimates under
+# them), the solve's fixed structure `ctx` and buffers, and the MAP at the
+# seeded priors, `x` its station-gain values and `solved` its report.
+function _joint_setup(components, data, geom::DataGeometry; cover, max_iterations, tolerance, linsolve, executor)
     (; r, w) = data
     sg = StationGains(components, length(geom.antennas), geom.nfeed, cover)
     ngains = length(sg.at)
@@ -77,17 +118,23 @@ function solve_joint_gains!(
     weight = _gain_weights(cells, ngains)
 
     φ, ℓ = zeros(ngains), zeros(ngains)
-    gains_of(ℓ, φ) = exp.(complex.(ℓ, φ))
-    source = zeros(ComplexF64, length(cells.ranges))
     npairs = length(gain_pairs)
     accumulators = (;
         linearize = ChunkAccumulators(cells, zeros(npairs), zeros(ComplexF64, ngains), zeros(ngains)),
         phase = ChunkAccumulators(cells, zeros(ngains)),
         amp = ChunkAccumulators(cells, zeros(ngains)),
     )
+    buffers = (;
+        g = zeros(ComplexF64, ngains), trial = zeros(ComplexF64, ngains), S = zeros(ComplexF64, length(cells.ranges)),
+        lin = (; q = zeros(npairs), c = zeros(ComplexF64, ngains), W = zeros(ngains)),
+        b = (; phase = zeros(ngains), amp = zeros(ngains)),
+        profile = (; phase = (zeros(ngains), zeros(ngains)), amp = (zeros(ngains), zeros(ngains))),
+    )
+    gains_of(ℓ, φ) = _gains!(buffers.g, (; amp = ℓ, phase = φ))
     function linearized(ℓ, φ)
         g = gains_of(ℓ, φ)
-        return _linearize(g, _source!(source, g, cells, executor), cells, ngains, npairs, executor, accumulators.linearize)
+        S = _source!(buffers.S, g, cells, executor)
+        return _linearize(g, S, cells, ngains, npairs, executor, accumulators.linearize, buffers.lin)
     end
     # Each station gain starts at its own estimate given the others and `S`,
     # repeated with `S` re-solved until a round lowers χ² by less than 10⁻⁵ of
@@ -132,8 +179,8 @@ function solve_joint_gains!(
     samples = map(obs -> _with_merged(estimates[obs]..., parts[obs].merged; phase = obs === :phase), (; phase = :phase, amp = :amp))
     priors = map(observables) do o
         obs = o === :logamp ? :amp : :phase
-        y, wy = samples[obs]
-        [_seed_prior(t, y, wy; phase = obs === :phase) for t in parts[obs].gain_tracks]
+        ys, ws = samples[obs]
+        [_seed_prior(t, ys, ws; phase = obs === :phase) for t in parts[obs].gain_tracks]
     end
     if fitted.phase
         y, wy = samples.phase
@@ -156,35 +203,12 @@ function solve_joint_gains!(
 
     Hφ, hpos = _curvature_pattern(gain_pairs, ngains)
     ctx = (;
-        cells, ngains, npairs, accumulators, fitted, tracks, Hφ, Hℓ = copy(Hφ), hpos, executor, systems = Dict{Symbol, Any}(), params,
+        cells, ngains, npairs, accumulators, fitted, tracks, Hφ, Hℓ = copy(Hφ), hpos, executor, systems = Dict{Symbol, Any}(), params, buffers,
+        krylov = (; phase = Ref{Any}(nothing), amp = Ref{Any}(nothing), joint = Ref{Any}(nothing)),
     )
     x = map(p -> p.J * p.θ, params)
     solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve)
-    em_converged, em_moved = true, 0.0
-    if !isempty(_estimated(ctx))
-        em = _squarem!(priors, x, ctx, solved; tolerance, max_iterations, max_em_iterations, linsolve)
-        solved, em_converged, em_moved = em.solved, em.converged, em.moved
-    end
-    (; converged, stalled, change) = solved
-    stalled && @warn "solve_joint_gains! stopped at a step that could not lower its MAP objective at any " *
-        "damping; that step would have moved a gain by $change of its standard error."
-    stalled || converged || @warn "solve_joint_gains! did not converge in $max_iterations iterations: the " *
-        "last step moved a gain by $change of its standard error, against a tolerance of $tolerance."
-    em_converged || @warn "the hyperparameter fit of solve_joint_gains! stopped at $max_em_iterations EM " *
-        "iterations with its last cycle still moving a gain by $em_moved of its standard error."
-
-    fitted.amp && _warn_free_amplitudes(cells, sg, geom)
-
-    fitted.phase && _meet_phase_gauge!(params.phase, tracks.phase, priors.phase, gauge, cells, sg, components.phase)
-    for (obs, o) in pairs(observables)
-        fitted[obs] && _write_params!(components[o], sg.params[o][parts[obs].kept], params[obs].θ)
-    end
-    x = map(p -> [hasdata[n] ? v : NaN for (n, v) in pairs(p.J * p.θ)], params)
-    fits = map(parts, priors, x, (; phase = true, amp = false)) do part, priors, x, phase
-        xs, _ = _with_merged(x, weight, part.merged; phase)
-        map((t, prior) -> (; t.chain..., prior, t.pieces, values = xs[t.gains]), part.gain_tracks, priors)
-    end
-    return (; fits.phase, fits.amp, gains = (; sg, x.phase, x.amp), converged, stalled)
+    return (; ctx, priors, x, solved, sg, parts, hasdata, weight, observables)
 end
 
 # `y` with weights `w` over the station gains, followed by one entry per
@@ -425,6 +449,8 @@ function _meet_phase_gauge!(p, tracks, priors, gauge, cells, sg, components)
     nv = length(reps)
     edges = [(value[a], value[b]) for (a, b) in zip(cells.na, cells.nb) if !iszero(value[a]) && !iszero(value[b])]
     compid, ncomp, _ = connected_components(nv, edges)
+    # A value correlated only with gains outside the shared parts is a component of its own.
+    foreach(m -> iszero(compid[m]) && (compid[m] = ncomp += 1), 1:nv)
     blocked = falses(ncomp)
     for (a, b) in zip(cells.na, cells.nb)
         iszero(value[a]) == iszero(value[b]) && continue
@@ -438,12 +464,13 @@ function _meet_phase_gauge!(p, tracks, priors, gauge, cells, sg, components)
     foreach(n -> iszero(value[n]) || (nodew[value[n]] += gainw[n]), 1:ngains)
     members = [Int[] for _ in free]
     foreach(m -> iszero(group[compid[m]]) || push!(members[group[compid[m]]], m), 1:nv)
-    path = _station_paths(components, size(sg.index, 1))
+    paths = _station_paths(components, size(sg.index, 1))
     at = sg.at[reps]
     freedoms = map(members) do m
+        Calibration._common_choice(gauge, unique(p for i in m for p in paths[at[i][1]]))
         GaugeFreedom(;
             nodes = m, antenna = [at[i][1] for i in m], feed = [at[i][2] for i in m], scan = zeros(Int, length(m)),
-            component = [path[at[i][1]] for i in m], observable = fill(:phase, length(m)),
+            component = [first(paths[at[i][1]]) for i in m], observable = fill(:phase, length(m)),
             direction = ones(length(m)), weight = nodew[m],
         )
     end
@@ -469,7 +496,7 @@ function _meet_phase_gauge!(p, tracks, priors, gauge, cells, sg, components)
     # with the parameters' units.
     D = [inv(sqrt(K[j, j])) for j in 1:nu]
     AD = A * blockdiag(spdiagm(D), sparse(1.0I, nf, nf))
-    R = [inv(maximum(abs, view(AD, i, :); init = 0.0)) for i in axes(AD, 1)]
+    R = inv.(vec(maximum(abs, AD; dims = 2)))
     any(!isfinite, R) && error("solve_joint_gains!: a gauge constraint reads no phase parameter.")
     Ã = spdiagm(R) * AD
     nc = size(A, 1)
@@ -483,7 +510,7 @@ function _meet_phase_gauge!(p, tracks, priors, gauge, cells, sg, components)
     # form is not, and refining against `KKT` converges to its solution when
     # the constraints are consistent (the proximal method of multipliers).
     γ = 1.0e-12
-    F = lu(KKT + blockdiag(spzeros(nu, nu), γ * sparse(1.0I, nf, nf), -γ * sparse(1.0I, nc, nc)))
+    F = ldlt(Symmetric(KKT + blockdiag(spzeros(nu, nu), γ * sparse(1.0I, nf, nf), -γ * sparse(1.0I, nc, nc))))
     sol = F \ rhs
     r = rhs .- KKT * sol
     for _ in 1:100
@@ -493,8 +520,11 @@ function _meet_phase_gauge!(p, tracks, priors, gauge, cells, sg, components)
         sol, r = trial, rt
     end
     step = [D .* view(sol, 1:nu); view(sol, (nu + 1):(nu + nf))]
-    miss = maximum(abs, R .* (A * step .- a); init = 0.0)
-    miss <= sqrt(eps()) * max(maximum(abs, R .* a; init = 0.0), 1.0) || error(
+    RA, b = spdiagm(R) * A, R .* a
+    tol = sqrt(eps()) * max(maximum(abs, b; init = 0.0), 1.0)
+    _meet_constraints!(step, RA, b, γ, tol)
+    miss = maximum(abs, RA * step .- b; init = 0.0)
+    miss <= tol || error(
         "solve_joint_gains!: the gauge's constraints cannot be met by a phase shift the data do not see " *
             "(residual $miss): the components that span scans cannot add a constant phase to every station " *
             "gain of a connected group.",
@@ -503,12 +533,32 @@ function _meet_phase_gauge!(p, tracks, priors, gauge, cells, sg, components)
     return p
 end
 
-# The path of the first of `components` that reaches each of `nant` stations,
-# naming the component a gauge applies to (`ByComponent`).
-function _station_paths(components, nant)
-    path = Vector{Any}(nothing, nant)
-    for c in components, b in c, a in b.antennas
-        isnothing(path[a]) && (path[a] = b.plan.path)
+# Move `s` onto `M s = b`, when it misses by more than `tol`, by the least change
+# in units that give each unknown a largest coefficient of 1 in `M`. A stiff
+# prior leaves the KKT step short of the constraints by the rounding of its
+# large multipliers, and a constraint may move a stiff unknown, so these units
+# hold no prior curvature.
+function _meet_constraints!(s, M, b, γ, tol)
+    r = b .- M * s
+    maximum(abs, r; init = 0.0) <= tol && return s
+    S = [iszero(c) ? 0.0 : inv(c) for c in vec(maximum(abs, M; dims = 1))]
+    B = M * spdiagm(S)
+    n, m = size(B, 2), size(B, 1)
+    P = ldlt(Symmetric([sparse(1.0I, n, n) B'; B -γ * sparse(1.0I, m, m)]))
+    for _ in 1:10
+        s .+= S .* view(P \ [zeros(n); r], 1:n)
+        r = b .- M * s
+        maximum(abs, r) <= tol && break
     end
-    return path
+    return s
+end
+
+# The paths of the `components` that reach each of `nant` stations, in order:
+# the components a gauge applies to (`ByComponent`).
+function _station_paths(components, nant)
+    paths = [Any[] for _ in 1:nant]
+    for c in components, b in c, a in b.antennas
+        b.plan.path in paths[a] || push!(paths[a], b.plan.path)
+    end
+    return paths
 end

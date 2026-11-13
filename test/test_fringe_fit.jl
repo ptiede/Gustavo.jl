@@ -88,19 +88,19 @@ end
 
 @testset "each fit applies its own gauge" begin
     ps, _ = _build_fringe_ps(; nant = 4, nscans = 2, noise = 0.3, eltype = ComplexF64)
-    fr, ad = _fit_chain((FringeClosure(; gauge = PinAntenna("A1")), AdhocPhase(; gauge = PinAntenna("A2"))), ps)
+    fr, ad = _fit_chain((FringeClosure(; gauge = PinAntenna("A1")), Adhoc(; gauge = PinAntenna("A2"))), ps)
     at(c, name) = c.params[AntennaName(At(name))]
     mbd = only(c for c in fr.components if last(c.path) === :mbd)
-    adhoc = only(ad.components)
+    adhoc = only(ad[:phase, :adhoc].components)
     @test all(iszero, at(mbd, "A1"))
-    @test all(iszero, at(adhoc, "A2"))
+    @test maximum(abs, at(adhoc, "A2")) < 1.0e-12
     @test !all(iszero, at(adhoc, "A1"))
     @test occursin("PinAntenna{String}(\"A1\")", fr.spec)
     @test occursin("PinAntenna{String}(\"A2\")", ad.spec)
 
     by_name = ByComponent((; adhoc = PinAntenna("A2")); default = PinAntenna("A1"))
-    _, ad2 = _fit_chain((FringeClosure(; gauge = PinAntenna("A1")), AdhocPhase(; gauge = by_name)), ps)
-    @test only(ad2.components).params == adhoc.params
+    _, ad2 = _fit_chain((FringeClosure(; gauge = PinAntenna("A1")), Adhoc(; gauge = by_name)), ps)
+    @test all(obs -> only(ad2[obs, :adhoc].components).params == only(ad[obs, :adhoc].components).params, (:phase, :logamp))
 end
 
 @testset "fringe fit" begin
@@ -244,7 +244,7 @@ end
                     closure = FP.Stationization(pfa_max = 1.0e-2),
                     gauge,
                 ),
-                Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(; gauge),
+                Bandpass(; model = _bandpass_model(), gauge), Adhoc(; gauge),
             ),
             ps; exec = ExecutionConfig(),
         )

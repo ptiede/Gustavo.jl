@@ -60,11 +60,12 @@ function _window_status(components, params, J, x, geom::DataGeometry, flat_span)
 end
 
 # The channels of each cell of the common refinement of every component's
-# frequency segments, over every station block, in channel order.
+# frequency segments, over every station block, in channel order. A term that
+# varies with frequency within its segments keeps every channel its own cell.
 function _frequency_cells(components, nchan)
     key = [Int[] for _ in 1:nchan]
     for cs in components, c in cs, b in c, ch in 1:nchan
-        push!(key[ch], b.plan.fseg_id[ch])
+        push!(key[ch], Frequency in term_axes(b.plan.term) ? ch : b.plan.fseg_id[ch])
     end
     cells = Vector{Int}[]
     for ch in 1:nchan
@@ -77,18 +78,21 @@ end
 # component at `path` into one array per station block of their status
 # (`_block_status_array`, by spectral window) from `status`, and of their
 # chains' priors (`_block_prior_array`) from `fits`, each array `nothing` to
-# skip.
+# skip. Each feed node's entry is written for every feed it ties.
 function _record_track_fits!(status_arrays, prior_arrays, fits, status, path, geom::DataGeometry, blocks)
+    feeds(j, node) = (f for f in 1:geom.nfeed if _feed_node(blocks[j].plan.tying, f) == node)
     if !isnothing(status_arrays)
         for ((p, j, ai, node, ts, spw), st) in status
             p == path || continue
             windows = [geom.spw_of_chan[first(chans)] for chans in _shape_segments(blocks[j].plan, geom).piece_chans]
-            status_arrays[j][ai, node, findfirst(==(spw), windows), ts] = st
+            s = findfirst(==(spw), windows)
+            foreach(f -> status_arrays[j][ai, f, s, ts] = st, feeds(j, node))
         end
     end
     isnothing(prior_arrays) && return nothing
-    for f in fits
-        f.path == path && (prior_arrays[f.block][f.station, f.node, f.across] = f.prior)
+    for fit in fits
+        fit.path == path || continue
+        foreach(f -> prior_arrays[fit.block][fit.station, f, fit.across] = fit.prior, feeds(fit.block, fit.node))
     end
     return nothing
 end
@@ -96,13 +100,14 @@ end
 # Whether `x′` differs from `x` by no more than `x`'s own rounding.
 _within_rounding(x′, x) = all(i -> abs(x′[i] - x[i]) <= eps(abs(x[i])), eachindex(x′, x))
 
-# The largest change of any station's log-gain, `(Δℓ, Δφ)` with the phase change
-# wrapped, in standard errors of its weight `W` from the data, and that gain.
-function _largest_weighted_change(Δℓ, Δφ, W)
+# The largest change of any station's log-gain from the values `x` to `x′`
+# (`(; phase, amp)`), with the phase change wrapped, in standard errors of its
+# weight `W` from the data, and that gain.
+function _largest_weighted_change(x′, x, W)
     worst, at = 0.0, 0
-    for n in eachindex(Δℓ, Δφ, W)
+    for n in eachindex(x′.amp, x′.phase, x.amp, x.phase, W)
         W[n] > 0 || continue
-        c = sqrt(W[n]) * abs(complex(Δℓ[n], rem2pi(Δφ[n], RoundNearest)))
+        c = sqrt(W[n]) * abs(complex(x′.amp[n] - x.amp[n], rem2pi(x′.phase[n] - x.phase[n], RoundNearest)))
         c > worst && ((worst, at) = (c, n))
     end
     return worst, at

@@ -62,7 +62,7 @@ sols = mapsets(groupby(ps, ByScan())) do g      # g: one scan, in memory
     foreach(normalize_by_autocorrelations!, values(g))
     fr = fit(BaselineFringeFit(; gauge), g)
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
-    ad = fit(AdhocPhase(; gauge), g)
+    ad = fit(Adhoc(; gauge), g)
     return (; fr, ad)
 end
 ```
@@ -91,7 +91,7 @@ sols = mapsets(groupby(ps, ByScan())) do g
     calibrate!(bp, g; flag_bad = false, apply_flags = false)
     fr = fit(BaselineFringeFit(; gauge), g)
     calibrate!(fr, g; flag_bad = false, apply_flags = false)
-    return (; fr, ad = fit(AdhocPhase(; gauge), g))
+    return (; fr, ad = fit(Adhoc(; gauge), g))
 end
 ```
 

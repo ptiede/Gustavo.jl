@@ -48,7 +48,7 @@ function bandpass_model(ps; phase_σ = 0.05, logamp_σ = 0.02)
 end
 
 const CHAIN_TEXT = "fit(FringeClosure(), fit(FringeSearch(), ps)) → calibrate! → fit(Bandpass(; model = bandpass_model(ps))) → " *
-    "calibrate! → fit(AdhocPhase()), each fit's default gauge and calibrate!'s default flags"
+    "calibrate! → fit(Adhoc()), each fit's default gauge and calibrate!'s default flags"
 
 # The gains of every solution, composed; the solutions share one grid.
 composed_gains(sols) = reduce((a, b) -> a .* b, map(gains, values(sols)))
@@ -80,6 +80,6 @@ function replay(ps)
     calibrate!(fringe, ps)
     bandpass = fit(Bandpass(; model = bandpass_model(ps)), ps)
     calibrate!(bandpass, ps)
-    adhoc = fit(AdhocPhase(), ps)
+    adhoc = fit(Adhoc(), ps)
     return (; fringe, bandpass, adhoc)
 end

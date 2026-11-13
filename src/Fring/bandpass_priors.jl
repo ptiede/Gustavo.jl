@@ -79,34 +79,45 @@ function _quadratic_layout(chains, n; data = (Int[], Int[], Float64[]), h = zero
         base[_position(K, i, j)] += v
     end
     return (;
-        K, base, h0 = h, c0 = c, h = similar(h), diag = [_position(K, j, j) for j in 1:nf], terms,
-        ridge, ridge_at = [_position(K, j, j) for (j, _) in ridge],
+        K, base, h0 = h, c0 = Ref(c), h = similar(h), diag = [_position(K, j, j) for j in 1:nf], terms,
+        ridge, ridge_at = [_position(K, j, j) for (j, _) in ridge], prior = zeros(nnz(K)), hprior = zeros(n),
+        cprior = Ref(0.0), assembled = Ref{Any}(nothing),
     )
 end
 
 # Writes the quadratic under the resolved `priors` (one per track) into
-# `lay.K`'s stored values and `lay.h`, and returns its constant.
+# `lay.K`'s stored values and `lay.h`, and returns its constant. The priors'
+# part of `K`'s values is kept apart in `lay.prior`, so it is read without the
+# rounding of `K − base` where the data's curvature dwarfs it; it, the priors'
+# part of `h` and their constant are rewritten only when `priors` differ from
+# those they were last written for.
 function _assemble!(lay, priors)
     Kv = nonzeros(lay.K)
     T = eltype(Kv)
-    copyto!(Kv, lay.base)
-    for (p, (_, w)) in zip(lay.ridge_at, lay.ridge)
-        Kv[p] += w
-    end
-    copyto!(lay.h, lay.h0)
-    c = lay.c0
-    for (ts, prior) in zip(lay.terms, priors)
-        isempty(ts) && continue
-        c += _with_piece_models(prior, first(ts).dim, T) do model
-            # A loop: inference widens a sum over a generator here to Any when _fit_hypers! calls it.
-            ct = zero(T)
-            for t in ts
-                ct += _add_chain!(Kv, lay.h, t, model(t.h))
-            end
-            ct
+    if !isequal(lay.assembled[], priors)
+        Pv = fill!(lay.prior, zero(T))
+        hp = fill!(lay.hprior, zero(T))
+        for (p, (_, w)) in zip(lay.ridge_at, lay.ridge)
+            Pv[p] += w
         end
+        c = zero(T)
+        for (ts, prior) in zip(lay.terms, priors)
+            isempty(ts) && continue
+            c += _with_piece_models(prior, first(ts).dim, T) do model
+                # A loop: inference widens a sum over a generator here to Any when _fit_hypers! calls it.
+                ct = zero(T)
+                for t in ts
+                    ct += _add_chain!(Pv, hp, t, model(t.h))
+                end
+                ct
+            end
+        end
+        lay.cprior[] = c
+        lay.assembled[] = copy(priors)
     end
-    return c
+    Kv .= lay.base .+ lay.prior
+    lay.h .= lay.h0 .+ lay.hprior
+    return lay.c0[] + lay.cprior[]
 end
 
 function _add_chain!(Kv, h, t, model)
@@ -153,11 +164,51 @@ end
 
 # The state rows `s` of `term` at the unknowns `u`.
 function _term_rows(term, u, ::Val{R}) where {R}
-    s = MVector{R}(term.base)
+    s = SVector{R}(term.base)
     for (p, j, α) in term.entries
-        s[p] += α * u[j]
+        s = Base.setindex(s, s[p] + α * u[j], p)
     end
-    return SVector(s)
+    return s
+end
+
+# The log normalizer of `_chain_energy` for chain `t` under `model`: half the
+# log determinant of `2π` times the covariance of its start and of each
+# innovation, so that `exp(−E)` over the chain's states is a density. A
+# covariance singular to rounding gives no density: `Inf`.
+function _chain_log_normalizer(t, model)
+    T = Float64
+    out = zero(T)
+    start = initial(model, T)
+    isnothing(start) || (out += _log_det_2π(last(start)))
+    step = nothing
+    for k in eachindex(t.steps)
+        step = _transition(model, t.u[k + 1] - t.u[k], T, step)
+        out += _log_det_2π(last(step))
+    end
+    return out / 2
+end
+
+function _log_det_2π(Σ)
+    C = cholesky(Symmetric(Σ); check = false)
+    return issuccess(C) ? size(Σ, 1) * log(2π) + logdet(C) : Inf
+end
+
+# The log normalizer of the chains of `lay` under the resolved `priors` (one
+# per track), summed over the chains (`_chain_log_normalizer`).
+function _prior_log_normalizer(lay, priors)
+    N = 0.0
+    for (ts, prior) in zip(lay.terms, priors)
+        isempty(ts) && continue
+        N += _with_piece_models(prior, first(ts).dim, Float64) do model
+            # A loop, as in `_assemble!`.
+            out = 0.0
+            for t in ts
+                out += _chain_log_normalizer(t, model(t.h))
+            end
+            out
+        end
+    end
+    return N
 end
 
 function _whitened_energy(e, Σ)
@@ -366,6 +417,31 @@ function _chain_gradient!(g, t, model, u)
     return g
 end
 
+# `aᵀ` times the gradient of `_chain_energy` of chain `t` under `model`, in
+# element type `T`, over the unknowns at `u` (`_chain_gradient!`, without its
+# vector).
+function _chain_gradient_dot(t, model, u, a, ::Type{T}) where {T}
+    D = statedim(model)
+    out = zero(T)
+    start = initial(model, T)
+    if !isnothing(start)
+        μ0, P0 = start
+        out += _rows_dot(t.start, a, cholesky(Symmetric(P0)) \ (_term_rows(t.start, u, Val(D)) - μ0))
+    end
+    step = nothing
+    for (k, term) in pairs(t.steps)
+        step = _transition(model, t.u[k + 1] - t.u[k], T, step)
+        _, A, Q = step
+        s = _term_rows(term, u, Val(2D))
+        w = cholesky(Symmetric(Q)) \ (s[SOneTo(D)] - A * s[SVector{D}((D + 1):(2D))])
+        out += _rows_dot(term, a, vcat(w, -A' * w))
+    end
+    return out
+end
+
+# `aᵀ` times the gradient `r` over `term`'s state rows carried onto the unknowns.
+_rows_dot(term, a, r) = sum(((p, j, α),) -> α * a[j] * r[p], term.entries; init = zero(eltype(r)))
+
 # Adds the gradient `r` over `term`'s state rows onto the unknowns in `g`.
 function _add_rows!(g, term, r)
     for (p, j, α) in term.entries
@@ -374,9 +450,9 @@ function _add_rows!(g, term, r)
     return g
 end
 
-# The gradient of `_prior_energy` at the unknowns `u`.
-function _prior_gradient(lay, priors, u)
-    g = zeros(length(u))
+# The gradient of `_prior_energy` at the unknowns `u`, written into `g`.
+function _prior_gradient!(g, lay, priors, u)
+    fill!(g, 0.0)
     for (j, w) in lay.ridge
         g[j] += w * u[j]
     end
@@ -419,49 +495,108 @@ tracks' latent states: the data's quadratic `JᵀHJ`, each track's state chains
 priors added by `_assemble!`. `key` gives each parameter its coordinate along
 its chain, by which the unknowns are ordered for factoring: the system is then
 banded, coupling stations only at one frequency and frequencies only along a
-chain. The data's quadratic keeps every stored entry of `JᵀHJ`, so the pattern
-does not depend on its values.
+chain. The data's quadratic keeps every product of stored entries of `Jᵀ`, `H`
+and `J`, so the pattern does not depend on their values, and `_set_data!`
+rewrites it for new values on `H`'s pattern. The system also holds the
+coarse space of its tracks' constants (`_coarse_basis`) and buffers for the
+steps on it.
 """
 function _posterior_system(H, b, J, θ, tracks, key; ridge = Pair{Int, Float64}[])
     nθ = size(J, 2)
     keys = Float64.(key)
-    θ = Float64.(θ)
     chains = [_track_chains!(keys, t) for t in tracks]
     n = length(keys)
-    Hθ = J' * H * J
-    bθ = Float64.(J' * b)
-    Hx = Hθ * θ
-    layout = _quadratic_layout(
-        chains, n; data = findnz(Hθ), h = [bθ .+ Hx; zeros(n - nθ)], c = dot(θ, Hx) / 2 + dot(bθ, θ), nf = nθ,
-        ridge = collect(Pair{Int, Float64}, ridge),
+    Is, Js, qs, coefs = _product_terms(J, H)
+    layout = _quadratic_layout(chains, n; data = (Is, Js, zeros(length(Is))), nf = nθ, ridge = collect(Pair{Int, Float64}, ridge))
+    data_map = sparse([_position(layout.K, i, j) for (i, j) in zip(Is, Js)], qs, coefs, nnz(layout.K), nnz(H))
+    Z = _coarse_basis(chains, tracks, n)
+    m = size(Z, 2)
+    sys = (;
+        layout, chains, J, θ = Float64.(θ), bθ = zeros(nθ), data_map, damped = copy(layout.K), hλ = zeros(n), damping = zeros(nθ),
+        residual = zeros(n), gains = zeros(size(J, 1)),
+        coarse = (; Z, U = zeros(n, m)), key = keys,
+        factor = Ref{Union{Nothing, CHOLMOD.Factor{Float64, Int}}}(nothing), evidence = Ref{Any}(nothing),
     )
-    return (;
-        layout, chains, J, θ, bθ, damped = copy(layout.K), hλ = zeros(n), key = keys,
-        factor = Ref{Union{Nothing, CHOLMOD.Factor{Float64, Int}}}(nothing),
-    )
+    return _set_data!(sys, H, b, θ)
+end
+
+# The products `Jᵀ[i, k]·H[k, l]·J[l, j]` that make up `JᵀHJ`: per product its
+# entry `(i, j)`, the index `q` of `H[k, l]` among `H`'s stored values, and
+# `J[k, i]·J[l, j]`.
+function _product_terms(J, H)
+    rows = sparse(J')
+    Is, Js, qs, coefs = Int[], Int[], Int[], Float64[]
+    for l in axes(H, 2), q in nzrange(H, l)
+        k = rowvals(H)[q]
+        for a in nzrange(rows, k), b in nzrange(rows, l)
+            push!(Is, rowvals(rows)[a])
+            push!(Js, rowvals(rows)[b])
+            push!(qs, q)
+            push!(coefs, nonzeros(rows)[a] * nonzeros(rows)[b])
+        end
+    end
+    return Is, Js, qs, coefs
+end
+
+# Writes into `sys` (`_posterior_system`) the data's quadratic for the
+# curvature `H`, on the pattern `sys` was made with, the gradient `b` and the
+# parameters `θ`.
+function _set_data!(sys, H, b, θ)
+    (; layout, J, data_map) = sys
+    size(data_map, 2) == nnz(H) || error("the data curvature changed its sparsity pattern")
+    K = layout.K
+    sys.θ .= θ
+    mul!(sys.bθ, J', b)
+    mul!(layout.base, data_map, nonzeros(H))
+    h0 = fill!(layout.h0, 0.0)
+    for j in eachindex(sys.θ), q in nzrange(K, j)
+        h0[rowvals(K)[q]] += layout.base[q] * sys.θ[j]
+    end
+    Hθ = view(h0, eachindex(sys.θ))
+    layout.c0[] = dot(sys.θ, Hθ) / 2 + dot(sys.bθ, sys.θ)
+    Hθ .+= sys.bθ
+    return sys
+end
+
+# The coarse space of a system's chains (`_track_chains!` of `tracks`) over `n`
+# unknowns: one column per constant group of each track (its `constants`), one
+# on its parameters in the pieces of that group.
+function _coarse_basis(chains, tracks, n)
+    I, Js = Int[], Int[]
+    m = 0
+    for (t, cs) in zip(tracks, chains), g in unique(t.constants)
+        m += 1
+        for (j, ch) in pairs(cs)
+            t.constants[j] == g || continue
+            append!(I, ch.gains)
+            append!(Js, fill(m, length(ch.gains)))
+        end
+    end
+    return sparse(I, Js, ones(length(I)), n, m)
 end
 
 # The system's quadratic as last assembled (`_assemble!`, which returned `c`)
 # plus `λ/2·Σ d_j(θ′_j − θ_j)²` over the unknowns in `θ`, `d` their damping
-# weights (`_damping`): `(K, h, c)` of `½uᵀKu − hᵀu + c`, in buffers of `sys`
-# the next call overwrites.
+# weights (`sys.damping`, written here): `(K, h, c)` of `½uᵀKu − hᵀu + c`, in
+# buffers of `sys` the next call overwrites.
 function _reduce!(sys, c, λ)
     (; layout, damped, θ) = sys
-    d = _damping(sys)
+    d = _damping!(sys)
     copyto!(nonzeros(damped), nonzeros(layout.K))
     for (p, dj) in zip(layout.diag, d)
         nonzeros(damped)[p] += λ * dj
     end
     h = copyto!(sys.hλ, layout.h)
     view(h, eachindex(θ)) .+= λ .* d .* θ
-    c += λ * dot(θ, d .* θ) / 2
+    c += λ * sum(j -> d[j] * θ[j]^2, eachindex(θ, d); init = 0.0) / 2
     return damped, h, c
 end
 
-# The damping weight of each unknown in `sys.θ`: its curvature in the quadratic
-# as last assembled, which makes the damping independent of the parameters'
-# units (Marquardt 1963).
-_damping(sys) = [nonzeros(sys.layout.K)[p] for p in sys.layout.diag]
+# Writes into `sys.damping` the damping weight of each unknown in `sys.θ`: its
+# curvature in the quadratic
+# as last assembled, which makes the damping independent of the parameters' units
+# (Marquardt 1963).
+_damping!(sys) = map!(p -> nonzeros(sys.layout.K)[p], sys.damping, sys.layout.diag)
 
 _factor(K, key; check = true) = cholesky(Symmetric(K); perm = sortperm(key), check)
 
@@ -487,23 +622,55 @@ end
 # ── Hyperparameters and branches ─────────────────────────────────────────────
 
 """
-    _selected_inverse(F, K) -> (i, j) -> K⁻¹[i, j]
+    SelectedInverse(F, K)
 
 The entries of `K⁻¹` on `K`'s sparsity pattern, from its Cholesky factor `F` by
-supernodal selected inversion (SelectedInversion.jl; the recursion of
-Takahashi, Fagan & Chen 1973). The pattern holds every pair of unknowns that
+selected inversion (SelectedInversion.jl; the recursion of Takahashi, Fagan &
+Chen 1973), called as `Σ(i, j)`. The pattern holds every pair of unknowns that
 share a term of the energy, so these are the posterior covariances the expected
-energy needs. Looking up a pair outside it throws.
+energy needs. Looking up a pair outside it throws. `_selected_inverse!(Σ, F)`
+rewrites them for a refactorization `F` with the same symbolic analysis.
 """
-function _selected_inverse(F, K)
-    Σ = SelectedInversion.selinv_extract(SelectedInversion.selinv(F; depermute = true).Z, K)
-    return function (a, b)
-        rng = nzrange(Σ, b)
-        k = searchsortedfirst(view(rowvals(Σ), rng), a)
-        k <= length(rng) && rowvals(Σ)[rng[k]] == a ||
-            error("posterior covariance ($a, $b) is not on the system's sparsity pattern")
-        return nonzeros(Σ)[rng[k]]
+struct SelectedInverse{M <: SparseMatrixCSC, P <: AbstractVector{Int}}
+    Σ::M
+    plan::P
+end
+
+function SelectedInverse(F, K)
+    (; Z, p) = SelectedInversion.selinv(F)
+    n = size(K, 1)
+    # Each stored value of `K` tagged with its index, carried to the factor's
+    # permuted order, in which `Z` holds `K⁻¹[p, p]`.
+    tags = SparseMatrixCSC(n, n, copy(K.colptr), copy(rowvals(K)), collect(1.0:nnz(K)))[p, p]
+    plan = zeros(Int, nnz(K))
+    src = _selinv_plan(Z, tags)
+    for (t, k) in zip(nonzeros(tags), src)
+        plan[Int(t)] = k
     end
+    Σ = SelectedInverse(SparseMatrixCSC(n, n, copy(K.colptr), copy(rowvals(K)), zeros(nnz(K))), plan)
+    return _fill_selected!(Σ, Z)
+end
+
+# The index in the stored values of the selected inverse `Z` of each stored
+# entry of `B`, both in the factor's permuted order. A simplicial `Z` stores its
+# lower triangle.
+_selinv_plan(Z::SelectedInversion.SupernodalMatrix, B) = SelectedInversion.selinv_extract_setup(Z, B)
+function _selinv_plan(Z::Symmetric, B)
+    return [_position(Z.data, max(i, j), min(i, j)) for j in axes(B, 2) for i in view(rowvals(B), nzrange(B, j))]
+end
+
+_fill_selected!(Σ::SelectedInverse, Z::SelectedInversion.SupernodalMatrix) = (SelectedInversion.selinv_extract!(Σ.Σ, Z, Σ.plan); Σ)
+_fill_selected!(Σ::SelectedInverse, Z::Symmetric) = (map!(k -> nonzeros(Z.data)[k], nonzeros(Σ.Σ), Σ.plan); Σ)
+
+_selected_inverse!(Σ::SelectedInverse, F) = _fill_selected!(Σ, SelectedInversion.selinv(F).Z)
+
+function (S::SelectedInverse)(a, b)
+    (; Σ) = S
+    rng = nzrange(Σ, b)
+    k = searchsortedfirst(view(rowvals(Σ), rng), a)
+    k <= length(rng) && rowvals(Σ)[rng[k]] == a ||
+        error("posterior covariance ($a, $b) is not on the system's sparsity pattern")
+    return nonzeros(Σ)[rng[k]]
 end
 
 # How many hyperparameters `prior` gives as densities, to be estimated.
@@ -523,8 +690,43 @@ _factor_specs(fs::Tuple) = (_hyper_specs(first(fs))..., _factor_specs(Base.tail(
 # The support of the hyperparameters `spec` gives as densities, over their logs,
 # on pieces of sample spacing `Δ` and span `W` (`_piece_extent`): a `CARMAPrior`'s
 # scales lie in `[Δ, W]` and its periods in `[2Δ, W]`, beyond which the samples
-# do not measure them (a shorter period aliases to a longer one).
+# do not measure them (a shorter period aliases to a longer one). An
+# `OUPrior`'s scale lies in `[Δ, 10W]`, its seed's bounds (`_ou_tau_bounds`):
+# beyond the span the process is a random walk whose diffusion `2σ²/τ` is all
+# the samples fix.
 _log_hyper_box(spec, Δ, W) = fill((-Inf, Inf), _hyper_count(spec))
+function _log_hyper_box(spec::OUPrior, Δ, W)
+    T = float(promote_type(typeof(Δ), typeof(W)))
+    box = NTuple{2, T}[]
+    is_fixed_hyper(spec.scale) || push!(box, (log(T(Δ)), log(10 * T(max(W, Δ)))))
+    is_fixed_hyper(spec.σ) || push!(box, (T(-Inf), T(Inf)))
+    return box
+end
+
+# The support of a track's hyperparameters over its `chains`: what the samples
+# measure (`_log_hyper_box`) within the hyperpriors' support (`_hyperprior_box`).
+# Chains of one sample each measure no scale, and leave only the hyperpriors'.
+function _track_box(spec, chains)
+    any(ch -> length(ch.u) >= 2, chains) || return _hyperprior_box(spec)
+    samples = _log_hyper_box(spec, _piece_extent([ch.u for ch in chains], [ch.h for ch in chains])...)
+    return [(max(a, c), min(b, d)) for ((a, b), (c, d)) in zip(samples, _hyperprior_box(spec))]
+end
+
+# The hyperpriors of the hyperparameters `spec` gives as densities, in
+# `_log_hypers` order.
+_hyperpriors(spec::RandomWalkPrior) = filter(!is_fixed_hyper, [spec.σ])
+_hyperpriors(spec::OUPrior) = filter(!is_fixed_hyper, [spec.scale, spec.σ])
+_hyperpriors(spec::CARMAPrior) = filter(!is_fixed_hyper, collect(_hyper_specs(spec)))
+
+# The tail probability beyond which a hyperprior is taken to hold no mass, that
+# of a normal beyond six standard deviations.
+const _HYPER_TAIL = 1.0e-9
+
+# Each hyperparameter's support over its log, between the quantiles of its
+# hyperprior at `_HYPER_TAIL` and `1 − _HYPER_TAIL`. It keeps an optimizer's
+# trial points where the solve can evaluate them: far beyond, a prior stiffer or
+# looser than the data by more than the rounding leaves the systems singular.
+_hyperprior_box(spec) = [(log(quantile(d, _HYPER_TAIL)), log(quantile(d, 1 - _HYPER_TAIL))) for d in _hyperpriors(spec)]
 function _log_hyper_box(spec::CARMAPrior, Δ, W)
     T = float(promote_type(typeof(Δ), typeof(W)))
     box = NTuple{2, T}[]
@@ -622,13 +824,22 @@ end
 # Track `t`'s prior with its hyperparameters estimated from the station-gain
 # estimates `y` (weights `wy`) as independent measurements of the track alone:
 # type-II MAP over its pieces, the constants the source term absorbs integrated
-# out, and for a phase over its pieces' 2π branches. The joint solve starts
-# from these.
+# out. A phase is first lifted onto the branches `_branch_filter` finds most
+# probable at the hyperprior medians. The joint solve starts from these.
 function _seed_prior(t, y, wy; phase::Bool)
     ys = [y[t.gains[p]] for p in t.pieces]
     ws = [wy[t.gains[p]] for p in t.pieces]
     xs = [float.(t.x[p]) for p in t.pieces]
-    return _estimate_hypers(t.prior, ys, ws, xs; mean = _mean_designs(t), branches = phase)
+    design = _mean_designs(t)
+    if phase
+        start = _hyper_start(t.prior)
+        ys = map(eachindex(ys, ws, xs, design)) do j
+            model, θ, r, u = _filter_inputs(start, ys[j], ws[j], xs[j])
+            any(isfinite, θ) || return ys[j]
+            return first(_branch_filter(model, θ, r, u; mean = design[j].rows).histories).lift
+        end
+    end
+    return _estimate_hypers(t.prior, ys, ws, xs; mean = design)
 end
 
 # The design of track `t`'s constants per piece: piece `j` takes constant

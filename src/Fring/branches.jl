@@ -231,26 +231,6 @@ function _logsumexp(v)
     return m + log(sum(x -> exp(x - m), v))
 end
 
-# `_pooled_loglik` for phase tracks whose 2π branches are not known: each track
-# on its most probable branches (the tracks sharing a mean then aligned by
-# `_align_branches!`), plus the log of the total weight of the histories
-# `_branch_filter` carried relative to that one's. Without a mean that is the
-# tracks' marginal likelihood summed over their branches; with one each track's
-# sum integrates its own coefficients.
-function _branch_pooled_loglik(models, θs, rs, xs, mean)
-    design = isnothing(mean) || !(eltype(mean) <: Integer) ? mean : _level_design(mean, θs)
-    lifts = similar(θs)
-    extra = zero(eltype(eltype(θs)))
-    for i in eachindex(θs, rs, xs)
-        rows = isnothing(design) ? nothing : design[i].rows
-        bf = _branch_filter(_track_model(models, i), θs[i], rs[i], xs[i]; mean = rows)
-        lifts[i] = first(bf.histories).lift
-        extra += bf.loglik - bf.best
-    end
-    isnothing(design) || _align_branches!(lifts, [inv.(r) for r in rs], design)
-    return _pooled_loglik(models, lifts, rs, xs, design) + extra
-end
-
 # Shift each phase piece by the multiple of 2π that brings its weighted mean
 # nearest the mean its design (`_level_design`) predicts there from the pieces
 # before it, fit by weighted least squares, so that a mean shared across

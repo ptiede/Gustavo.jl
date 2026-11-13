@@ -72,10 +72,9 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
 
     @testset "full chain: θ and output bit-identical across OUTER executors" begin
         ps, _ = _build_fringe_ps(; nscans = 2)
-        adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
         specs = (
             FringeClosure(; gauge = PinAntenna(1)), Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1)),
-            AdhocPhase(adhoc; gauge = PinAntenna(1)),
+            Adhoc(; gauge = PinAntenna(1)),
         )
         run(ex) = _fit_chain(specs, ps; exec = ExecutionConfig(outer_executor = ex))
         sols_t, sols_d = run(DynamicScheduler()), run(GreedyScheduler())
@@ -93,10 +92,9 @@ _cap(::GreedyScheduler, n) = GreedyScheduler(; ntasks = n)
 
     @testset "full chain: θ agrees across INNER executors" begin
         ps, _ = _build_fringe_ps(; nscans = 2)
-        adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
         specs = (
             FringeClosure(; gauge = PinAntenna(1)), Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1)),
-            AdhocPhase(adhoc; gauge = PinAntenna(1)),
+            Adhoc(; gauge = PinAntenna(1)),
         )
         run(inner) = _fit_chain(specs, ps; exec = ExecutionConfig(inner_executor = inner))
         # The bandpass sums run in one chunk per inner task, so θ agrees to rounding.

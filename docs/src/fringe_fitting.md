@@ -503,9 +503,8 @@ The joint bandpass solve holds a pin's nodes fixed. Under any other gauge it
 fixes the shifts that neither its data nor its priors see with the fewest pins
 its own holds leave, and meets the gauge's constraints by a shift along those
 shifts after the solve (see [What the data leave free](@ref bandpass-gauge)).
-The adhoc phase solve smooths
-its tracks in a frame independent of the gauge and applies the gauge's
-constraint to each integration afterwards.
+The adhoc phase solve holds each AP's common phase with the priors and
+applies the gauge's constraint to each integration afterwards.
 
 ### Detection threshold and robust weighting
 
@@ -537,98 +536,82 @@ group then has its baselines measured at a known fringe position, and so to
 arbitrarily low signal-to-noise. The significance of these steered measurements
 is recorded and is not used as a threshold.
 
-## Adhoc phase
+## Adhoc
 
-The adhoc solver ([`AdhocPhase`](@ref Gustavo.AdhocPhase)) solves a phase per
-station and accumulation period (AP) that a per-scan delay and rate cannot
-follow, such as atmospheric turbulence. It works on residual visibilities, with
-the fringe solution already divided out and the band coherently averaged to one
-complex number ``\bar V^p_{ab}(t)`` per baseline, product and AP.
+The adhoc solver ([`Adhoc`](@ref Gustavo.Adhoc)) solves a phase and a
+log-amplitude per station and accumulation period (AP) that a per-scan delay,
+rate and bandpass cannot follow: atmospheric turbulence, and amplitude changes
+within a scan such as pointing, opacity or phased-array efficiency. It works on
+residual visibilities, with the fringe solution already divided out. Each scan
+is one [`solve_joint_gains!`](@ref Gustavo.Fring.solve_joint_gains!) over one
+phase and one log-amplitude per (station, feed node, AP), from the scan's
+visibilities averaged over frequency into weighted sums per (station pair, feed
+pair, AP).
 
 ### Model
 
-Let ``n(f)`` be the phase node of feed ``f`` under the component's feed tying:
-``n(f) = 1`` for every feed under `SharedFeeds`, ``n(f) = f`` under `PerFeed`.
-For baseline ``(a,b)`` and product ``p`` with feeds ``(f_a, f_b)``,
+Let ``n(f)`` be the node of feed ``f`` under the components' feed tying:
+``n(f) = 1`` for every feed under `SharedFeeds` (the default, one track per
+station), ``n(f) = f`` under `PerFeed`. For baseline ``(a,b)`` and feed pair
+``p`` with feeds ``(f_a, f_b)``, the AP-averaged visibility is modeled as
 
 ```math
-\arg \bar V^p_{ab}(t) = \phi_{a,n(f_a)}(t) - \phi_{b,n(f_b)}(t) + x^p_{ab} + \varepsilon ,
+\bar V^p_{ab}(t) = e^{\eta_{a,n(f_a)}(t) + \eta_{b,n(f_b)}(t)
+  + i\left(\phi_{a,n(f_a)}(t) - \phi_{b,n(f_b)}(t)\right)}\, S^p_{ab}
+  + \varepsilon ,
 ```
 
-with one free source term ``x^p_{ab}`` per baseline and product, constant over
-the scan. The source term carries everything constant that a product adds to
-the station difference: source structure and closure phase, the source's
-polarization, leakage, and constant offsets between feeds. A constant on a node
-trades against the source terms,
+with one source coherence ``S^p_{ab}``, constant over the scan, per baseline
+and feed pair. ``S`` is profiled out of the likelihood, so everything constant
+that a product adds to the station difference lands in it rather than in the
+station gains: source structure and closure phase, the source's polarization
+(EVPA), leakage, constant offsets between feeds, and the source's flux. A
+change of the source's flux within the scan is therefore put on the stations,
+half its logarithm on each ``\eta``, as the bandpass puts a source spectrum on
+the stations' passbands.
+
+Each station's priors act on its own phase and log-amplitude along time, so
+the stations are independent. The defaults are `OUPrior`s with LogNormal
+hyperpriors: [`default_adhoc_phase_prior`](@ref Gustavo.Fring.default_adhoc_phase_prior)
+(timescale median 10 s, ``\sigma`` median 0.3 rad) and
+[`default_adhoc_logamp_prior`](@ref Gustavo.Fring.default_adhoc_logamp_prior)
+(timescale median 60 s, ``\sigma`` median 0.05), with hyperparameters resolved
+per (station, feed node, scan) at their type-II MAP. The phase and log-amplitude
+decouple in the Gauss–Newton step, as in the bandpass. A constant on a
+station's log-amplitude over the scan trades against ``|S^p_{ab}|``, so its
+prior sets it, and where an AP's baselines hold no odd loop (two stations, say)
+the data measure only sums of log-amplitudes and the priors alone split them;
+the solve warns. Any prior the joint solve accepts works: an `IIDPrior` (each AP on
+its own), or a state-space prior along `Ti` with a proper start (`OUPrior`,
+`CARMAPrior`, or `RandomWalkPrior` with an `init`). A prior is required.
+
+### The gauge
+
+The data see only phase differences within an AP, so the priors hold each AP's
+common phase, and the gauge sets it after the fit. `PinAntenna` holds the
+reference at 0, falling to the next ranked reference where the first is
+absent; `ZeroSumPhase` centers each AP on zero mean over the stations with
+data. A constant on a station's phase over the scan trades against its
+``S^p_{ab}``,
 
 ```math
 \phi_{a,n} \to \phi_{a,n} + c_{a,n},
 \qquad
-x^p_{ab} \to x^p_{ab} - \left(c_{a,n(f_a)} - c_{b,n(f_b)}\right),
+S^p_{ab} \to S^p_{ab}\, e^{-i\left(c_{a,n(f_a)} - c_{b,n(f_b)}\right)},
 ```
 
-so each track ``\phi_{a,n}(t)`` is reported with zero weighted mean over the
-scan, and its time variation, including a slope, is what the solver fits.
+so the priors set that constant too. The gauge changes no baseline difference,
+so it does not change the applied correction.
 
-### Using every product
+### Branches
 
-Every product of every baseline enters one solve per AP; the station phases are
-shared across products, and only the constants ``x^p_{ab}`` are per product.
-Under `SharedFeeds` all of a station's products constrain its single node;
-under `PerFeed` a product constrains the two feed nodes it pairs.
-
-The solve runs in two passes. A seed pass takes each product's phase
-``\arg \bar V^p_{ab}(t)`` at each AP, keeps it if its coherent SNR reaches
-`snr_floor` ([`AdhocOptions`](@ref)), and minimizes
-
-```math
-\sum_t \sum_{ab,p} w^p_{ab}(t)\,
-  \operatorname{wrap}\!\left(\arg \bar V^p_{ab}(t)
-  - \phi_{a,n(f_a)}(t) + \phi_{b,n(f_b)}(t) - x^p_{ab}\right)^2
-```
-
-by alternating two steps: the per-AP station phases with ``x`` fixed (the
-system below), and each source term with ``\phi`` fixed, as the weighted
-circular mean
-
-```math
-x^p_{ab} = \arg \sum_t w^p_{ab}(t)\,
-  e^{i\left(\arg \bar V^p_{ab}(t) - \Delta\phi_{ab}(t)\right)} ,
-```
-
-until no source term moves by more than `source_tol` beyond what per-node
-constants absorb, or for at most `source_iters` passes. Its role is to place
-every track on the right 2π branch. A complex-domain refinement then takes
-Gauss–Newton steps on
-
-```math
-\sum_t \sum_{ab,p} \bar w^p_{ab}(t)\,
-  \left|\bar V^p_{ab}(t) - s^p_{ab}\, e^{i\Delta\phi_{ab}(t)}\right|^2 ,
-```
-
-using every product at every AP, ungated. With ``s^p_{ab}`` the product's mean derotated
-visibility over the scan, an AP contributes
-
-```math
-\Delta\phi^{p}_{ab} \approx \Delta\hat\phi_{ab}
-  + \frac{\operatorname{Im}\!\left(\bar V^p_{ab}\,\overline{s^p_{ab}}\,
-    e^{-i\Delta\hat\phi_{ab}}\right)}{|s^p_{ab}|^2},
-\qquad
-\text{weight } w^p_{ab}\,|s^p_{ab}|^2 ,
-```
-
-a linear measurement of the station-phase difference ``\Delta\phi_{ab}``
-around the current tracks ``\Delta\hat\phi_{ab}``. A product weighs in
-by its signal power, so a weak product (a cross-hand product on a weakly
-polarized source in a circular basis, say) contributes little rather than
-being excluded; the SNR gate applies to the seed pass only.
-
-The tracks are then fit along time under the component's prior.
-[`PerTrackAdhocSmoother`](@ref) fits each (station, node) track on its own: one
-per station under `SharedFeeds`, one per feed under `PerFeed`.
-[`JointKalmanSmoother`](@ref) fits every station's track at once from the
-baseline differences, and needs one node per station: `SharedFeeds`, or a
-single receptor.
+Phases are not taken from the data before the fit. The joint solve starts
+from complex per-gain estimates, puts each phase chain on its most probable
+``2\pi`` branches under its prior with a Gaussian-sum Kalman filter, and then
+runs Levenberg–Marquardt on the complex likelihood. There is no SNR floor: every
+product enters weighted by its noise, so a weak product (a cross-hand product
+on a weakly polarized source in a circular basis, say) contributes little
+rather than being excluded.
 
 ### Feed order and feed basis
 
@@ -647,80 +630,14 @@ Z_{ab}(t) = G_a(t)\, S_{ab}\, G_b(t)^\dagger .
 ```
 
 A change of feed basis at station ``a`` by a unitary ``U`` replaces ``Z_{ab}``
-with ``U Z_{ab}``. A feed-common gain ``G_a = e^{i\phi_a} I`` commutes with
-``U``, so the same ``\phi_a`` fits the new data, with ``U S_{ab}`` in place of
-``S_{ab}``, and the free source terms absorb the change. Summed over a
-baseline's products, the refinement above weights it by ``\sum_p w\,|s^p_{ab}|^2 = w\,\lVert S_{ab}
-\rVert_F^2`` and measures it through ``\operatorname{Im} \sum_p \bar V^p_{ab}
-\overline{s^p_{ab}}\, e^{-i\Delta\phi}``, a Frobenius inner product, and both
-are unchanged by ``U`` when every product has the same weight. A per-feed gain
-``G_a = \operatorname{diag}(e^{i\phi_{a,1}}, e^{i\phi_{a,2}}, \dots)`` is
+with ``U Z_{ab}``. A feed-common gain ``G_a = e^{\eta_a + i\phi_a} I`` commutes with
+``U``, so the same ``\eta_a`` and ``\phi_a`` fit the new data, with ``U S_{ab}`` in place of
+``S_{ab}``, and the free source coherences absorb the change. The residual
+``\lVert \bar Z_{ab} - G_a S_{ab} G_b^\dagger \rVert_F^2`` is unchanged by
+``U`` when every product has the same weight. A per-feed gain
+``G_a = \operatorname{diag}(e^{\eta_{a,1} + i\phi_{a,1}}, e^{\eta_{a,2} + i\phi_{a,2}}, \dots)`` is
 diagonal only in the stored basis, so a `PerFeed` solve depends on that basis
 by construction.
-
-### Per-integration solves and their gauge
-
-Each AP is a weighted least-squares problem on a graph whose nodes are the
-(station, node) pairs, ``\phi \in \mathbb R^{N}`` with
-``N = n_\mathrm{ant} n_\mathrm{node}``. Each product ``(ab, p)`` the pass uses
-is a row ``i`` joining ``u_i = (a, n(f_a))`` to ``v_i = (b, n(f_b))``:
-
-```math
-\min_\phi \sum_i w_i \left((A\phi)_i - y_i\right)^2,
-\qquad
-A_{i u_i} = 1,\; A_{i v_i} = -1 .
-```
-
-In the seed pass ``y_i = \arg \bar V^p_{ab}(t) - x^p_{ab}`` with
-``w_i = |r^p_{ab}(t)|^2 / \bar w^p_{ab}(t)``, the coherent SNR², where
-``r = \sum w V`` and ``\bar w = \sum w`` over the band. In the refinement
-``y_i`` is the linearized measurement above and ``w_i = \bar w^p_{ab}(t)\,
-|s^p_{ab}|^2``. Because ``y_i`` is known only modulo ``2\pi``, the solve
-starts from a seed ``\phi^0`` and alternates
-
-```math
-y_i \leftarrow y_i + 2\pi \operatorname{round}\!\left(\frac{(A\phi)_i - y_i}{2\pi}\right),
-\qquad
-\left(A_F^\top W A_F\right) \phi_F = A_F^\top W y ,
-```
-
-`phase_rewrap_iters` + 1 times, where ``F`` is every node except one pinned
-node per connected component, held at zero. The pin is needed because
-``A \mathbf 1_C = 0`` for each connected component ``C`` of the graph: each
-component has one free constant per AP, ``\phi \to \phi + \delta\,\mathbf 1_C``. Under
-`PerFeed`, a product pairing different nodes joins their blocks into one
-component; where no such product passes the gate, the blocks are separate
-components with a constant each.
-
-The pinned node is at an anchor station, chosen as the one with the most gated
-weight in the scan, so that tracks are continuous from one AP to the next and
-can be unwrapped. The seed ``\phi^0`` is the previous AP's solution where it is
-recent, and otherwise a circular solve of the AP's phasors; a maximum-weight
-spanning tree over all of the AP's edges, each a pure node difference once the
-source terms are removed, fills any node neither covers.
-
-A component that holds no anchor node at some AP is pinned elsewhere, which
-offsets it by an arbitrary constant. That constant is removed by registering
-the component against the last values ``\hat\phi_u`` of its nodes in the
-anchor's frame:
-
-```math
-\delta_C(t) = \arg \sum_{u \in C} w_u(t)\, e^{i(\phi_u(t) - \hat\phi_u)},
-\qquad
-\phi_u(t) \to \phi_u(t) - \delta_C(t) \quad (u \in C),
-```
-
-with ``w_u(t)`` the node's gated weight. One constant per component is exactly
-the freedom the data leave: shifting a set of nodes that is not a whole
-component would change the observed difference on every edge leaving it.
-
-The gauge given to the solver is applied last, one constant per AP across every
-node. Its constraint is built once per scan, over the nodes covered in every
-AP, so a pinned station that drops out of some APs falls back to the same node
-throughout the scan rather than to a different one per AP. It changes no
-baseline difference, so it does not change the applied
-correction; the per-AP pin, the registration above, and the smoothing frame
-are internal to the solve and independent of it.
 
 ## Drift, outliers and the closure's EM
 
