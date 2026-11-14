@@ -21,7 +21,7 @@ An `AbstractSolver` subtype implements [`solve`](@ref) and some of these hooks:
 | Hook | Answers | Default |
 |:-----|:--------|:--------|
 | [`model_components`](@ref) | what gain model does this solver solve? | no components |
-| [`solution_name`](@ref) | the solver's solution slot name (`sol[:name]`) | `:nothing` |
+| [`solution_name`](@ref) | the name of the solver's solution (`sol[:name]`) | `:nothing` |
 | [`solver_gauge`](@ref) | the gauge that fixes the solver's undetermined station values | `nothing` |
 | [`solve`](@ref) | fill θ; return diagnostics | required |
 | [`supports_antenna_heterogeneity`](@ref) | can the solver loop over ragged station blocks? | `false` |
@@ -47,7 +47,7 @@ The execution model behind them:
   private copy instead of writing into the other's.
 - **`f` may run concurrently across groups.** It returns each scan's
   contribution and `solve` combines the returned vector, so a solver needs no
-  locking. Per-scan θ slots are disjoint, so `f` may also write the θ slots
+  locking. Per-scan θ entries are disjoint, so `f` may also write the θ entries
   of its own scan directly.
 
 ## Worked example: the adhoc solver
@@ -93,7 +93,7 @@ can_fit(::AbstractAdhocSmoother, tc, geom) =
 ### The solve
 
 `solve` locates the solver's θ block once, then solves each scan group. The
-adhoc phase is per scan, so each group writes only its own θ slots and the
+adhoc phase is per scan, so each group writes only its own θ entries and the
 per-group function writes θ directly. It fixes the per-scan constant with
 `ctx.gauge`, the solver's own gauge. The returned `NamedTuple` is the solver's
 diagnostics:
@@ -159,7 +159,7 @@ selection. To fit a subset of the scans, fit that subset, then
 divide its solution out of the full data before the next fit:
 
     fr = fit(FringeClosure(; gauge), fit(FringeSearch(), data))
-    bp = fit(Bandpass(; gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
+    bp = fit(Bandpass(; model, gauge), calibrate(fr, calibrator_scans; flag_bad = false, apply_flags = false))
     corrected = calibrate(fr, data; flag_bad = false, apply_flags = false)
     calibrate!(bp, corrected; flag_bad = false, apply_flags = false)
     ad = fit(AdhocPhase(; gauge), corrected)

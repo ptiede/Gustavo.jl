@@ -34,10 +34,11 @@ function _receptor_feed(letter::Char, receptors, antenna)
     r = string(letter)
     i = findfirst(==(r), receptors)
     i === nothing || return i
-    own = findfirst(basis -> r in basis, _BASES)
-    other = own === nothing ? nothing : _BASES[3 - own]
-    (other !== nothing && length(receptors) == 2 && all(in(other), receptors)) &&
-        return findfirst(==(r), _BASES[own])
+    for (k, basis) in pairs(_BASES)
+        j = findfirst(==(r), basis)
+        isnothing(j) && continue
+        length(receptors) == 2 && all(in(_BASES[3 - k]), receptors) && return j
+    end
     throw(
         ArgumentError(
             "product letter `$r` names no receptor of antenna `$antenna`, whose receptors are $(join(receptors, ", "))"
@@ -46,8 +47,8 @@ function _receptor_feed(letter::Char, receptors, antenna)
 end
 # The baselines of `ms` in `baseline_id` order, as indices into `XRadio.antennas(ms)`.
 function _antenna_pairs(ms::XRadio.MeasurementSet)
-    slot = Dict(n => i for (i, n) in pairs(XRadio.antennas(ms)))
-    return [(slot[a], slot[b]) for (a, b) in XRadio.baselines(ms)]
+    index = Dict(n => i for (i, n) in pairs(XRadio.antennas(ms)))
+    return [(index[a], index[b]) for (a, b) in XRadio.baselines(ms)]
 end
 
 """

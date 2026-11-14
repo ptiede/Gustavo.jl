@@ -406,36 +406,26 @@ end
     n = 20
     x = sort!(1.0e9 .+ 1.0e6 .* (1:n) .+ 3.0e5 .* rand(rng, n))
     y = randn(rng, n)
-    track(prior; pieces = [1:n], level = nothing, nlevel = 0) =
-        (; slots = collect(1:n), x, pieces, prior, level, nlevel, level_σ = nothing, delay = nothing, delay_σ = nothing, du = nothing, active = trues(length(pieces)))
-    energy(prior; kw...) = FRpf._track_energy(FRpf._track_layout(track(prior; kw...)), prior, y)
+    # The energy of the chain over the samples `y`, its latent states at their
+    # minimum given them.
+    function energy(prior)
+        t = (; gains = collect(1:n), x, pieces = [1:n], constants = [1], prior)
+        keys = copy(x)
+        lay = FRpf._quadratic_layout([FRpf._track_chains!(keys, t)], length(keys))
+        FRpf._assemble!(lay, [prior])
+        latent = (n + 1):length(keys)
+        u = [y; -(Matrix(lay.K[latent, latent]) \ (lay.K[latent, 1:n] * y))]
+        return FRpf._prior_energy(lay, [prior], u)
+    end
 
     # A random walk of order 1 from a flat start: the sum of its increments' energies.
     σ1 = 1.0e-3
-    @test first(energy(CALpf.RandomWalkPrior(; order = 1, σ = σ1))) ≈ sum(abs2.(diff(y)) ./ (2 .* σ1^2 .* diff(x))) rtol = 1.0e-10
+    @test energy(CALpf.RandomWalkPrior(; order = 1, σ = σ1)) ≈ sum(abs2.(diff(y)) ./ (2 .* σ1^2 .* diff(x))) rtol = 1.0e-10
 
-    # A proper prior acts on the track less a free constant: a zero-mean OU's
-    # energy minimized over that constant.
+    # A stationary OU from its stationary start: the Gaussian's whitened energy.
     τ, σ = 3.0e6, 0.5
     P = inv(_ou_cov(x, τ, σ^2))
-    one_ = ones(n)
-    c = dot(one_, P * y) / dot(one_, P * one_)
-    E, L = energy(CALpf.OUPrior(; scale = τ, σ))
-    @test E ≈ dot(y .- c, P * (y .- c)) / 2 rtol = 1.0e-10
-    @test L.levels[1] ≈ c rtol = 1.0e-10
-
-    # Levels shared by pieces: each level at the value minimizing the energy.
-    pieces = [1:8, 9:14, 15:20]
-    level = [1, 1, 2]
-    Ps = [inv(_ou_cov(x[p], τ, σ^2)) for p in pieces]
-    Lref = map(1:2) do g
-        js = findall(==(g), level)
-        sum(sum(Ps[j] * y[pieces[j]]) for j in js) / sum(sum(Ps[j]) for j in js)
-    end
-    Eref = sum(dot(y[p] .- Lref[g], Ps[j] * (y[p] .- Lref[g])) / 2 for (j, (p, g)) in enumerate(zip(pieces, level)))
-    E, L = energy(CALpf.OUPrior(; scale = τ, σ); pieces, level, nlevel = 2)
-    @test E ≈ Eref rtol = 1.0e-10
-    @test [L.levels[1], L.levels[2]] ≈ Lref rtol = 1.0e-10
+    @test energy(CALpf.OUPrior(; scale = τ, σ)) ≈ dot(y, P * y) / 2 rtol = 1.0e-10
 
     # A stiff second-order walk from a flat start, against a Kalman filter in
     # 256-bit arithmetic with a start variance far above any step's.
@@ -464,6 +454,6 @@ end
     Δν = 1.0e6
     for σc in (0.05, 1.0e-3)
         prior = CALpf.RandomWalkPrior(; order = 2, σ = σc * sqrt(3 / (2 * Δν^3)))
-        @test first(energy(prior)) ≈ kalman_energy(prior, y, x) rtol = 1.0e-9
+        @test energy(prior) ≈ kalman_energy(prior, y, x) rtol = 1.0e-9
     end
 end

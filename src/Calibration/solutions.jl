@@ -740,8 +740,8 @@ function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
     isempty(geom.antennas) && throw(
         ArgumentError("the geometry names no antennas; build it with `DataGeometry(ps)`")
     )
-    slot = Dict(n => i for (i, n) in pairs(geom.antennas))
-    antenna(n) = get(slot, String(n)) do
+    index = Dict(n => i for (i, n) in pairs(geom.antennas))
+    antenna(n) = get(index, String(n)) do
         throw(
             ArgumentError(
                 "baseline antenna `$n` is not among the geometry's antennas, " *
@@ -766,7 +766,7 @@ end
 _time_indices(geom::DataGeometry, ts) = [_time_index(geom, Float64(t)) for t in ts]
 
 function _time_index(geom::DataGeometry, t)
-    j = findfirst(g -> isapprox(g, t; atol = _epoch_atol(t)), geom.times)
+    j = _find_canonical(geom.times, t, _epoch_atol(t))
     isnothing(j) && throw(ArgumentError("time $t s is not in the geometry"))
     return j
 end

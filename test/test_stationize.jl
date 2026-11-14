@@ -162,17 +162,17 @@ end
     for d in (D, D32)
         s32 = stationize(d, bl, pols, nant; opts = FR.Stationization(eltype = Float32))
         @test s32.ref_covered == s64.ref_covered
-        @test s32.delay ≈ s64.delay atol = 1.0e-15
+        @test s32.delay ≈ s64.delay atol = 16 * eps(Float32) * maximum(abs, s64.delay)
         @test s32.rate ≈ s64.rate atol = 1.0e-9
     end
 
     layout = perfeed_scan_layout(nant)
     scans = (FR.detection_stack(D32, named(bl), pols; ti = 1, SCAN_SPREAD...),)
-    slot = Dict(n => i for (i, n) in pairs(ANTENNAS))
+    index = Dict(n => i for (i, n) in pairs(ANTENNAS))
     for (T, kind, plan) in ((Float32, :delay, layout.plans[1]), (Float64, :rate, layout.plans[2]))
         # The EM's results exist only when it runs.
         r = @inferred Tuple{Int, NamedTuple, Dict{Int, T}, Set{Int}, Set{Int}, Union{Nothing, NamedTuple}} FR._solve_kind_cols!(
-            zeros(layout.nθ), scans, [plan], slot, PinAntenna(1),
+            zeros(layout.nθ), scans, [plan], index, PinAntenna(1),
             FR.Stationization(eltype = T), Val(kind), nothing,
         )
         @test r[3] isa Dict{Int, T}

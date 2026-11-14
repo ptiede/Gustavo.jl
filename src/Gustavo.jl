@@ -26,6 +26,14 @@ using DimensionalData: AbstractDimArray, hasdim, branches, metadata, @d
 using Statistics: mean, median, median!
 using AstroLib: ct2lst
 
+# The most tasks `sched` runs at once. An upper bound — a scheduler whose chunk
+# count follows the collection (`chunksize`), or that spawns one task per
+# element (`chunking = false`), is bounded by the thread count instead.
+max_tasks(::SerialScheduler) = 1
+max_tasks(s::GreedyScheduler) = s.ntasks
+max_tasks(s::Union{DynamicScheduler, StaticScheduler}) =
+    (chunking_enabled(s) && has_nchunks(s)) ? nchunks(s) : Threads.nthreads()
+
 include("data/dimensions.jl")
 include("data/io.jl")
 include("data/apriori.jl")
@@ -56,7 +64,7 @@ export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate, calibrate!
 export FringeSearch, FringeClosure, Stationization, OutlierMixture, default_fringe_model, Bandpass,
-    default_bandpass_model, AdhocPhase, default_adhoc_model, JointSmoother
+    AdhocPhase, default_adhoc_model, JointSmoother
 # The gain-model vocabulary: everything a `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare
 # `using Gustavo`.

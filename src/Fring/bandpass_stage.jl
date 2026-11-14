@@ -3,211 +3,74 @@
 # The `Bandpass` solver reads every scan (accumulate → return the scan's
 # contribution) and folds the contributions in group order, which keeps the
 # result deterministic at any concurrency.
-# What is fit is the solver's model tree (see [`default_bandpass_model`](@ref)):
-# per observable, a shape component with a value per `ChannelBlocks` segment,
-# optionally beside a level component at spectral-window resolution or coarser.
-# A prior on the shape relates its values within each spectral window. How it is
-# solved is `JointSmoother`, which runs
-# [`solve_joint_bandpass!`](@ref), fitting the complex visibilities against a
-# per-scan source term profiled out, with the priors entering inside the solve.
+# What is fit is the solver's model tree: per observable, any components whose
+# time segments are whole scans, each under a prior. How it is solved is
+# `JointSmoother`, which runs [`solve_joint_bandpass!`](@ref), fitting the
+# complex visibilities against a per-scan source term profiled out, with the
+# priors entering inside the solve.
 #
 # This file holds the solver's side: model checks, accumulation, outcome codes and
-# the report. The joint solve's data model is in bandpass_data.jl, its priors and
-# branches in bandpass_priors.jl, the profiled MAP and the hyperparameters in
-# bandpass_map.jl, and the solve itself in bandpass_solve.jl. The prior fits live
-# in prior_fits.jl.
+# the report. The data reduction is in bandpass_data.jl, the station gains in
+# station_gains.jl, the joint solve in joint_gains.jl over the priors of
+# bandpass_priors.jl and the profiled MAP of bandpass_map.jl, and the bandpass
+# entry point in bandpass_solve.jl. The prior fits live in prior_fits.jl.
 
-"""
-    default_bandpass_model(; freq = ChannelBlocks(1)) -> GainModel
+# A bandpass component's time segments are whole scans (`PerScan`) or span
+# several (`GlobalTime`, `InstrumentScans`, `TimeBlocks`), and the scans a
+# segment spans are solved together; and it carries a prior: an `IIDPrior`, or
+# a state-space prior along frequency whose start is proper.
+_fits_bandpass_track(tc) = tc.Ti isa Union{PerScan, GlobalTime, InstrumentScans, TimeBlocks} && _bandpass_prior(tc)
 
-The default [`Bandpass`](@ref Gustavo.Bandpass) model: a time-stable, per-feed
-`ConstantTerm` per frequency segment for each observable — a `phase.bandpass`
-and a `logamp.bandpass` component with no prior. `freq` (a `ChannelBlocks`)
-sets the segments; `ChannelBlocks(1)` is a free value per channel.
-
-Either group of a `Bandpass` model may be empty. Fit one observable only by
-keeping just that group, e.g.
-
-    Bandpass(model = GainModel(; phase = default_bandpass_model().phase))
-
-fits the phase bandpass alone. Uniform across every antenna.
-
-A prior on a component (`GainComponent(...; prior)`) relates its values within
-each spectral window. Beside a shape under a zero-mean `OUPrior`, a group may
-add a mean: a level — a `ConstantTerm` per spectral window or coarser — and,
-for the phase, a delay — a `Delay` over the whole band or per group of
-spectral windows. The mean is flat, or under an `IIDPrior`:
-
-    shape = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1),
-                          Feed = PerFeed(), prior = OUPrior(; scale = 50e6, σ = 0.1))
-    level = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectralWindow(),
-                          Feed = PerFeed())
-    delay = GainComponent(Delay(); Ti = GlobalTime(), Feed = PerFeed())
-    GainModel(; phase = (; level, delay, shape), logamp = (; level, shape))
-"""
-function default_bandpass_model(; freq::ChannelBlocks = ChannelBlocks(1))
-    bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = freq, Feed = PerFeed())
-    return GainModel(phase = (; bandpass), logamp = (; bandpass))
+function _bandpass_prior(tc)
+    tc.prior isa IIDPrior && return true
+    p = resolve_prior(tc)
+    return p isa NamedTuple && keys(p) == (:Frequency,) && _proper_prior(p.Frequency)
 end
 
-# A bandpass track is one value per frequency segment, per feed, held over a
-# stretch of time, under a prior along frequency. The scans of a time segment
-# are solved together as one stretch, so any segmentation whose
-# segments span scans fits: `GlobalTime` is the whole track, `InstrumentScans`
-# breaks it at named epochs, `TimeBlocks` at a fixed cadence. `PerScan` and
-# `PerIntegration` do not — a segment holding one scan leaves the band mean of
-# the gain degenerate with that scan's own source coherence. A mean beside the
-# shape may instead carry an `IIDPrior`.
-_fits_bandpass_track(tc) =
-    (tc.term isa ConstantTerm || tc.term isa Delay && !(tc.Frequency isa ChannelBlocks)) &&
-    tc.Ti isa Union{GlobalTime, InstrumentScans, TimeBlocks} &&
-    tc.Feed isa PerFeed &&
-    (_is_prior_along(resolve_prior(tc), :Frequency) || tc.prior isa IIDPrior && !(tc.Frequency isa ChannelBlocks))
-
-# A per-scan term beside a bandpass shape (bandpass_scan.jl): any term, solved
-# per scan, with no prior.
-_fits_scan_term(tc) = tc.Ti isa PerScan && isnothing(tc.prior)
-
-_is_scan_term(c) = c.Ti isa PerScan
-
-# The structure every bandpass model must have: at least one component overall,
-# and per observable group a shape — the component on `ChannelBlocks` — alone
-# or beside a mean: a level (`ConstantTerm`) and, for the phase, a delay
-# (`Delay`), at most one of each, on the shape's time segmentation and with no
-# prior or an `IIDPrior`. A shape beside a mean carries a proper zero-mean prior (an `OUPrior`, a
-# `CARMAPrior`, or a `RandomWalkPrior` with an `init`). Either group may add
-# per-scan terms beside its shape (bandpass_scan.jl).
+# The structure every bandpass model must have: at least one component
+# overall, and per observable group at most one component with a prior along
+# frequency, whose chains the report records.
 function _validate_bandpass_groups(model)
     np = length(Calibration._flatten_components(model.phase))
     na = length(Calibration._flatten_components(model.logamp))
     np + na >= 1 || throw(
         ArgumentError(
             "Bandpass model fits nothing: the model compiles no components, so the solver " *
-                "would accumulate every scan and write nowhere. Add a phase and/or logamp " *
-                "component — `default_bandpass_model()` is the standard model.",
+                "would accumulate every scan and write nowhere. Add a phase and/or logamp component.",
         ),
     )
     for name in (:phase, :logamp)
-        all_comps = Calibration._flatten_components(getproperty(model, name))
-        comps = [c for c in all_comps if !_is_scan_term(c)]
-        scan = [c for c in all_comps if _is_scan_term(c)]
-        isempty(scan) || _validate_scan_terms(name, scan, comps)
-        length(comps) == 1 && !(only(comps).term isa ConstantTerm) && throw(
+        comps = Calibration._flatten_components(getproperty(model, name))
+        chained = [c for c in comps if !(c.prior isa IIDPrior)]
+        length(chained) <= 1 || throw(
             ArgumentError(
-                "Bandpass model group `$name` holds only $(component_label(only(comps))); a delay " *
-                    "is part of the mean beside a shape (`ConstantTerm` on `ChannelBlocks`).",
+                "Bandpass model group `$name` holds $(length(chained)) components with a prior along " *
+                    "frequency, " * join(map(component_label, chained), ", ") * "; at most one takes one.",
             ),
         )
-        length(comps) >= 2 && _validate_mean(name, comps)
     end
     return nothing
 end
 
-# Per-scan terms ride on a shape: the group must have one beside them.
-_validate_scan_terms(name, scan, comps) = isempty(comps) && throw(
-    ArgumentError(
-        "Bandpass model group `$name`: the per-scan terms " * join(map(component_label, scan), ", ") *
-            " need a shape beside them.",
-    ),
-)
-
-function _validate_mean(name, comps)
-    labels = join(map(component_label, comps), ", ")
-    count(c -> c.Frequency isa ChannelBlocks, comps) == 1 || throw(
-        ArgumentError(
-            "Bandpass model group `$name` holds $(length(comps)) components, so one is the " *
-                "shape (`Frequency = ChannelBlocks(k)`) and the rest its mean, on spectral " *
-                "windows or coarser. Got $labels.",
-        ),
-    )
-    shape = only(c for c in comps if c.Frequency isa ChannelBlocks)
-    shape.term isa ConstantTerm || throw(
-        ArgumentError("Bandpass model group `$name`: the shape $(component_label(shape)) must be a `ConstantTerm`."),
-    )
-    mean = [c for c in comps if c !== shape]
-    allowed = name === :phase ? (ConstantTerm, Delay) : (ConstantTerm,)
-    for c in mean
-        any(T -> c.term isa T, allowed) || throw(
-            ArgumentError(
-                "Bandpass model group `$name`: $(component_label(c)) cannot be part of the " *
-                    "mean. The mean of a phase is a level (`ConstantTerm`) and a delay " *
-                    "(`Delay`); that of a log-amplitude is a level.",
-            ),
-        )
-        what = c.term isa Delay ? "delay" : "level"
-        isnothing(c.prior) || c.prior isa IIDPrior || throw(
-            ArgumentError(
-                "Bandpass model group `$name`: the $what $(component_label(c)) carries prior " *
-                    "$(nameof(typeof(c.prior))). A $what takes an `IIDPrior` or no prior; " *
-                    "a prior along frequency belongs on the shape.",
-            ),
-        )
-        c.Ti == shape.Ti || throw(
-            ArgumentError(
-                "Bandpass model group `$name`: the mean and the shape must share one time " *
-                    "segmentation. Got $(repr(c.Ti)) ($(component_label(c))) vs $(repr(shape.Ti)) (shape).",
-            ),
-        )
-    end
-    for T in allowed
-        count(c -> c.term isa T, mean) <= 1 || throw(
-            ArgumentError("Bandpass model group `$name` holds more than one $(nameof(T)) beside its shape. Got $labels."),
-        )
-    end
-    _proper_prior(_prior_along(resolve_prior(shape), :Frequency)) || throw(
-        ArgumentError(
-            "Bandpass model group `$name`: the shape $(component_label(shape)) beside a " *
-                "mean needs a zero-mean OUPrior or CARMAPrior, or a RandomWalkPrior with an `init`, to " *
-                "separate the two. Without a prior the shape absorbs the mean, and a " *
-                "random walk without an init leaves its own level free, and from order 2 its " *
-                "slope, which a delay cannot be told apart from.",
-        ),
-    )
-    return nothing
-end
-
-# The paths to a bandpass observable's shape, level and delay components in a
-# layout's plantree, each `nothing` when absent, and to its per-scan
-# components. `_validate_bandpass_groups` allows at most one of each per group,
-# and the shape is the one on `ChannelBlocks`.
+# The paths to a bandpass observable's components in a layout's plantree:
+# `fitted`, every component; `chained`, the one with a prior along frequency,
+# `nothing` for none.
 function _bandpass_paths(plantree, group::Symbol)
-    all_paths = _leaf_paths(plantree[group], (group,))
-    all_nodes = [_plan_node(plantree, p) for p in all_paths]
-    per_scan = [_plan_tseg(n) isa PerScan for n in all_nodes]
-    paths, nodes = all_paths[.!per_scan], all_nodes[.!per_scan]
-    constant = [i for i in eachindex(nodes) if _plan_term(nodes[i]) isa ConstantTerm]
-    shape = length(constant) == 1 ? only(constant) : findfirst(i -> i in constant && _is_shape_node(nodes[i]), eachindex(nodes))
-    level = findfirst(i -> i != shape, constant)
-    path(i) = isnothing(i) ? nothing : paths[i]
-    return (;
-        shape = path(shape), level = isnothing(level) ? nothing : paths[constant[level]],
-        delay = path(findfirst(n -> _plan_term(n) isa Delay, nodes)),
-        scan = all_paths[per_scan],
-    )
+    fitted = _leaf_paths(plantree[group], (group,))
+    chained = findfirst(p -> any(!(q isa IIDPrior) for q in _plan_priors(_plan_node(plantree, p))), fitted)
+    return (; fitted, chained = isnothing(chained) ? nothing : fitted[chained])
 end
 
 _plan_node(tree, path) = foldl((node, k) -> node[k], path; init = tree)
 
-_is_shape_node(plan::ComponentPlan) = plan.fseg isa ChannelBlocks
-_is_shape_node(g::Calibration.GroupedComponentPlan) = _is_shape_node(first(values(g.groups)))
+_plan_priors(plan::ComponentPlan) = plan.priors
+_plan_priors(g::Calibration.GroupedComponentPlan) = reduce(vcat, [p.priors for p in values(g.groups)])
 
-_plan_term(plan::ComponentPlan) = plan.term
-_plan_term(g::Calibration.GroupedComponentPlan) = _plan_term(first(values(g.groups)))
-
-_plan_tseg(plan::ComponentPlan) = plan.tseg
-_plan_tseg(g::Calibration.GroupedComponentPlan) = _plan_tseg(first(values(g.groups)))
-
-# The station blocks `(; antennas, θ, plan)` of an observable's (`:phase` or
-# `:logamp`) shape, level or delay component, empty when the model has none. The paths
-# are resolved by name: `layout.plans` holds one entry per station-signature
-# group, so its positions do not name the components once a model differs
-# across stations.
-_bandpass_blocks(setup, θ, group::Symbol) = _path_blocks(setup, θ, setup.paths[group].shape)
-_bandpass_level_blocks(setup, θ, group::Symbol) = _path_blocks(setup, θ, setup.paths[group].level)
-_bandpass_delay_blocks(setup, θ) = _path_blocks(setup, θ, setup.paths.phase.delay)
-
-_path_blocks(setup, θ, ::Nothing) = NamedTuple[]
-_path_blocks(setup, θ, path) = antenna_blocks(setup.layout, θ, path...)
+# Each of an observable's (`:phase` or `:logamp`) fitted components as its
+# station blocks `(; antennas, θ, plan)`. The paths are resolved by name:
+# `layout.plans` holds one entry per station-signature group, so its positions
+# do not name the components once a model differs across stations.
+_bandpass_components(setup, θ, group::Symbol) = [antenna_blocks(setup.layout, θ, path...) for path in setup.paths[group].fitted]
 
 """
     accumulate_bandpass(group::XRadio.ProcessingSet, geom::DataGeometry, antenna_pairs, feeds;
@@ -240,19 +103,6 @@ function _member_bandpass_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
     wv, ws = weighted_sums(_member_layers(ms)...; dims = Ti)
     chan = Calibration._channel_indices(geom, XRadio.frequencies(ms))
     return (; wv, ws, antennas = _member_antenna_pairs(ms), feeds = feed_pairs(ms), chan)
-end
-
-# Write one station's feed-`f` levels, each through `gauge`, and return them;
-# `nothing` without a level.
-_write_level!(::Nothing, f, ts, gauge) = nothing
-function _write_level!(lw, f, ts, gauge)
-    L = view(lw.values, f, :)
-    node = _feed_node(lw.tying, f)
-    node == 0 && return L
-    for (j, Lj) in pairs(L)
-        isfinite(Lj) && (lw.leaf[1, node, j, ts, lw.ai] = gauge(Lj))
-    end
-    return L
 end
 
 # One frequency segment's coherent residual `(r, w)`: the sums of the
@@ -319,24 +169,6 @@ function _shape_segments(plan, geom::DataGeometry)
     return (; fsegs, x, pieces, piece_of, piece_chans)
 end
 
-# The segment of each piece of `seg` under the plan of a level or delay, and the
-# number of segments. A segment holds whole spectral windows, since a piece
-# shares one mean.
-function _piece_levels(level_plan, seg)
-    level = map(seg.piece_chans) do chans
-        l = level_plan.fseg_id[first(chans)]
-        all(c -> level_plan.fseg_id[c] == l, chans) || throw(
-            ArgumentError(
-                "bandpass: a $(nameof(typeof(level_plan.term))) segment splits a spectral " *
-                    "window; the segmentation of a level or delay must hold whole spectral windows.",
-            ),
-        )
-        l
-    end
-    return level, length(level_plan.nchan_seg)
-end
-
-
 # A station block's outcome per piece over `(AntennaName, Feed, Frequency, Ti)`:
 # its stations, every feed, each spectral window of its shape over the extent of
 # its channels, and each of its time segments over the extent of its samples.
@@ -351,14 +183,15 @@ function _block_status_array(block, geom::DataGeometry)
 end
 
 # A station block's resolved prior per (station, feed, time segment), over
-# `(AntennaName, Feed, Ti)` labeled as `_block_status_array`; each slot starts at
+# `(AntennaName, Feed, Ti)` labeled as `_block_status_array`; each entry starts at
 # its station's own prior.
 function _block_prior_array(block, geom::DataGeometry)
     (; plan) = block
     ax = (_antenna_dim(geom.antennas[block.antennas]), Feed(1:geom.nfeed), Ti(_time_segment_lookup(plan, geom)))
     arr = DimArray(Array{Union{Nothing, AbstractPrior}}(undef, map(length, ax)), ax)
     for a in axes(arr, 1)
-        arr[a, :, :] .= Ref(_prior_along(plan.priors[a], :Frequency))
+        p = plan.priors[a]
+        arr[a, :, :] .= Ref(p isa NamedTuple ? _prior_along(p, :Frequency) : p)
     end
     return arr
 end
@@ -392,7 +225,7 @@ stations and segments.
 
 Returns the arrays as `phase_status`/`amp_status`/`phase_priors`/`amp_priors`
 alongside the counts `n_solved`/`n_flat`/`n_nodata` summed over both
-observables. `flat` and `nodata` are the two ways a piece can occupy a slot
+observables. `flat` and `nodata` are the two ways a piece can take up θ entries
 without measuring anything, and they are what the counts exist to expose: θ
 itself records an unfitted piece as unit gain and a starved one as a constant,
 neither distinguishable there from a genuinely flat response.
@@ -434,35 +267,28 @@ function _warn_degenerate_bandpass(report, warn_fraction)
     return nothing
 end
 
-"""
-    _antenna_time_segments(blocks, results, nant) -> Matrix{Int}
-
-Each station's own time segment for each scan: `tseg[ant, i]` is the segment
-`results[i]` falls in under the segmentation `blocks` gives that station, and `0`
-for a station no block covers — such a station carries no bandpass parameter and
-stays at unit gain. A scan lies wholly inside one segment of any segmentation the
-smoothers accept, so its first sample (`res.ti`) names the segment.
-
-A station-uniform model has one block spanning every station, so every row is the
-same.
-"""
-function _antenna_time_segments(blocks, results, nant)
-    tseg = zeros(Int, Base.OneTo(nant), axes(results, 1))
-    for b in blocks, a in b.antennas
-        for (i, res) in pairs(results)
-            tseg[a, i] = b.plan.tseg_id[res.ti]
-        end
+# Each (component, station) pair's own time segment for each scan:
+# `tseg[(k − 1)·nant + a, i]` is the segment `results[i]` falls in under the
+# segmentation component `k` gives station `a`, and `0` where the component does
+# not reach the station. A scan lies wholly inside one segment of any
+# segmentation the smoother accepts, so its first sample (`res.ti`) names the
+# segment.
+function _component_time_segments(components, results, nant)
+    tseg = zeros(Int, Base.OneTo(nant * length(components)), axes(results, 1))
+    for (k, c) in pairs(components), b in c, a in b.antennas, (i, res) in pairs(results)
+        tseg[(k - 1) * nant + a, i] = b.plan.tseg_id[res.ti]
     end
     return tseg
 end
 
 # The `results` indices of each independently solvable scan group, given a
-# per-station time-segment table.
+# time-segment table with one row per (component, station) pair
+# (`_component_time_segments`).
 #
-# Two scans share a parameter only through a station that is in the same one of
-# its own time segments in both, so the coupling graph has one node per
-# (station, segment) and one edge per pair of stations a scan holds together, and
-# the joint solve runs once per connected component. With one segmentation for the whole
+# Two scans share a parameter only through a row that is in the same one of its
+# own time segments in both, so the coupling graph has one node per (row,
+# segment) and one edge per pair of rows a scan holds together, and the joint
+# solve runs once per connected component. With one segmentation for the whole
 # array the components are exactly the array-wide time segments. With one station
 # broken mid-track and the rest constant, the constant stations bridge the break
 # and the whole track is one component.
@@ -501,84 +327,79 @@ end
 
 Fit the station bandpass against the actual complex visibilities, with each
 component's prior acting inside the solve rather than as a fit applied to it
-afterwards: the gains maximize their posterior with the per-scan source term
-profiled out, and the hyperparameters given as densities are fit by MAP-EM
-([`solve_joint_bandpass!`](@ref)).
+afterwards: the components' parameters maximize their posterior with the
+per-scan source term profiled out, and the hyperparameters given as densities
+are fit by MAP-EM ([`solve_joint_bandpass!`](@ref), [`solve_joint_gains!`](@ref)).
 
-Because the per-scan source term absorbs a baseline's own structure, this suits a
-resolved or polarized calibrator. It solves one complex gain per
-(station, feed, frequency segment), so a model with both a phase and a
-log-amplitude shape must give them one frequency and one time segmentation per
-station; their priors and levels may differ. A model with only one of them
-holds the other at zero: unit amplitude, or zero phase.
+Because the per-scan source term absorbs a baseline's own structure, this suits
+a resolved or polarized calibrator. A constant on any (station, feed) over a
+scan is absorbed by it, so the data measure the bandpass up to that constant,
+which the priors set.
 
-It accepts components of the form `GainComponent(ConstantTerm(); Ti = <GlobalTime,
-InstrumentScans or TimeBlocks>, Frequency = <any segmentation>, Feed = PerFeed(),
-prior = <nothing, or a RandomWalkPrior, OUPrior or CARMAPrior along Frequency>)`: a time
-segmentation whose segments each span several scans, solved one segment at a
-time. Beside a shape under a proper prior, the phase may also take a
-`GainComponent(Delay(); …)` on the same time segmentation: a delay over each
-of its frequency segments, which must hold whole spectral windows. Stations
-may have different models.
+It accepts components of any term, frequency segmentation and feed tying whose
+time segments are whole scans (`PerScan`, `GlobalTime`, `InstrumentScans`,
+`TimeBlocks`), each under a prior: an `IIDPrior(σ)` in the parameter's own units, or a
+state-space prior along `Frequency` whose start is proper (an `OUPrior`, a
+`CARMAPrior`, or a `RandomWalkPrior` with an `init`). At most one component per
+observable takes a prior along frequency; for example a shape beside a level
+and a delay,
 
-A level or delay beside the shape is flat, or under an `IIDPrior(σ)`, in its
-own units (radians, log-amplitude, seconds), that draws it toward zero; set a
-station's own `σ` with [`with_antenna`](@ref). The track's band constant,
-which the source term absorbs, stays free either way. Under `PinAntenna` the
-reference's track is zero, so a delay prior draws each station's delay toward
-the reference's.
+```julia
+shape = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = ChannelBlocks(1),
+                      Feed = PerFeed(), prior = OUPrior(; scale = 50e6, σ = 0.1))
+level = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = PerSpectralWindow(),
+                      Feed = PerFeed(), prior = IIDPrior(1.0))
+delay = GainComponent(Delay(); Ti = GlobalTime(), Feed = PerFeed(), prior = IIDPrior(1e-9))
+GainModel(; phase = (; level, delay, shape), logamp = (; shape))
+```
 
-Beside its shape, a station may also carry components with `Ti = PerScan()` and
-no prior, of any term, segmentation along frequency and feed tying: values that
-change from scan to scan, such as a phase level and a delay per group of
-channels,
+Set a station's own prior with [`with_antenna`](@ref). The scans of one time
+segment are solved together; stations may have different models.
+
+A component with `Ti = PerScan()` holds values that change from scan to scan,
+such as a phase level and a delay per group of channels,
 
 ```julia
 groups = FreqGroups([1:1, 2:13, 14:25, 26:32])
-level = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = groups, Feed = SharedFeeds())
-delay = GainComponent(Delay(); Ti = PerScan(), Frequency = groups, Feed = SharedFeeds())
+level = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = groups, Feed = SharedFeeds(), prior = IIDPrior(1.0))
+delay = GainComponent(Delay(); Ti = PerScan(), Frequency = groups, Feed = SharedFeeds(), prior = IIDPrior(1e-10))
 model = with_antenna(model, "NN"; phase = (; bandpass = shape, level, delay))
 ```
 
-The shape and these terms are solved by alternation: the shape on the data with
-the per-scan terms divided out, then the terms scan by scan given the shape,
-fit to each scan's averaged visibilities beside free source terms, until no
-term moves by `tolerance` of its standard error. A shift common to every channel
-of a station and scan is absorbed by the source terms, so one parameter
-carrying it is held at zero; each parameter's information-weighted mean over
-the scans of a shape segment is held at zero, so the shape is the time-averaged
-bandpass. The terms start from zero, so the data must already be
-fringe-corrected, and every scan must hold a station without per-scan terms.
+Its mean over the scans of a time segment trades against the components that
+span them, and a change common to every station of a scan is not seen by the
+data; the priors set both. With `N` scans, an `IIDPrior` holds the per-scan
+values near a mean of zero once `N/σ²` outweighs the other components' prior
+curvature. The gauge acts on the components that span scans, so a scan without
+the reference needs none of its own. The start puts each scan's station-gain
+phases on the 2π branch nearest their mean over the scans, so the data should
+be fringe-corrected first: at every channel, each scan's phase must lie within
+half a turn of that mean.
 
-Each MAP solve stops once the undamped step would move no gain by more than
-`tolerance` of its standard error, and warns if `max_iterations` steps pass
-first. The hyperparameter fit stops once a cycle of it moves no gain by more
-than `tolerance` of its standard error, from one converged MAP to the next,
-with a warning if `max_em_iterations` EM maps pass first; the
-hyperparameters the gains no longer depend on are not converged. An
-unconverged solve still depends on its starting point.
-
-Each step of the MAP solve is a linear system over every gain, solved
-matrix-free by `linsolve`, a Krylov method of
-[LinearSolve.jl](https://docs.sciml.ai/LinearSolve/stable/) (e.g. `KrylovJL_CG`,
-`KrylovJL_MINRES`), preconditioned by a sparse Cholesky factorization. Its
-system is the Hessian of the posterior, which is not positive definite far
-from the mode, so a conjugate-gradient method should stop at nonpositive
-curvature (`linesearch = true`).
+Each MAP solve stops once the undamped step would move no station gain by more
+than `tolerance` of its standard error, and warns if `max_iterations` steps pass
+first. The hyperparameter fit stops once a cycle of it moves no station gain by
+more than `tolerance` of its standard error, from one converged MAP to the
+next, with a warning if `max_em_iterations` EM maps pass first. Each step is a
+linear system over every parameter, solved matrix-free by `linsolve`, a Krylov
+method of [LinearSolve.jl](https://docs.sciml.ai/LinearSolve/stable/) (e.g.
+`KrylovJL_CG`), preconditioned by a sparse Cholesky factorization. Its system
+is the Hessian of the posterior, which is not positive definite far from the
+mode, so a conjugate-gradient method should stop at nonpositive curvature
+(`linesearch = true`).
 
 A phase prior depends on each segment's 2π branch, which the data leave open, so
-the solve chooses the branches of each phase piece once, by a Gaussian-sum
+the solve chooses the branches of each phase chain once, by a Gaussian-sum
 Kalman filter over branch histories, before the MAP solve (see the
-[fitting-under-priors](@ref fitting-under-priors) page). A fitted piece whose
-range is below `flat_span` (radians or nepers) is reported flat rather than as a
-measured shape, and the solve warns when more than `warn_fraction` of its pieces
-are flat or without data.
+[fitting-under-priors](@ref fitting-under-priors) page). A chain's spectral
+window whose station-gain values span less than `flat_span` (radians or nepers)
+is reported flat rather than as a measured shape, and the solve warns when
+more than `warn_fraction` of the windows are flat or without data.
 
-The visibilities are reduced onto the frequency segments, and the gains and
-source terms held, in the real type of the summed visibilities (`Float32` for
-an MSv4 store); `eltype`, a real floating-point type, names another. The
-steps are solved in `Float64`, the type the sparse Cholesky factorization
-supports.
+The visibilities are reduced onto the common refinement of the components'
+frequency segments in the real type of the summed visibilities (`Float32` for
+an MSv4 store); `eltype`, a real floating-point type, names another. The steps
+are solved in `Float64`, the type the sparse Cholesky factorization supports.
 """
 struct JointSmoother{E, L}
     max_iterations::Int
@@ -600,75 +421,32 @@ JointSmoother(;
 _eltype_parameter(::Nothing) = Nothing
 _eltype_parameter(::Type{T}) where {T} = Type{T}
 
-can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc) || _fits_scan_term(tc)
+can_fit(::JointSmoother, tc, geom) = _fits_bandpass_track(tc)
 
-function validate_model(::JointSmoother, model)
-    _validate_bandpass_groups(model)
-    ph = _shape_component(model.phase)
-    la = _shape_component(model.logamp)
-    (isnothing(ph) || isnothing(la)) && return nothing
-    ph.Frequency == la.Frequency || throw(
-        ArgumentError(
-            "JointSmoother requires the phase and logamp shapes to share one frequency " *
-                "segmentation — it solves one COMPLEX gain per (antenna, feed, segment). Got " *
-                "$(repr(ph.Frequency)) (phase) vs $(repr(la.Frequency)) (logamp).",
-        ),
-    )
-    ph.Ti == la.Ti || throw(
-        ArgumentError(
-            "JointSmoother requires the phase and logamp components to share one time " *
-                "segmentation — one complex gain per (antenna, feed, segment) is solved over " *
-                "one stretch of time, not two. Got $(repr(ph.Ti)) (phase) vs " *
-                "$(repr(la.Ti)) (logamp).",
-        ),
-    )
-    return nothing
-end
-
-# A group's shape component: its only component, or the one on `ChannelBlocks`
-# beside a level; `nothing` for an empty group.
-function _shape_component(tree)
-    comps = Calibration._flatten_components(tree)
-    isempty(comps) && return nothing
-    length(comps) == 1 && return only(comps)
-    return only(c for c in comps if c.Frequency isa ChannelBlocks)
-end
+validate_model(::JointSmoother, model) = _validate_bandpass_groups(model)
 
 function _solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::AbstractGauge, executor = SerialScheduler())
     geom = setup.geom
-    phase_blocks = _bandpass_blocks(setup, θ, :phase)
-    amp_blocks = _bandpass_blocks(setup, θ, :logamp)
-    # One complex gain per (station, feed, segment) means one time segmentation
-    # for both observables — `validate_model` holds each station's two plans to
-    # it — so either side's table is the whole solve's.
-    tseg = _antenna_time_segments(_gain_blocks(phase_blocks, amp_blocks), results, length(geom.antennas))
+    components = (; phase = _bandpass_components(setup, θ, :phase), logamp = _bandpass_components(setup, θ, :logamp))
+    chained = map(p -> isnothing(p.chained) ? NamedTuple[] : antenna_blocks(setup.layout, θ, p.chained...), setup.paths)
+    tseg = _component_time_segments(vcat(components.phase, components.logamp), results, length(geom.antennas))
     arrays(f, blocks) = isempty(blocks) ? nothing : [f(b, geom) for b in blocks]
     leaves(arrays) = isnothing(arrays) ? nothing : _block_leaves(arrays)
-    function solve_shape(results)
-        phase_status = arrays(_block_status_array, phase_blocks)
-        amp_status = arrays(_block_status_array, amp_blocks)
-        phase_priors = arrays(_block_prior_array, phase_blocks)
-        amp_priors = arrays(_block_prior_array, amp_blocks)
-        for idx in _joint_scan_groups(tseg)
-            fits = solve_joint_bandpass!(
-                θ, results[idx], geom, phase_blocks, amp_blocks;
-                phase_level_blocks = _bandpass_level_blocks(setup, θ, :phase),
-                amp_level_blocks = _bandpass_level_blocks(setup, θ, :logamp),
-                delay_blocks = _bandpass_delay_blocks(setup, θ),
-                gauge, sm.max_iterations, sm.max_em_iterations, sm.tolerance, sm.flat_span, sm.eltype,
-                sm.linsolve, executor, tseg = view(tseg, :, idx),
-            )
-            _record_track_fits!(phase_status, phase_priors, fits.phase)
-            _record_track_fits!(amp_status, amp_priors, fits.amp)
-        end
-        return _bandpass_track_report(
-            leaves(phase_status), leaves(amp_status);
-            phase_priors = leaves(phase_priors), amp_priors = leaves(amp_priors),
+    status = map(blocks -> arrays(_block_status_array, blocks), chained)
+    priors = map(blocks -> arrays(_block_prior_array, blocks), chained)
+    for idx in _joint_scan_groups(tseg)
+        fits = solve_joint_bandpass!(
+            results[idx], geom, components;
+            gauge, sm.max_iterations, sm.max_em_iterations, sm.tolerance, sm.flat_span, sm.eltype,
+            sm.linsolve, executor,
         )
+        _record_track_fits!(status.phase, priors.phase, fits.phase, fits.status.phase, setup.paths.phase.chained, geom, chained.phase)
+        _record_track_fits!(status.logamp, priors.logamp, fits.amp, fits.status.logamp, setup.paths.logamp.chained, geom, chained.logamp)
     end
-    terms = _scan_parameters(setup, θ, results)
-    report = isnothing(terms) ? solve_shape(results) :
-        _solve_with_scan_terms!(solve_shape, terms, θ, results, setup, tseg; sm.tolerance, sm.max_iterations)
+    report = _bandpass_track_report(
+        leaves(status.phase), leaves(status.logamp);
+        phase_priors = leaves(priors.phase), amp_priors = leaves(priors.logamp),
+    )
     _warn_degenerate_bandpass(report, sm.warn_fraction)
     return report
 end

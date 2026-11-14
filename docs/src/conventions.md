@@ -76,7 +76,7 @@ UVFITS has no flag table, and a negative weight is the only means the format
 has of recording a flag. [`load_uvfits`](@ref) therefore flags a sample whose
 weight has its sign bit set (`-0.0` included) and keeps its magnitude as the
 weight; `+0.0` is read as an unflagged sample of zero weight, and a (time,
-baseline) slot no record fills is flagged with zero weight.
+baseline) cell no record fills is flagged with zero weight.
 [`write_uvfits`](@ref) is the inverse: it negates a flagged sample's weight,
 and leaves out a record whose every sample is flagged with zero weight.
 

@@ -258,7 +258,7 @@ end
 # `solve_antenna_systems!` has no node space of its own: the unknowns are the θ
 # columns the model declares. For each stage-B phase component,
 # `_block_index(plan, _feed_node(tying, feed), 1, tseg_id[ti], ant)` is the θ
-# slot a (station, feed, time) observation maps to. The plan's segmentation
+# entry a (station, feed, time) observation maps to. The plan's segmentation
 # encodes the time basis — `PerScan` gives a distinct column per scan,
 # `GlobalTime` one column shared across the track — and its tying the feed fold.
 # So the same engine solves a per-scan model, whose columns are disjoint per
@@ -274,7 +274,7 @@ end
 # `scans` is a vector of `AntennaPair × FeedPair` Detection `DimStack`s, the shape
 # `search_scan` returns, read by label: each antenna pair names its stations,
 # which `antennas` numbers, and a representative global time index `:ti` in
-# metadata selects the `tseg_id`. θ slots are accumulated into
+# metadata selects the `tseg_id`. θ entries are accumulated into
 # with `+=`, so `rounds > 1` — search on the residual — adds each round's
 # increment to the last.
 
@@ -331,8 +331,8 @@ _with_ti(
 _scan_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, AntennaPair))
 _scan_feeds(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, FeedPair))
 
-_antenna_slot(slot, name) = get(slot, name) do
-    throw(ArgumentError("detection antenna `$name` is not among the antennas " * join(keys(slot), ", ")))
+_antenna_index(index, name) = get(index, name) do
+    throw(ArgumentError("detection antenna `$name` is not among the antennas " * join(keys(index), ", ")))
 end
 _scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc).ti
 
@@ -380,7 +380,7 @@ function solve_antenna_systems!(
     ) where {T}
     # θ columns are numbered from 1 (`_block_index`).
     Base.require_one_based_indexing(θ)
-    slot = Dict(n => i for (i, n) in pairs(antennas))
+    index = Dict(n => i for (i, n) in pairs(antennas))
     ncomp = 0
     # (station, feed, scan-index) triples the solve constrains: touched by an
     # accepted detection in every solved kind, or determined in every kind and
@@ -395,7 +395,7 @@ function solve_antenna_systems!(
     for kind in (:delay, :rate)
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
-        nc, cov, solved, constrained, free_scans, fit = _solve_kind_cols!(θ, scans, plans, slot, gauge, opts, Val(kind), times)
+        nc, cov, solved, constrained, free_scans, fit = _solve_kind_cols!(θ, scans, plans, index, gauge, opts, Val(kind), times)
         isnothing(fit) || (fits[kind] = fit)
         union!(unlinked, ((kind, si) for si in free_scans))
         union!(unconstrained, setdiff(keys(solved), constrained))
@@ -423,7 +423,7 @@ end
 # `kind` is a type parameter so every kind-dependent choice below is made at
 # compile time; the caller's `Val(kind)` is the only dynamic dispatch.
 function _solve_kind_cols!(
-        θ::AbstractVector, scans, plans, slot, gauge::AbstractGauge, opts::Stationization{T},
+        θ::AbstractVector, scans, plans, index, gauge::AbstractGauge, opts::Stationization{T},
         ::Val{kind}, times,
     ) where {T, kind}
     getval(d) = getfield(d, kind)
@@ -456,7 +456,7 @@ function _solve_kind_cols!(
     # Rows in θ-column space: each side is the list of θ columns whose sum is
     # that station's value for this observable (+1 on a-side, −1 on b-side).
     # `rlinks` pairs each column with the same component's column on the other
-    # side; they define the gauge components (see `_solve_tagged_system`).
+    # side; they define the gauge components (see `_gauge_components`).
     rowA = Vector{Int}[]; rowB = Vector{Int}[]; rlinks = Vector{Tuple{Int, Int}}[]
     rval = T[]; rw = T[]; rscan = Int[]
     rsta_a = Int[]; rsta_b = Int[]; rfeed_a = Int[]; rfeed_b = Int[]
@@ -465,7 +465,7 @@ function _solve_kind_cols!(
     raccept = Bool[]
     for (sidx, sc) in enumerate(scans)
         bl_pairs = map(_scan_pairs(sc)) do (a, b)
-            (_antenna_slot(slot, a), _antenna_slot(slot, b))
+            (_antenna_index(index, a), _antenna_index(index, b))
         end
         feeds = _scan_feeds(sc)
         ti = _scan_ti(sc)
@@ -520,12 +520,16 @@ function _solve_kind_cols!(
         prior = _prior_block(chains, priors, length(node_col), T),
     )
     nodes = (; feed = node_feed, antenna = node_antenna, scan = node_scan, component = node_path)
-    x, ncomp, resid, _ = _solve_tagged_system(rows, w, nodes, gauge, kind)
+    # The gauge is chosen once, from the noise-model weights: reweighting moves
+    # the station values, not the reference they are measured against.
+    g = _gauge_rows(rows, w, nodes, gauge, kind)
+    ncomp = g.ncomp
+    x, resid = _solve_tagged_system(rows, w, g)
     loss = opts.loss isa OutlierMixture ? SoftL1() : opts.loss
     if !(loss isa LeastSquares)
         for _ in 1:max(opts.irls_iters, 0)
             _irls_weights!(w, rw, loss, opts.loss_scale, resid) || break
-            x, ncomp, resid, _ = _solve_tagged_system(rows, w, nodes, gauge, kind)
+            x, resid = _solve_tagged_system(rows, w, g)
         end
     end
     fits = nothing
@@ -589,7 +593,7 @@ function _prior_chains!(getnode, latentnode, colnode, node_feed, plans, scans, t
 end
 
 # The prior rows of `chains` under the resolved `priors`, one per chain, as a
-# dense matrix over `nnodes` nodes with right-hand sides: each prior's whitened
+# sparse matrix over `nnodes` nodes with right-hand sides: each prior's whitened
 # transitions `L⁻¹(s′ − A s)` and, for a proper start, its whitened first
 # state, so that with unit weights their squared sum is the prior's energy.
 function _prior_block(chains, priors, nnodes::Integer, ::Type{T}) where {T}
@@ -611,11 +615,10 @@ function _prior_block(chains, priors, nnodes::Integer, ::Type{T}) where {T}
             end
         end
     end
-    M = zeros(T, length(rows), nnodes)
-    for (r, entries) in pairs(rows), (n, v) in entries
-        M[r, n] += v
-    end
-    return (; M, rhs)
+    I = [r for (r, entries) in pairs(rows) for _ in entries]
+    J = [n for entries in rows for (n, _) in entries]
+    V = T[v for entries in rows for (_, v) in entries]
+    return (; M = sparse(I, J, V, length(rows), nnodes), rhs)
 end
 
 # The rows `W * s = b` over the nodes `s`.
@@ -665,15 +668,14 @@ function _closure_em!(rows, rw, w, nodes, gauge, kind, chains, priors, width, op
     mixture = opts.loss isa OutlierMixture
     loss = mixture ? SoftL1() : opts.loss
     nnodes = length(nodes.feed)
-    A = _incidence(rows, nnodes, T)
+    As = _incidence(rows, nnodes, T)
     class = _row_classes(rows)
     σ2 = inv.(rw)
     present = [any(==(c), class) for c in 1:2]
     s2 = [present[c] ? median(σ2[class .== c]) : zero(T) for c in 1:2]
     frac = [present[c] ? T(0.05) : zero(T) for c in 1:2]
     estimated = [i for i in eachindex(chains) if _hyper_count(chains[i].spec) > 0]
-    As = sparse(A)
-    gauges = Dict{BitVector, @NamedTuple{A::Matrix{T}, C::Matrix{T}, d::Vector{T}, ncomp::Int}}()
+    gauges = Dict{BitVector, @NamedTuple{A::SparseMatrixCSC{T, Int}, C::Matrix{T}, d::Vector{T}, ncomp::Int}}()
     # The gauge rows given which rows the station values explain: the others
     # carry no information, so they neither link stations nor hold a gauge,
     # and a station's value only they measure is pinned like any other value
@@ -758,8 +760,8 @@ function _closure_em!(rows, rw, w, nodes, gauge, kind, chains, priors, width, op
     prior = _prior_block(chains, priors, nnodes, T)
     final = merge(last.rows, (; prior))
     g = gauge_for(final, last.explained, last.wts)
-    x = ConstrainedWLS(vcat(A, prior.M), vcat(last.wts, ones(T, size(prior.M, 1))), g.C, g.d)(vcat(final.val, prior.rhs))
-    resid = final.val .- A * x
+    x, _ = _gauge_solve(As, last.wts, final, _gauge_basis(g.C, g.d))
+    resid = final.val .- As * x
     γ = last.γ
     outliers = [
         (; sta_a = final.sta_a[r], feed_a = final.feed_a[r], sta_b = final.sta_b[r], feed_b = final.feed_b[r], scan = final.scan[r], residual = resid[r], probability = γ[r])
@@ -838,11 +840,18 @@ function _covered_antenna_feeds(rows, node_col, accepted, chained)
 end
 
 # Constrained WLS over a tagged node graph, the column-space generalization of
-# `_solve_observable!`. Row `i` observes `Σ x[rows.A[i]] − Σ x[rows.B[i]]` with
-# weight `w[i]`; `nodes` tags each local node with its station, feed (0 = shared
-# by several feeds), scan (0 = a column spanning scans) and component path.
-# Returns the solution, the number of gauged components the accepted rows form,
-# and the residuals.
+# `_solve_observable!`, on the gauge rows `g` (`_gauge_rows`). Row `i` observes
+# `Σ x[rows.A[i]] − Σ x[rows.B[i]]` with weight `w[i]`, and the prior rows
+# `rows.prior` hold with weight one. Returns the solution and the residuals.
+function _solve_tagged_system(rows, w, g)
+    x, _ = _gauge_solve(g.A, w, rows, _gauge_basis(g.C, g.d))
+    return x, rows.val .- g.A * x
+end
+
+# The gauge rows `Cx = d` of a kind's system under the weights `w`, the number
+# of gauged components the accepted rows form, and the incidence `A`;
+# `nodes` tags each local node with its station, feed (0 = shared by several
+# feeds), scan (0 = a column spanning scans) and component path.
 #
 # The gauge: `rows.links` join each column to the same component's column on
 # the other side of a row. A component of those links whose columns can all
@@ -852,16 +861,6 @@ end
 # offset that no row relating different feeds fixes. A freedom that shifts
 # columns of several components at once is pinned by `_pin_leftover_freedoms`.
 # Any other freedom is an error.
-function _solve_tagged_system(rows, w, nodes, gauge::AbstractGauge, kind::Symbol)
-    T = eltype(rows.val)
-    (; A, C, d, ncomp) = _gauge_rows(rows, w, nodes, gauge, kind)
-    solve_system = ConstrainedWLS(vcat(A, rows.prior.M), vcat(w, ones(T, size(rows.prior.M, 1))), C, d)
-    x = solve_system(vcat(rows.val, rows.prior.rhs))
-    return x, ncomp, rows.val .- A * x, solve_system
-end
-
-# The gauge rows `Cx = d` of a kind's system under the weights `w`, the number
-# of gauged components the accepted rows form, and the dense incidence `A`.
 function _gauge_rows(rows, w, nodes, gauge::AbstractGauge, kind::Symbol; sides = _row_sides(rows))
     T = eltype(rows.val)
     nnodes = length(nodes.feed)
@@ -881,7 +880,7 @@ function _gauge_rows(rows, w, nodes, gauge::AbstractGauge, kind::Symbol; sides =
     end
     A = _incidence(rows, nnodes, T)
     C, d = _gauge_system(gauge, GaugeFreedoms{T}(freedoms, nnodes))
-    # The null-space test and the constrained factorization work on dense rows.
+    # The null-space test and the gauge basis work on dense rows.
     C = Matrix(C)
     C, d = _pin_leftover_freedoms(C, d, A, rows, nodew, gauge, sides)
     return (; A, C, d, ncomp)
@@ -933,11 +932,21 @@ end
 # `Z'HZ`, from which `_covariance` reads the posterior covariance.
 function _gauge_solve(As, w, rows, basis)
     (; Z, x0) = basis
-    M = sparse(rows.prior.M)
+    M = rows.prior.M
     H = transpose(As) * Diagonal(w) * As + transpose(M) * M
     g = transpose(As) * (w .* rows.val) + transpose(M) * rows.prior.rhs
-    F = cholesky(Symmetric(transpose(Z) * H * Z))
+    F = cholesky(Symmetric(transpose(Z) * H * Z); check = false)
+    _determines(F) || throw(ArgumentError("the system does not determine every unknown"))
     return x0 + Z * (F \ (transpose(Z) * (g - H * x0))), F
+end
+
+# Whether the Cholesky factor `F` of normal equations has every pivot above the
+# rounding of the largest: a direction the rows leave free shows up as a failed
+# or rounding-sized pivot.
+function _determines(F)
+    issuccess(F) || return false
+    d = diag(F)
+    return isempty(d) || minimum(d)^2 > length(d) * eps(eltype(d)) * maximum(d)^2
 end
 
 # Overwrite the lower-triangular Cholesky factor `L` with the entries of
@@ -1007,16 +1016,16 @@ end
 
 # Row `i` observes `Σ x[rows.A[i]] − Σ x[rows.B[i]]`.
 function _incidence(rows, nnodes::Integer, ::Type{T}) where {T}
-    A = zeros(T, length(rows.A), nnodes)
+    I, J, V = Int[], Int[], T[]
     for i in eachindex(rows.A, rows.B)
         for n in rows.A[i]
-            A[i, n] += one(T)
+            push!(I, i); push!(J, n); push!(V, one(T))
         end
         for n in rows.B[i]
-            A[i, n] -= one(T)
+            push!(I, i); push!(J, n); push!(V, -one(T))
         end
     end
-    return A
+    return dropzeros!(sparse(I, J, V, length(rows.A), nnodes))
 end
 
 # The rows a gauge must leave unchanged: the accepted ones and those touching a
@@ -1030,10 +1039,20 @@ end
 # The rows a gauge must leave unchanged, as a matrix over the nodes: the held
 # detection rows of the incidence `A` and every prior row, scaled to unit size
 # like the detection rows so a null-space tolerance applies to both.
-_held_system(A, rows) = vcat(sparse(A[_held_rows(rows), :]), sparse(rows.prior.M ./ maximum(abs, rows.prior.M; dims = 2, init = zero(eltype(A)))))
+_held_system(A, rows) = vcat(A[_held_rows(rows), :], Diagonal(inv.(_row_maxima(rows.prior.M))) * rows.prior.M)
+
+_row_maxima(M) = vec(maximum(abs, M; dims = 2, init = zero(eltype(M))))
 
 # `X`'s null space, through `XᵀX`: an `n × n` problem however many rows `X` has.
-_null_basis(X) = nullspace(Matrix(transpose(X) * X))
+# A sparse Cholesky of `XᵀX − τI` that succeeds, with `τ` above the SVD's
+# tolerance `n·eps·σmax` (`‖XᵀX‖∞ ≥ σmax`), shows it empty without the SVD.
+function _null_basis(X)
+    G = sparse(transpose(X) * X)
+    n = size(G, 1)
+    τ = 2n * eps(real(eltype(G))) * opnorm(G, Inf)
+    τ > 0 && issuccess(cholesky(Symmetric(G - τ * I); check = false)) && return zeros(eltype(G), n, 0)
+    return nullspace(Matrix(G))
+end
 
 # Each (station, feed, scan) a row side measures, and the columns whose sum is
 # its value.
@@ -1147,10 +1166,11 @@ function _shift_invariant(compid, ncomp::Integer, rows, all_rows)
     # A prior along time holds the shift of a chain's values unless the
     # shift leaves its rows unchanged, as a flat random walk's does.
     M = rows.prior.M
-    for c in 1:ncomp
-        members = findall(==(c), compid)
-        isempty(members) && continue
-        any(r -> abs(sum(view(M, r, members))) > sqrt(eps(eltype(M))) * maximum(abs, view(M, r, :)), axes(M, 1)) && (free[c] = false)
+    inside = findall(!iszero, compid)
+    shifted = M * sparse(inside, compid[inside], one(eltype(M)), length(compid), ncomp)
+    scale = sqrt(eps(eltype(M))) .* _row_maxima(M)
+    for (r, c, v) in zip(findnz(shifted)...)
+        abs(v) > scale[r] && (free[c] = false)
     end
     tally = Dict{Int, Int}()
     for i in eachindex(rows.A, rows.B, rows.accept)

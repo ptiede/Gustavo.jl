@@ -136,7 +136,7 @@ from the abstract segmentation vocabulary to integer sample indices. Built once
 per solve (by `DataGeometry(ps)`, or directly in tests).
 
 Fields:
-- `times`         : `Ti` sample epochs (Unix seconds).
+- `times`         : `Ti` sample epochs (Unix seconds), increasing.
 - `scan_of_time`  : scan id for each time sample (any integer labels; need not
                     be 1-based or contiguous — `PerScan` dense-ranks them).
 - `channel_freqs` : concatenated channel center frequencies (Hz) across spws.

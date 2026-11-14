@@ -123,7 +123,7 @@ Sets, one per spectral window of the scan. Groups run on the run's outer schedul
 progress callback is told of each.
 
 `f` may run concurrently across groups, so it must not write shared state
-other than θ slots belonging to its own scan; it returns its scan's
+other than θ entries belonging to its own scan; it returns its scan's
 contribution instead, and the caller combines the returned values.
 """
 function each_group(f::F, ctx::SolveContext) where {F}
@@ -191,7 +191,7 @@ end
 # at once is its decision.
 #
 # Each backend fills an `Any` sink and returns `map(identity, sink)`: `work`'s
-# return type is not known before it runs, and tasks write their slots
+# return type is not known before it runs, and tasks write their own entries
 # concurrently, so the sink has to admit any value; `map` then recovers the
 # concrete element type for whatever consumes the pass.
 function _scheduled_map(work::F, items, sizes; executor = SerialScheduler()) where {F}

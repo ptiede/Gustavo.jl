@@ -269,6 +269,40 @@ end
         @test_throws "RDATE \"2024/04/08\" is not a FITS date" ext._rdate_jd_or_zero("2024/04/08")
     end
 
+    @testset "a data unit with scaling and axes in any order" begin
+        ext = Base.get_extension(Gustavo, :GustavoFITSFilesExt)
+        # Two records of UU, DATE, DATE, then a data array of STOKES (2),
+        # COMPLEX (3), IF (2) and FREQ (2), an order other than AIPS's.
+        len = (2, 3, 2, 2)
+        ctype = ("STOKES", "COMPLEX", "IF", "FREQ")
+        for T in (Float32, Float64)
+            params = T[0.5 2.0; 0.125 0.375; 0.25 0.75]
+            data = reshape(T.(1:(2 * prod(len))), len..., 2)
+            cards = [
+                FITSFiles.Card("BITPIX", T === Float32 ? -32 : -64), FITSFiles.Card("NAXIS", 5),
+                FITSFiles.Card("NAXIS1", 0), [FITSFiles.Card("NAXIS$(d + 1)", len[d]) for d in 1:4]...,
+                [FITSFiles.Card("CTYPE$(d + 1)", ctype[d]) for d in 1:4]...,
+                FITSFiles.Card("PCOUNT", 3), FITSFiles.Card("GCOUNT", 2),
+                FITSFiles.Card("PTYPE1", "UU---SIN"), FITSFiles.Card("PSCAL1", 2.0),
+                FITSFiles.Card("PTYPE2", "DATE"), FITSFiles.Card("PZERO2", 2.4600005f6), FITSFiles.Card("PTYPE3", "DATE"),
+                FITSFiles.Card("BSCALE", 0.5), FITSFiles.Card("BZERO", 1.0),
+            ]
+            path = joinpath(mktempdir(), "groups.dat")
+            write(path, hton.(vec(vcat(params, reshape(data, :, 2)))))
+            groups = open(io -> ext.RandomGroups(cards, io, 0), path)
+            @test groups.dims == (3, 2, 2, 2)
+            @test all(
+                ext._sample(groups, r, part, p, c, i) === T(1.0 + 0.5 * data[p, part, i, c, r])
+                    for r in 1:2, part in 1:3, p in 1:2, c in 1:2, i in 1:2
+            )
+            pars = ext._parameters(groups, cards)
+            @test pars[Symbol("UU---SIN")] == 2.0 .* params[1, :]
+            # A Julian-day PZERO keeps the time of day it is added to.
+            @test pars.DATE == [2460000.5 .+ params[2, :] params[3, :]]
+            @test eltype(pars.DATE) === Float64
+        end
+    end
+
     @testset "a flag read from the file is a flag like the solver's" begin
         CALu = Gustavo.Calibration
         geom = CALu.DataGeometry(ps)

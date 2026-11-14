@@ -242,7 +242,7 @@ default_adhoc_prior() = OUPrior(; scale = LogNormal(log(10.0), 1.0), σ = LogNor
 # `model_components(::AdhocPhase, spec)`).
 #
 # What the solve machinery addresses: one constant per (feed node, AP) —
-# `adhoc_scan!` writes leaf slot (param 1, node, freq segment 1, time segment,
+# `adhoc_scan!` writes leaf entry (param 1, node, freq segment 1, time segment,
 # ant), and `solve_adhoc_phasing`'s single-node-per-row systems can tie feeds
 # (`SharedFeeds`) or solve them independently (`PerFeed`) but cannot represent
 # a `SingleFeed` scope.
@@ -561,8 +561,8 @@ end
 # station's index in `antennas` and the phase node of its feed under `tying`
 # (0 where the component has none).
 function _cell_nodes(rbar, antennas, tying)
-    slot = Dict(n => i for (i, n) in pairs(antennas))
-    antenna(n) = get(slot, n) do
+    index = Dict(n => i for (i, n) in pairs(antennas))
+    antenna(n) = get(index, n) do
         throw(ArgumentError("antenna `$n` of an antenna pair is not among the antennas " * join(antennas, ", ")))
     end
     sps = DimensionalData.dims(rbar, AntennaPair)
@@ -1224,7 +1224,7 @@ sum the per-(station pair, feed pair, AP)
 inverse-variance residual over every band (`weighted_sums`), solve the
 globally-closing per-AP station phase through the pluggable `adhoc` smoother
 under each station's prior (`solve_adhoc_phasing`), and write this scan's
-`PerIntegration` θ slots (disjoint per scan — concurrent groups may solve in
+`PerIntegration` θ entries (disjoint per scan — concurrent groups may solve in
 parallel). The feed tying and the priors come from `adhoc_plan`, so the number
 of phase nodes per station is the model's choice and needs no separate
 argument.

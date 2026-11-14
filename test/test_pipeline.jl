@@ -76,11 +76,12 @@ end
     ps, _truth = _build_fringe_ps()
 
     # Adhoc smoother window 7 (< the 12-AP scan) tracks the screen; snr_floor 0
-    # keeps every well-determined AP in this high-SNR synthetic.
+    # keeps every well-determined AP in this high-SNR synthetic. The bandpass
+    # prior runs along frequency, so the solution records its chains' status.
     gauge = PinAntenna(1)
     sols = _fit_chain(
         (
-            FringeClosure(; gauge), Bandpass(; gauge),
+            FringeClosure(; gauge), Bandpass(; model = _bandpass_model(; prior = OUPrior(; scale = 1.0e7, σ = 1.0)), gauge),
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ), ps,
     )
@@ -257,12 +258,12 @@ end
 
 @testset "calibrate ≡ member-by-member calibrate" begin
     # `calibrate` corrects one Measurement Set at a time, and each member's
-    # gains depend only on its own (disjoint) θ slots, so calibrating a member
+    # gains depend only on its own (disjoint) θ entries, so calibrating a member
     # on its own gives the same result as calibrating the whole set.
     ps, _ = _build_fringe_ps()
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
-    sols_ref = _fit_chain((FringeClosure(; gauge), Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+    sols_ref = _fit_chain((FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(adhoc; gauge)), ps)
     out_fused = _calibrate_chain(sols_ref, ps)
     @test collect(keys(out_fused)) == collect(keys(ps))
     same(x, y) = (isnan(x) && isnan(y)) || isapprox(x, y; rtol = 1.0e-5)
@@ -334,7 +335,7 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     for r in (1, 2, 3)
         gauge = PinAntenna(1)
-        sols = _fit_chain((ntuple(_ -> FringeClosure(; gauge), r)..., Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+        sols = _fit_chain((ntuple(_ -> FringeClosure(; gauge), r)..., Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(adhoc; gauge)), ps)
         @test minimum(_product_coherences(_calibrate_chain(sols, ps); keep = _parallel_hand)) > 0.99
     end
 end
@@ -372,7 +373,7 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
     ff = FringeClosure(; gauge)
-    sols_on = _fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+    sols_on = _fit_chain((ff, Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(adhoc; gauge)), ps)
     sols_off = _fit_chain((ff, AdhocPhase(adhoc; gauge)), ps)
 
     don = _time_averaged_spectra(_calibrate_chain(sols_on, ps))
@@ -424,10 +425,10 @@ end
     end
     avg = XRadio.ProcessingSet(averaged)
     @test all(ms -> length(XRadio.times(ms)) == 1, values(avg))
-    bp_avg = fit(Bandpass(; gauge), avg)
+    bp_avg = fit(Bandpass(; model = _bandpass_model(), gauge), avg)
 
     fr = _fringe_fit(ps, ff)
-    bp_full = fit(Bandpass(; gauge), _precal(fr, ps))
+    bp_full = fit(Bandpass(; model = _bandpass_model(), gauge), _precal(fr, ps))
     θ(sol) = reduce(vcat, [vec(collect(c.params)) for c in sol.components])
     @test θ(bp_avg) ≈ θ(bp_full) rtol = 1.0e-4
 
@@ -454,7 +455,7 @@ end
     end
     avg = XRadio.ProcessingSet(averaged)
     @test all(ms -> length(XRadio.frequencies(ms)) == nchan ÷ 2, values(avg))
-    bp_avg = fit(Bandpass(; gauge), avg)
+    bp_avg = fit(Bandpass(; model = _bandpass_model(), gauge), avg)
 
     out = _precal(_fringe_fit(ps, ff), ps)
     calibrate!(bp_avg, out)
@@ -466,8 +467,8 @@ end
     # Cross-hand rows tie the two feed blocks at every frequency segment, so the
     # reference's relative inter-feed phase bandpass is SOLVED across the band
     # rather than zeroed — otherwise it survives uncorrected in every cross-hand
-    # visibility. Only the one band-constant inter-feed offset is conventional,
-    # and the circular-mean referencing removes it.
+    # visibility. Only the one band-constant inter-feed offset is unmeasured,
+    # and the priors set it.
     nant, nspw, nchan = 4, 2, 8
     nchg = nspw * nchan
     rng = MersenneTwister(0xEC9A)
@@ -493,7 +494,7 @@ end
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     gauge = PinAntenna(1)
     ff = FringeClosure(; gauge)
-    sols_on = _fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+    sols_on = _fit_chain((ff, Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(adhoc; gauge)), ps)
     sols_off = _fit_chain((ff, AdhocPhase(adhoc; gauge)), ps)
 
     don = _time_averaged_spectra(_calibrate_chain(sols_on, ps))
@@ -520,7 +521,7 @@ end
     @test R_on > 0.97                   # ref inter-feed shape corrected in the cross hands
     @test R_off < 0.95                  # ...and survives with the stage off
 
-    # θ recovery: the (ref, feed 2) bandpass slots carry the injected shape up
+    # θ recovery: the (ref, feed 2) bandpass parameters carry the injected shape up
     # to a constant + slope in each band, which the fringe fit's inter-feed delay can
     # trade with the bandpass. Remove the per-band best-fit constant +
     # slope from the difference; the residual shape must match.
@@ -546,8 +547,8 @@ end
     # band's high-channel edge) shared by all stations, plus a small per-station
     # ripple. THEN kill one interior channel per band (zero its weight on every
     # baseline). Both priors must flatten the band AND estimate the killed channels
-    # from the in-spw shape; with no prior the killed channels stay untouched
-    # (|g| = 1).
+    # from the in-spw shape; under an IID prior the killed channels stay at its
+    # mean (|g| = 1).
     nant, nspw, nchan = 4, 2, 8
     nchg = nspw * nchan
     rng = MersenneTwister(0x5A11)
@@ -575,9 +576,10 @@ end
 
     adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     larec(θ, plan, a, f, gc) = CAL._component_leaf(plan, θ)[1, f, plan.fseg_id[gc], 1, a]
-    # The phase has no prior, so over a killed channel only the amplitude has a value.
+    # The phase's prior is IID, so over a killed channel only the amplitude has a
+    # value other than its prior's mean.
     amp_model(prior) = GainModel(;
-        phase = default_bandpass_model().phase,
+        phase = _bandpass_model().phase,
         logamp = (;
             bandpass = CAL.GainComponent(
                 CAL.ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = CAL.ChannelBlocks(1), Feed = CAL.PerFeed(), prior,
@@ -601,7 +603,7 @@ end
     sols_off = _fit_chain(
         (
             ff,
-            Bandpass(; model = GainModel(; phase = default_bandpass_model().phase), gauge),
+            Bandpass(; model = GainModel(; phase = _bandpass_model().phase), gauge),
             AdhocPhase(adhoc; gauge),
         ), ps,
     )
@@ -612,8 +614,11 @@ end
     # A prior flattens the band AND fills the killed channels onto the in-spw curve
     # (≈ the mean of the live neighbours, well away from log-amp 0).
     priors = (
-        # σ = 0.02 per channel (2 MHz) as 1/Hz^(3/2).
-        CAL.RandomWalkPrior(; order = 2, σ = 0.02 * sqrt(3 / (2 * 2.0e6^3))),
+        # σ = 0.02 per channel (2 MHz) as 1/Hz^(3/2), from a weak start: 10, and
+        # 10 over a 16 MHz spectral window.
+        CAL.RandomWalkPrior(;
+            order = 2, σ = 0.02 * sqrt(3 / (2 * 2.0e6^3)), init = MvNormal(zeros(2), Diagonal([10.0^2, (10.0 / 16.0e6)^2])),
+        ),
         CAL.OUPrior(; scale = LogNormal(log(1.6e7), 1.0), σ = LogNormal(log(0.2), 1.0)),
     )
     for prior in priors
@@ -626,31 +631,36 @@ end
         @test amp_ripple(don.spec, don, p) < 1.08
         bp = only(CAL._applied(bp_sol[:logamp, :bandpass]).groups)
         plan = only(bp.layout.plans)
+        # The source term absorbs each track's constant, which the prior sets, so
+        # the curve is read about its mean over the live channels.
+        live = setdiff(1:nchg, dead_globals)
         for dg in dead_globals, a in 2:nant, f in 1:2
+            level = sum(gc -> larec(bp.θ, plan, a, f, gc), live) / length(live)
             nbr = 0.5 * (larec(bp.θ, plan, a, f, dg - 1) + larec(bp.θ, plan, a, f, dg + 1))
             @test isfinite(larec(bp.θ, plan, a, f, dg))
             @test abs(larec(bp.θ, plan, a, f, dg) - nbr) < 0.1    # estimated, on the smooth curve
-            @test abs(nbr) > 0.12                                 # ...curve far from |g|=1 (meaningful)
+            @test abs(nbr - level) > 0.12                         # ...a curve with structure (meaningful)
         end
         bpp = only(CAL._applied(bp_sol[:phase, :bandpass]).groups)
         pplan = only(bpp.layout.plans)
-        @test all(larec(bpp.θ, pplan, a, f, dg) == 0.0 for dg in dead_globals, a in 2:nant, f in 1:2)
+        @test all(abs(larec(bpp.θ, pplan, a, f, dg)) < 1.0e-12 for dg in dead_globals, a in 2:nant, f in 1:2)
     end
 
-    # With no prior the killed channels are NOT estimated — their θ slot is
-    # untouched (log-amp 0 ⇒ |g| = 1), the contrast that motivates the priors.
-    _, bp_solf, _ = _fit_chain((ff, Bandpass(; gauge), AdhocPhase(adhoc; gauge)), ps)
+    # Under an IID prior the killed channels are NOT estimated — their θ entry
+    # is the prior's mean (log-amp 0 ⇒ |g| = 1), the contrast that motivates the
+    # priors along frequency.
+    _, bp_solf, _ = _fit_chain((ff, Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(adhoc; gauge)), ps)
     bpf = only(CAL._applied(bp_solf[:logamp, :bandpass]).groups)
     planf = only(bpf.layout.plans)
     for dg in dead_globals, a in 2:nant, f in 1:2
-        @test larec(bpf.θ, planf, a, f, dg) == 0.0
+        @test abs(larec(bpf.θ, planf, a, f, dg)) < 1.0e-12
     end
 end
 
 @testset "Default adhoc solver flattens end-to-end" begin
     ps, _ = _build_fringe_ps()
     gauge = PinAntenna(1)
-    sols = _fit_chain((FringeClosure(; gauge), Bandpass(; gauge), AdhocPhase(; gauge)), ps)
+    sols = _fit_chain((FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(; gauge)), ps)
     @test minimum(_product_coherences(_calibrate_chain(sols, ps); keep = _parallel_hand)) > 0.99
 end
 
@@ -667,7 +677,7 @@ end
     gauge = PinAntenna(1)
     sols = _fit_chain(
         (
-            FringeClosure(; gauge), Bandpass(; gauge),
+            FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge),
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ), ps,
     )
@@ -692,7 +702,7 @@ end
     gauge = PinAntenna(1)
     sols = _fit_chain(
         (
-            FringeClosure(; gauge), Bandpass(; gauge),
+            FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge),
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ), ps;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(events, (st, d, t))),
@@ -726,7 +736,7 @@ end
     gauge = PinAntenna(1)
     solsc = _fit_chain(
         (
-            FringeClosure(; gauge), Bandpass(; gauge),
+            FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge),
             AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
         ), ps;
         exec = ExecutionConfig(progress = (st, d, t) -> push!(ev2, (st, d, t))),

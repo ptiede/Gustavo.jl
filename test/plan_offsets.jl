@@ -1,4 +1,4 @@
-# The `off1` index table of a `ComponentPlan`, so tests can address θ slots by
+# The `off1` index table of a `ComponentPlan`, so tests can address θ entries by
 # `(ant, feed, tseg, fseg)`: the absolute θ index of each block's first
 # parameter (0 = no block for that feed).
 const _CALoff = Gustavo.Calibration

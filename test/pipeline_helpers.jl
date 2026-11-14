@@ -37,6 +37,13 @@ function _full_fringe_model(; rel_time = PerScan())
     )
 end
 
+# A bandpass of one value per frequency segment and feed, held over the track,
+# on both observables, each under `prior`.
+function _bandpass_model(; prior = IIDPrior(10.0), freq = ChannelBlocks(1))
+    bandpass = GainComponent(ConstantTerm(); Ti = GlobalTime(), Frequency = freq, Feed = PerFeed(), prior)
+    return GainModel(; phase = (; bandpass), logamp = (; bandpass))
+end
+
 # Coherence of a (baseline, product) block: |Σ w·V| / Σ (w·|V|). 1 ⇒ phase flat.
 function _coherence(V, W)
     num = zero(ComplexF64)
