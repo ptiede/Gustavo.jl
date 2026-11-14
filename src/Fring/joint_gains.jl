@@ -82,7 +82,7 @@ function solve_joint_gains!(
     fitted.amp && _warn_free_amplitudes(cells, sg, geom)
 
     fitted.phase && _meet_phase_gauge!(params.phase, tracks.phase, priors.phase, gauge, cells, sg, components.phase)
-    fitted.amp && _zero_amplitude_levels!(params.amp, tracks.amp, hasdata)
+    fitted.amp && _zero_amplitude_levels!(params.amp, tracks.amp, _gain_information(x, ctx))
     for (obs, o) in pairs(observables)
         fitted[obs] && _write_params!(components[o], sg.params[o][parts[obs].kept], params[obs].θ)
     end
@@ -97,24 +97,43 @@ end
 # Each amplitude track's level over each group of its pieces whose constant the
 # source term absorbs (`constants`), which the data cannot measure and the
 # track's prior alone would set: the track's parameters move by one constant
-# so that its own part of its station gains with data has mean log-amplitude
-# zero. The flux scale is then the a priori calibration's, and any other
+# so that its own part of its station gains has log-amplitude zero on average,
+# each gain weighted by `info`, the information its data carry on it
+# (`_gain_information`). Gains whose data hold no signal, such as a station
+# off source for part of a scan, then do not set the level. The flux scale is
+# the a priori calibration's where the data have signal, and any other
 # component keeps the level its prior gives it. Each of those gains must read
 # the track's parameters with coefficients summing to one.
-function _zero_amplitude_levels!(p, tracks, hasdata)
+function _zero_amplitude_levels!(p, tracks, info)
     for t in tracks, group in unique(t.constants)
         us = reduce(vcat, (t.gains[piece] for (piece, c) in zip(t.pieces, t.constants) if c == group))
         reached = sort!(unique(rowvals(p.J)[r] for u in us for r in nzrange(p.J, u)))
-        ns = filter(n -> hasdata[n], reached)
+        ns = filter(n -> info[n] > 0, reached)
         isempty(ns) && continue
         Jt = p.J[ns, us]
         all(≈(1), sum(Jt; dims = 2)) || error(
             "solve_joint_gains!: the log-amplitude track of $(join(t.chain.path, '.')) does not read its station gains " *
                 "with unit coefficients, so its level cannot be set to zero by one constant",
         )
-        p.θ[us] .-= sum(Jt * p.θ[us]) / length(ns)
+        p.θ[us] .-= dot(view(info, ns), Jt * p.θ[us]) / sum(view(info, ns))
     end
     return p
+end
+
+# Each station gain's Fisher information on its log-amplitude at the station
+# gains `x`: over its cells, the weight times the predicted power
+# `|g_a·S·g_b|²`, with `S` at its optimum.
+function _gain_information(x, ctx)
+    (; cells, buffers, executor) = ctx
+    g = _gains!(buffers.g, x)
+    S = _source!(buffers.S, g, cells, executor)
+    info = zeros(length(g))
+    for (j, rng) in pairs(cells.ranges), k in rng
+        q = cells.w[k] * abs2(g[cells.na[k]] * S[j] * conj(g[cells.nb[k]]))
+        info[cells.na[k]] += q
+        info[cells.nb[k]] += q
+    end
+    return info
 end
 
 # The structure of `solve_joint_gains!` up to its hyperparameter fit: the

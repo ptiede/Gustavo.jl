@@ -247,8 +247,10 @@ end
     d .-= mean(d; dims = 2)
     @test maximum(abs, d) < 0.02
     @test parent(sol.logamp)[:, 1, :] == parent(sol.logamp)[:, 2, :]
-    # The data cannot measure a station's log-amplitude level over the scan; it is held at zero.
-    @test maximum(abs, mean(parent(sol.logamp)[:, 1, :]; dims = 2)) < 1.0e-12
+    # The data cannot measure a station's log-amplitude level over the scan; it
+    # is held at zero, on average weighted by the information, which is nearly
+    # uniform here.
+    @test maximum(abs, mean(parent(sol.logamp)[:, 1, :]; dims = 2)) < 0.02
     @test all(p -> p isa OUPrior && p.scale isa Real && p.σ isa Real, sol.logamp_prior)
     @test maximum(abs, adhoc_error(sol, screen)) < 0.05
 
@@ -259,6 +261,15 @@ end
     sol = FRa.solve_adhoc(r, w, names; gauge = ZeroSumPhase())
     ℓ = parent(sol.logamp)[:, 1, :]
     @test maximum(abs, (ℓ .- mean(ℓ; dims = 2)) .- (logF .- mean(logF))' ./ 2) < 0.02
+
+    # A station with no signal for the first 60% of the scan: the level is set
+    # where its data have signal, so there its log-amplitude stays near zero.
+    η = zeros(nant, 2, nap)
+    η[1, :, 1:36] .= -8
+    r, w, names = adhoc_sums(screen; η, σ = 0.02, rng)
+    sol = FRa.solve_adhoc(r, w, names; gauge = ZeroSumPhase())
+    @test abs(mean(parent(sol.logamp)[1, 1, 37:end])) < 0.05
+    @test maximum(abs, mean(parent(sol.logamp)[2:end, 1, :]; dims = 2)) < 0.02
 
     # A phase-only model leaves the amplitudes unsolved.
     phase_only = FRa.solve_adhoc(r, w, names; gauge = ZeroSumPhase(), model = FRa.default_adhoc_model(; logamp = nothing))

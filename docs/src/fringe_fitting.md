@@ -579,9 +579,12 @@ hyperpriors: [`default_adhoc_phase_prior`](@ref Gustavo.Fring.default_adhoc_phas
 per (station, feed node, scan) at their type-II MAP. The phase and log-amplitude
 decouple in the Gauss–Newton step, as in the bandpass. A constant on a
 station's log-amplitude over the scan trades against ``|S^p_{ab}|``, so the data
-cannot measure it: after the fit each log-amplitude track is moved so its mean
-over the scan's APs with data is zero, and the flux scale stays the a priori
-calibration's (the bandpass's tracks are held the same way over the band). Where
+cannot measure it: after the fit each log-amplitude track is moved so that its
+mean over the scan's APs is zero, each AP weighted by the information its data
+carry on the station's log-amplitude, ``\sum_b w_{ab} |g_a S^p_{ab} g_b|^2``.
+The flux scale stays the a priori calibration's where the data have signal, and
+APs without signal, such as a station off source for part of a scan, do not set
+it (the bandpass's tracks are held the same way over the band). Where
 an AP's baselines hold no odd loop (two stations, say)
 the data measure only sums of log-amplitudes and the priors alone split them;
 the solve warns. Any prior the joint solve accepts works: an `IIDPrior` (each AP on
