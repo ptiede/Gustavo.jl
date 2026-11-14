@@ -825,7 +825,7 @@ _log_hyper_boxes(ctx, est) =
     reduce(vcat, [_track_box(ctx.tracks[obs][k].prior, ctx.systems[obs].chains[k]) for (obs, k) in est]; init = NTuple{2, Float64}[])
 
 """
-    _hyper_objective(priors, x, ctx, solved, est; linsolve, abstol) -> (L, ∇L, C)
+    _hyper_objective(priors, x, ctx, solved, est; linsolve, abstol) -> (L, ∇L, H)
 
 The log posterior density `L` of the hyperparameters of `priors`, up to a
 constant, by Laplace's method at the MAP `x` that `solved` (`_profiled_map!`)
@@ -843,25 +843,31 @@ through the cells' weights: with `Λ` the observables' summed `log det A`,
 `dz*/dψ = −H⁻¹ ∂²O/∂z∂ψ` gives `½ ∂/∂ψ (aᵀ ∇z E)` with `a = H⁻¹ ∇z Λ`, `H` the
 exact Hessian of the profiled objective (`_hessian_solve`, by `linsolve` to
 `abstol`) and `E` the prior energy (`_logdet_gain_gradient`,
-`_track_gradient_dot`). `C` is each log hyperparameter's curvature of the
-expected log prior plus hyperprior (the M-step's objective), the complete
-data's information about it, at least the evidence's own. A curvature that
-cannot be factored is an error.
+`_track_gradient_dot`). `H` holds per track of `est` the negative Hessian of its
+expected log prior plus hyperprior (the M-step's objective) in its own log
+hyperparameters, the complete data's information about them, at least the
+evidence's own. A curvature that cannot be factored is an error.
 """
 function _hyper_objective(priors, x, ctx, solved, est; linsolve, abstol)
     systems, _ = _profiled_systems(x, ctx, priors; exact = true)
     (; cells) = ctx
-    L = -solved.objective
-    dΛdq = zeros(length(cells.w))
-    curvatures = map((; phase = :phase, amp = :amp)) do obs
+    parts = tmap(Any, [:phase, :amp]; scheduler = ctx.executor) do obs
         s = systems[obs]
         isnothing(s) && return nothing
-        L -= _prior_log_normalizer(s.sys.layout, priors[obs])
         joint = _joint_curvature!(s.sys, s.profile, ctx.hpos)
-        L -= joint.logdet / 2
         cov = joint.inverse()
-        dΛdq .+= joint.weight_gradient(cov)
-        return (; z = _current_unknowns(s.sys), cov)
+        return (;
+            z = _current_unknowns(s.sys), cov, joint.logdet, dq = joint.weight_gradient(cov),
+            normalizer = _prior_log_normalizer(s.sys.layout, priors[obs]),
+        )
+    end
+    curvatures = (; phase = parts[1], amp = parts[2])
+    L = -solved.objective
+    dΛdq = zeros(length(cells.w))
+    for c in curvatures
+        isnothing(c) && continue
+        L -= c.normalizer + c.logdet / 2
+        dΛdq .+= c.dq
     end
     dΛ = _logdet_gain_gradient(cells, systems, dΛdq)
     v = map((; phase = :phase, amp = :amp)) do obs
@@ -880,7 +886,7 @@ function _hyper_objective(priors, x, ctx, solved, est; linsolve, abstol)
         moving = gradient(l -> _track_gradient_dot(spec, l, terms, z, a[obs]), AutoForwardDiff(), lθ)
         return fisher .+ moving ./ 2, curvature
     end
-    return L, reduce(vcat, first.(grads); init = Float64[]), reduce(vcat, last.(grads); init = Float64[])
+    return L, reduce(vcat, first.(grads); init = Float64[]), last.(grads)
 end
 
 # `H⁻¹v` over each fitted observable's unknowns, `v` and the result as
@@ -971,102 +977,184 @@ end
 function _hyper_gradient(spec, lθ, chains, mom)
     sums = _moment_sums(chains, mom)
     f(l) = _expected_log_prior(_with_log_hypers(spec, l), sums, eltype(l)) + _log_hyperprior(spec, l)
-    return gradient(f, AutoForwardDiff(), lθ), -diag(hessian(f, AutoForwardDiff(), lθ))
+    return gradient(f, AutoForwardDiff(), lθ), -hessian(f, AutoForwardDiff(), lθ)
 end
 
 # The Gauss–Newton curvature of the profiled objective over the unknowns of
-# `sys`, `A = K − B D⁻¹ Bᵀ`, through `M = [K B; Bᵀ D]`: per `J` of the
-# profile's cells, `D_J = Σ q_c` and `B_J = Jᵀ Σ q_c (e_a + σ e_b)` with
-# `q_c = w|g_a S_J conj(g_b)|²`, the held-`S` curvature with `S`'s
-# log-amplitude (or phase) as an unknown. A `J` with `D_J = 0` has no such
-# unknown: its row of `M` is the identity's. Returns `logdet`,
-# `log det A = log det M − log det D`, an error where `M` cannot be factored;
-# `inverse()`, the entries of `M⁻¹` on its pattern (`SelectedInverse`), which
-# on `K`'s are those of `A⁻¹`, as a function of a pair of unknowns;
-# and `weight_gradient(Σ)`, from those entries the gradient of `log det A` over
-# the cells' `q_c`, `Σ_p (M⁻¹)_p ∂M_p/∂q_c − 1/D_J` over `M`'s stored values
-# `p`. `M`'s pattern, the maps from the `q_c` to its values, the factor's
-# symbolic analysis and the selected inverse's plan are kept in `sys.evidence`
-# (`_evidence_layout`, with `hpos` the pattern of the data curvature), and the
-# results read buffers the next call overwrites.
+# `sys`, `A = K − B D⁻¹ Bᵀ`: per `J` of the profile's cells, `D_J = Σ q_c` and
+# `B_J = Jᵀ Σ q_c (e_a + σ e_b)` with `q_c = w|g_a S_J conj(g_b)|²`, the curvature
+# with `S`'s log-amplitude (or phase) as an unknown, profiled out; a `J` with
+# `D_J = 0` has no such unknown. With `B̃ = B D^{-½}` and `T = B̃ᵀ K⁻¹ B̃`,
+# `log det A = log det K + log det(I − T)` and `A⁻¹ = K⁻¹ + W (I − T)⁻¹ Wᵀ`,
+# `W = K⁻¹ B̃`. `T`'s eigenvalues lie in `[0, 1)`: those near 1 are the few
+# directions along which `S` takes up the gains (a track's level over the band
+# or scan), the rest are orders of magnitude smaller. `T` is taken at its
+# largest eigenpairs `T ≈ U Θ Uᵀ` (`_top_eigenpairs`), the rest as zero:
+# `log det A = log det K + Σ log(1 − θ)`, `A⁻¹ = K⁻¹ + V (I − Θ)⁻¹ Vᵀ` with
+# `V = K⁻¹ B̃ U`, an error where `K` cannot be factored or a `θ` reaches 1.
+# Returns `logdet`; `inverse()`, the entries of `A⁻¹` on `K`'s pattern
+# (`SelectedInverse`), as a function of a pair of unknowns; and
+# `weight_gradient(Σ)`, from those entries the gradient of
+# `log det A = log det M − log det D`, `M = [K B; Bᵀ D]`, over the cells' `q_c`:
+# `Σ_p (M⁻¹)_p ∂M_p/∂q_c − 1/D_J`, where `M⁻¹` is `A⁻¹` on `K`,
+# `−V (I − Θ)⁻¹ Uᵀ/√D_J` on `B_J` and `(1 + (U Θ (I − Θ)⁻¹ Uᵀ)_JJ)/D_J` on `D_J`.
+# `K`'s symbolic analysis, the selected inverse's plan and the cells of each
+# station gain are kept in `sys.evidence` (`_evidence_layout`), with `hpos` the
+# pattern of the data curvature, and the results read buffers the next call
+# overwrites.
 function _joint_curvature!(sys, profile, hpos)
     ev = sys.evidence[]
-    isnothing(ev) && (ev = sys.evidence[] = _evidence_layout(sys, profile.cells, profile.σ, hpos))
-    return _joint_curvature_at!(sys, profile, ev)
+    isnothing(ev) && (ev = sys.evidence[] = _evidence_layout(sys, profile.cells))
+    return _joint_curvature_at!(sys, profile, hpos, ev)
 end
 
-function _joint_curvature_at!(sys, profile, ev)
-    (; g, S, cells) = profile
-    (; M, kpos, dpos, qmap, q, D) = ev
+function _joint_curvature_at!(sys, profile, hpos, ev)
+    (; g, S, cells, σ, executor) = profile
+    (; q, D, w̃) = ev
+    K = sys.layout.K
     fill!(D, 0.0)
     for (j, rng) in pairs(cells.ranges), k in rng
         q[k] = cells.w[k] * abs2(g[cells.na[k]] * S[j] * conj(g[cells.nb[k]]))
         D[j] += q[k]
     end
-    Mv = nonzeros(M)
-    fill!(Mv, 0.0)
-    view(Mv, kpos) .= nonzeros(sys.layout.K)
-    mul!(Mv, qmap, q, true, true)
-    for (j, p) in pairs(dpos)
-        D[j] > 0 || (Mv[p] = 1.0)
+    for (j, rng) in pairs(cells.ranges), k in rng
+        w̃[k] = D[j] > 0 ? q[k] / sqrt(D[j]) : 0.0
     end
-    F = ev.factor[]
-    F = isnothing(F) ? cholesky(Symmetric(M); check = false) : cholesky!(F, Symmetric(M); check = false)
-    ev.factor[] = F
+    F0 = ev.factor[]
+    F = ev.factor[] = isnothing(F0) ? cholesky(Symmetric(K); check = false) : cholesky!(F0, Symmetric(K); check = false)
+    issuccess(F) || _not_positive_definite()
+    θ, U = _top_eigenpairs(X -> _capacitance_product(sys, F, ev, cells, σ, X, executor), length(D))
+    all(<(1), θ) || _not_positive_definite()
+    gains = Ref{Matrix{Float64}}()
     function inverse()
+        V = F \ _embed(sys, _lift(sys, ev, cells, σ, U, executor))
+        Vs = V ./ sqrt.(1 .- θ)'
         Σ = ev.selected[]
-        return ev.selected[] = isnothing(Σ) ? SelectedInverse(F, M) : _selected_inverse!(Σ, F)
+        Σ = ev.selected[] = isnothing(Σ) ? SelectedInverse(F, K) : _selected_inverse!(Σ, F)
+        Σv = nonzeros(Σ.Σ)
+        Vt = permutedims(Vs)
+        tforeach(axes(K, 2); scheduler = executor) do j
+            for p in nzrange(K, j)
+                Σv[p] += dot(view(Vt, :, rowvals(K)[p]), view(Vt, :, j))
+            end
+        end
+        gains[] = permutedims(sys.J * view(V ./ (1 .- θ)', axes(sys.J, 2), :))
+        return Σ
     end
     function weight_gradient(Σ)
-        out = ev.weights' * nonzeros(Σ.Σ)
-        for (j, rng) in pairs(cells.ranges)
-            D[j] > 0 && (view(out, rng) .-= 1 / D[j])
+        gH = sys.data_map' * nonzeros(Σ.Σ)
+        JV = gains[]
+        Ut = permutedims(U)
+        level = vec(sum(abs2.(U) .* (θ ./ (1 .- θ))'; dims = 2))
+        out = similar(q)
+        tforeach(_blocks(length(D), executor); scheduler = executor) do js
+            for j in js
+                u = view(Ut, :, j)
+                for k in cells.ranges[j]
+                    h = hpos[cells.e[k]]
+                    v = gH[h[1]] + gH[h[2]] + σ * (gH[h[3]] + gH[h[4]])
+                    if D[j] > 0
+                        v += level[j] / D[j] - 2 * (dot(view(JV, :, cells.na[k]), u) + σ * dot(view(JV, :, cells.nb[k]), u)) / sqrt(D[j])
+                    end
+                    out[k] = v
+                end
+            end
         end
         return out
     end
-    issuccess(F) || error(
-        "the Gauss–Newton curvature of the gains and source terms is not positive definite at the MAP, " *
-            "so the Laplace evidence is undefined there",
-    )
-    return (; logdet = logdet(F) - sum(d -> d > 0 ? log(d) : 0.0, D), inverse, weight_gradient)
+    return (; logdet = logdet(F) + sum(t -> log1p(-t), θ; init = 0.0), inverse, weight_gradient)
 end
 
-# The fixed structure of `_joint_curvature!` for `sys` over `cells`, with `σ`
-# the sign of a cell's second gain and `hpos` the positions of each station-gain
-# pair's entries in the data curvature (`_curvature_pattern`): `M`'s pattern, the
-# positions of `K`'s stored values and of each `D_J` in it, the map `qmap` from
-# the cells' `q_c` to `M`'s values in `B`, `Bᵀ` and `D`, the map `weights` from
-# them to every value of `M` they enter (those and the data's part of `K`),
-# buffers for the `q_c` and `D`, and places for the factor and the selected
-# inverse.
-function _evidence_layout(sys, cells, σ, hpos)
-    K = sys.layout.K
-    n, m = size(K, 1), length(cells.ranges)
-    rows = sparse(sys.J')
-    Ik, Jk, _ = findnz(K)
-    entries = Tuple{Int, Int, Int, Float64}[]
-    for (j, rng) in pairs(cells.ranges), k in rng, (gain, s) in ((cells.na[k], 1.0), (cells.nb[k], σ))
-        for r in nzrange(rows, gain)
-            push!(entries, (rowvals(rows)[r], n + j, k, s * nonzeros(rows)[r]))
+# The `r` largest eigenpairs of the positive semidefinite `T` of order `m`,
+# given as its product `mul(X)` with a block `X`, by subspace iteration from a
+# fixed Gaussian block (Halko, Martinsson & Tropp 2011), so the same `T` gives
+# the same pairs: two products, then Rayleigh–Ritz on a third. The block doubles,
+# from 64 columns, until its smallest Ritz value is below `tail`.
+function _top_eigenpairs(mul, m; r0 = 64, tail = 1.0e-3)
+    m == 0 && return Float64[], zeros(0, 0)
+    r = min(r0, m)
+    θ, U = _ritz_pairs(mul, m, r)
+    while r < m && minimum(θ) >= tail
+        r = min(2r, m)
+        θ, U = _ritz_pairs(mul, m, r)
+    end
+    return θ, U
+end
+
+function _ritz_pairs(mul, m, r)
+    X = randn!(Xoshiro(r), zeros(m, r))
+    for _ in 1:2
+        X = Matrix(qr!(mul(X)).Q)
+    end
+    e = eigen(Symmetric(X' * mul(X)))
+    return max.(e.values, 0.0), X * e.vectors
+end
+
+# `T X = B̃ᵀ K⁻¹ B̃ X` for a block `X` over the `J` (`_joint_curvature!`), with `F` the
+# factor of `K`.
+_capacitance_product(sys, F, ev, cells, σ, X, executor) =
+    _restrict(sys, ev, cells, σ, F \ _embed(sys, _lift(sys, ev, cells, σ, X, executor)), executor)
+
+# `Jᵀ G̃ X`, `B̃ X` over the parameters, with `G̃` the station gains' weights in each
+# `J`, `w̃_c (e_a + σ e_b)` for each of its cells: summed per station gain over
+# the cells it enters (`ev.bygain`).
+function _lift(sys, ev, cells, σ, X, executor)
+    (; bygain, gainptr, cellj, w̃) = ev
+    Xt = permutedims(X)
+    Gt = zeros(size(X, 2), length(gainptr) - 1)
+    tforeach(_blocks(length(gainptr) - 1, executor); scheduler = executor) do ns
+        for n in ns, p in gainptr[n]:(gainptr[n + 1] - 1)
+            k = abs(bygain[p])
+            c = (bygain[p] > 0 ? 1.0 : σ) * w̃[k]
+            view(Gt, :, n) .+= c .* view(Xt, :, cellj[k])
         end
     end
-    Is = [Ik; first.(entries); getindex.(entries, 2); n .+ (1:m)]
-    Js = [Jk; getindex.(entries, 2); first.(entries); n .+ (1:m)]
-    M = sparse(Is, Js, ones(length(Is)), n + m, n + m)
-    kpos = [_position(M, i, j) for (i, j) in zip(Ik, Jk)]
-    dpos = [_position(M, n + j, n + j) for j in 1:m]
-    pos = [[_position(M, i, j) for (i, j, _, _) in entries]; [_position(M, j, i) for (i, j, _, _) in entries]; dpos[[j for (j, rng) in pairs(cells.ranges) for _ in rng]]]
-    cell = [getindex.(entries, 3); getindex.(entries, 3); [k for rng in cells.ranges for k in rng]]
-    coef = [last.(entries); last.(entries); ones(length(cells.w))]
-    qmap = sparse(pos, cell, coef, nnz(M), length(cells.w))
+    return (Gt * sys.J)'
+end
+
+# `G̃ᵀ J Y[θ]` over the `J`, for `Y` over the unknowns.
+function _restrict(sys, ev, cells, σ, Y, executor)
+    Yg = permutedims(sys.J * view(Y, axes(sys.J, 2), :))
+    out = zeros(size(Y, 2), length(cells.ranges))
+    tforeach(_blocks(length(cells.ranges), executor); scheduler = executor) do js
+        for j in js, k in cells.ranges[j]
+            view(out, :, j) .+= ev.w̃[k] .* (view(Yg, :, cells.na[k]) .+ σ .* view(Yg, :, cells.nb[k]))
+        end
+    end
+    return permutedims(out)
+end
+
+# Values over the parameters, the first unknowns, as values over every unknown.
+_embed(sys, X) = [X; zeros(size(sys.layout.K, 1) - size(X, 1), size(X, 2))]
+
+# `1:n` in contiguous blocks, one per task of `executor`.
+_blocks(n, executor) = collect(Iterators.partition(1:n, max(1, cld(n, max_tasks(executor)))))
+
+_not_positive_definite() = error(
+    "the Gauss–Newton curvature of the gains and source terms is not positive definite at the MAP, " *
+        "so the Laplace evidence is undefined there",
+)
+
+# The fixed structure of `_joint_curvature!` for `sys` over `cells`: per station
+# gain the cells it enters (`bygain` from `gainptr[n]` on, a cell's index, negated
+# where the gain is its second), each cell's `J`, buffers for the cells' `q_c`,
+# `w̃_c = q_c/√D_J` and each `D_J`, and places for `K`'s factor and its selected
+# inverse.
+function _evidence_layout(sys, cells)
+    ngains = size(sys.J, 1)
+    uses = zeros(Int, ngains)
+    foreach(k -> (uses[cells.na[k]] += 1; uses[cells.nb[k]] += 1), eachindex(cells.na))
+    gainptr = cumsum([1; uses])
+    bygain, slot = zeros(Int, gainptr[end] - 1), gainptr[1:ngains]
+    for k in eachindex(cells.na), (n, k′) in ((cells.na[k], k), (cells.nb[k], -k))
+        bygain[slot[n]] = k′
+        slot[n] += 1
+    end
+    cellj = zeros(Int, length(cells.w))
+    foreach(((j, rng),) -> (cellj[rng] .= j), pairs(cells.ranges))
     ncells = length(cells.w)
-    hcell = sparse(
-        [p for k in 1:ncells for p in hpos[cells.e[k]]], repeat(1:ncells; inner = 4), repeat([1.0, 1.0, σ, σ], ncells),
-        size(sys.data_map, 2), ncells,
-    )
-    Ik, Jc, Vk = findnz(sys.data_map * hcell)
-    weights = qmap + sparse(kpos[Ik], Jc, Vk, nnz(M), ncells)
-    return (; M, kpos, dpos, qmap, weights, q = zeros(ncells), D = zeros(m),
+    return (;
+        bygain, gainptr, cellj, q = zeros(ncells), w̃ = zeros(ncells), D = zeros(length(cells.ranges)),
         factor = Ref{Union{Nothing, CHOLMOD.Factor{Float64, Int}}}(nothing), selected = Ref{Any}(nothing),
     )
 end
@@ -1083,8 +1171,8 @@ function _set_log_hypers!(priors, ctx, est, ψ)
 end
 
 """
-    _fit_hypers!(priors, x, ctx, solved; tolerance, max_iterations, max_hyper_iterations, linsolve, optimizer,
-                 warmup = 5) -> (; solved, converged, evaluations, unconverged, remaining)
+    _fit_hypers!(priors, x, ctx, solved; tolerance, hyper_tolerance, max_iterations, max_hyper_iterations,
+                 linsolve, optimizer, warmup = 5) -> (; solved, converged, evaluations, unconverged, remaining)
 
 The hyperparameters the priors give as densities at their type-II MAP, written
 into `priors` with the gains `x` at their MAP under them. The evidence can
@@ -1095,20 +1183,21 @@ what its posterior moments support. From there `optimizer`, an
 Optimization.jl optimizer that takes a gradient and bounds, maximizes the
 Laplace log evidence (`_hyper_objective`) over the log hyperparameters within
 their support (`_log_hyper_boxes`), each scaled by the square root of its
-curvature `C` there, so that one unit of each is about one standard error.
+curvature there, so that one unit of each is about one standard error.
 
 Each evaluation is the MAP of the gains (`_profiled_map!`, warm from the last,
 with the exact Hessian) and the evidence and its gradient there. The fit stops
-once the evidence an exact Newton step would still gain, `½ Σ g²/C` over the
-gradient `g` projected onto the support (`remaining`), is below
-`tolerance²/2`, the rule the MAP solve applies to its objective; when the
-optimizer stops on its own; or after
-`max_hyper_iterations` iterations, the EM maps among them, where `converged` is
-false. `solved` is the MAP at the starting hyperparameters, and the result's
-the MAP at the final ones; `unconverged` counts the MAPs that stopped at
-`max_iterations`.
+once the evidence a Newton step would still gain (`remaining`, in nats), per
+track `½ gᵀH⁻¹g` over its gradient `g` projected onto the support and the
+complete data's curvature `H`, is below `hyper_tolerance`; when the
+optimizer stops on its own; or after `max_hyper_iterations` iterations, the
+EM maps among them, where `converged` is false. `solved` is the MAP at the
+starting hyperparameters, and the result's the MAP at the final ones;
+`unconverged` counts the MAPs that stopped at `max_iterations`.
 """
-function _fit_hypers!(priors, x, ctx, solved; tolerance, max_iterations, max_hyper_iterations, linsolve, optimizer, warmup = 5)
+function _fit_hypers!(
+        priors, x, ctx, solved; tolerance, hyper_tolerance, max_iterations, max_hyper_iterations, linsolve, optimizer, warmup = 5,
+    )
     est = _estimated(ctx)
     boxes = _log_hyper_boxes(ctx, est)
     lo, hi = first.(boxes), last.(boxes)
@@ -1119,46 +1208,88 @@ function _fit_hypers!(priors, x, ctx, solved; tolerance, max_iterations, max_hyp
     end
     ψ0 = _into_box(_log_hyper_vector(priors, ctx, est), boxes)
     mapped, at = (nem > 0 ? fill(NaN, length(ψ0)) : _log_hyper_vector(priors, ctx, est)), Float64[]
-    L, G, C = -Inf, Float64[], Float64[]
-    evaluations, unconverged, remaining = 0, 0, Inf
+    L, G, H = -Inf, Float64[], Matrix{Float64}[]
+    evaluations, unconverged = 0, 0
     function evaluate!(ψ)
-        ψ == at && return nothing
+        ψ == at && return (; L, G, H, settled = solved.converged)
         _set_log_hypers!(priors, ctx, est, ψ)
         if ψ != mapped
             solved = _profiled_map!(x, ctx, priors; tolerance, max_iterations, linsolve, solved.μ, exact = true)
             unconverged += !(solved.converged || solved.stalled)
             mapped = copy(ψ)
         end
-        L, G, C = _hyper_objective(priors, x, ctx, solved, est; linsolve, abstol = tolerance / 10)
+        L, G, H = _hyper_objective(priors, x, ctx, solved, est; linsolve, abstol = tolerance / 10)
         at = copy(ψ)
         evaluations += 1
-        remaining = sum(eachindex(ψ, G, C); init = 0.0) do i
-            held = (ψ[i] <= lo[i] && G[i] < 0) || (ψ[i] >= hi[i] && G[i] > 0)
-            return held ? 0.0 : G[i]^2 / (2 * max(C[i], eps()))
-        end
-        remaining < tolerance^2 / 2 && solved.converged && throw(HyperparametersSettled())
-        return nothing
+        return (; L, G, H, settled = solved.converged)
     end
-    converged = try
-        evaluate!(ψ0)
-        if nem < max_hyper_iterations
-            D = sqrt.(max.(C, 1.0))
-            objective(u, _) = (evaluate!(u ./ D); -L)
-            gradient!(out, u, _) = (evaluate!(u ./ D); out .= .-G ./ D)
-            problem = Optimization.OptimizationProblem(
-                Optimization.OptimizationFunction(objective; grad = gradient!), ψ0 .* D; lb = lo .* D, ub = hi .* D,
-            )
-            result = Optimization.solve(problem, optimizer; maxiters = max_hyper_iterations - nem)
-            evaluate!(result.u ./ D)
-            Optimization.SciMLBase.successful_retcode(result.retcode)
-        else
-            false
-        end
-    catch e
-        e isa HyperparametersSettled || rethrow()
-        true
+    tracks = _track_ranges(ctx, est)
+    converged, remaining = if nem < max_hyper_iterations
+        _maximize_hypers!(optimizer, evaluate!, ψ0, lo, hi, tracks; tolerance = hyper_tolerance, maxiters = max_hyper_iterations - nem)
+    else
+        e = evaluate!(ψ0)
+        false, _remaining(ψ0, e.G, e.H, lo, hi, tracks)
     end
     return (; solved, converged, evaluations, unconverged, remaining)
+end
+
+# The positions in `_log_hyper_vector` of each track's log hyperparameters.
+function _track_ranges(ctx, est)
+    counts = [_hyper_count(ctx.tracks[obs][k].prior) for (obs, k) in est]
+    return [(e - n + 1):e for (e, n) in zip(cumsum(counts), counts)]
+end
+
+# Whether coordinate `i` of `ψ` is held at a bound by the gradient `G`.
+_held(ψ, G, lo, hi, i) = (ψ[i] <= lo[i] && G[i] < 0) || (ψ[i] >= hi[i] && G[i] > 0)
+
+# The evidence a Newton step would gain, `½ gᵀH⁻¹g` per track over its
+# coordinates not held at a bound, with `H` the track's block of the curvature.
+function _remaining(ψ, G, H, lo, hi, tracks)
+    gain = 0.0
+    for (h, r) in zip(H, tracks)
+        free = [j for (j, i) in pairs(r) if !_held(ψ, G, lo, hi, i)]
+        isempty(free) && continue
+        g = G[r[free]]
+        gain += dot(g, _positive_definite(h[free, free]) \ g) / 2
+    end
+    return gain
+end
+
+# `b` with its eigenvalues floored at `1e-3` of the largest and at `1e-6`.
+function _positive_definite(b)
+    e = eigen(Symmetric(b))
+    λ = max.(e.values, max(1.0e-3 * maximum(abs, e.values; init = 0.0), 1.0e-6))
+    return Symmetric(e.vectors * Diagonal(λ) * e.vectors')
+end
+
+# An Optimization.jl optimizer over the coordinates scaled by the square root of
+# the curvature's diagonal at `ψ0`, halted once the evidence left to gain is
+# below `tolerance`.
+function _maximize_hypers!(optimizer, evaluate!, ψ0, lo, hi, tracks; tolerance, maxiters)
+    e = evaluate!(ψ0)
+    D = sqrt.(max.(reduce(vcat, diag.(e.H); init = Float64[]), 1.0))
+    remaining = _remaining(ψ0, e.G, e.H, lo, hi, tracks)
+    function current!(u)
+        e = evaluate!(u ./ D)
+        remaining = _remaining(u ./ D, e.G, e.H, lo, hi, tracks)
+        remaining < tolerance && e.settled && throw(HyperparametersSettled())
+        return e
+    end
+    converged = try
+        current!(ψ0 .* D)
+        objective(u, _) = -current!(u).L
+        gradient!(out, u, _) = (out .= .-current!(u).G ./ D)
+        problem = Optimization.OptimizationProblem(
+            Optimization.OptimizationFunction(objective; grad = gradient!), ψ0 .* D; lb = lo .* D, ub = hi .* D,
+        )
+        result = Optimization.solve(problem, optimizer; maxiters)
+        current!(result.u)
+        Optimization.SciMLBase.successful_retcode(result.retcode)
+    catch err
+        err isa HyperparametersSettled || rethrow()
+        true
+    end
+    return converged, remaining
 end
 
 # One EM map of the hyperparameters `est` (`_estimated`) at the MAP `x` that
@@ -1168,12 +1299,13 @@ end
 # within their support (`_m_step`).
 function _em_step!(priors, x, ctx, solved, est)
     systems, _ = _profiled_systems(x, ctx, priors; exact = true)
-    posterior = map((; phase = :phase, amp = :amp)) do obs
+    parts = tmap(Any, [:phase, :amp]; scheduler = ctx.executor) do obs
         s = systems[obs]
         isnothing(s) && return nothing
         joint = _joint_curvature!(s.sys, s.profile, ctx.hpos)
         return (; z = _current_unknowns(s.sys), cov = joint.inverse())
     end
+    posterior = (; phase = parts[1], amp = parts[2])
     for (obs, k) in est
         chains = systems[obs].sys.chains[k]
         (; z, cov) = posterior[obs]
@@ -1182,8 +1314,8 @@ function _em_step!(priors, x, ctx, solved, est)
     return priors
 end
 
-# Thrown by `_fit_hypers!`'s objective to end the optimizer's run once the
-# evidence left to gain is below its tolerance.
+# Thrown by the objective `_maximize_hypers!` hands an Optimization.jl optimizer,
+# to end its run once the evidence left to gain is below the tolerance.
 struct HyperparametersSettled <: Exception end
 
 # `_posterior_system` of one observable, kept in `cache[obs]` and its values

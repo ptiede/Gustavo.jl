@@ -578,8 +578,11 @@ hyperpriors: [`default_adhoc_phase_prior`](@ref Gustavo.Fring.default_adhoc_phas
 (timescale median 60 s, ``\sigma`` median 0.05), with hyperparameters resolved
 per (station, feed node, scan) at their type-II MAP. The phase and log-amplitude
 decouple in the Gauss–Newton step, as in the bandpass. A constant on a
-station's log-amplitude over the scan trades against ``|S^p_{ab}|``, so its
-prior sets it, and where an AP's baselines hold no odd loop (two stations, say)
+station's log-amplitude over the scan trades against ``|S^p_{ab}|``, so the data
+cannot measure it: after the fit each log-amplitude track is moved so its mean
+over the scan's APs with data is zero, and the flux scale stays the a priori
+calibration's (the bandpass's tracks are held the same way over the band). Where
+an AP's baselines hold no odd loop (two stations, say)
 the data measure only sums of log-amplitudes and the priors alone split them;
 the solve warns. Any prior the joint solve accepts works: an `IIDPrior` (each AP on
 its own), or a state-space prior along `Ti` with a proper start (`OUPrior`,
@@ -753,7 +756,9 @@ visibility plane.
 loses, η = |Σ w·V| / Σ(w·|V|), against time-averaging interval and
 frequency-averaging width, per antenna pair and feed pair and pooled over
 antenna pairs. A good solution keeps η near 1 out to the whole scan and the
-whole spectral window; the uncorrected data decorrelate. With a Makie backend
+whole spectral window; the uncorrected data decorrelate. η is debiased for
+thermal noise by default, so a weak baseline that is calibrated well also reads
+near 1; `debias = false` gives the raw ratio. With a Makie backend
 loaded, [`plot_coherence`](@ref) draws one scan and feed pair:
 
 ```julia

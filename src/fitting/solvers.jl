@@ -44,7 +44,8 @@ end
 solution_name(::Bandpass) = :bandpass
 
 """
-    Adhoc(; model = default_adhoc_model(), gauge = ZeroSumPhase(), hyper_optimizer = LBFGSB(m = 20))
+    Adhoc(; model = default_adhoc_model(), gauge = ZeroSumPhase(), hyper_optimizer = LBFGSB(m = 20),
+          hyper_tolerance = 5.0)
 
 The per-integration station-gain stage (adhoc): solves each scan's per-AP
 station phases and log-amplitudes on the fringe/bandpass residual. What is fit
@@ -67,17 +68,19 @@ The solution's info holds `nscans` and `priors`: per observable (`phase`,
 resolved, over `(AntennaName, Feed, Ti)` with one `Ti` value per scan, its
 first AP epoch (`nothing` where not fit).
 
-The priors' hyperparameters are at their type-II MAP, fit by `hyper_optimizer`,
-an [Optimization.jl](https://docs.sciml.ai/Optimization/stable/) optimizer that
-takes a gradient and bounds (L-BFGS-B by default), on their Laplace evidence.
+The priors' hyperparameters are at their type-II MAP, fit on their Laplace
+evidence by `hyper_optimizer`, an [Optimization.jl](https://docs.sciml.ai/Optimization/stable/)
+optimizer that takes a gradient and bounds (L-BFGS-B by default), until a
+Newton step would gain less than `hyper_tolerance` nats of log evidence.
 """
 Base.@kwdef struct Adhoc{M <: GainModel, G <: AbstractGauge, O} <: AbstractSolver
     model::M = Fring.default_adhoc_model()
     gauge::G = ZeroSumPhase()
     hyper_optimizer::O = Fring.LBFGSB(m = 20)
-    function Adhoc(model::M, gauge::G, hyper_optimizer::O) where {M, G, O}
+    hyper_tolerance::Float64 = 5.0
+    function Adhoc(model::M, gauge::G, hyper_optimizer::O, hyper_tolerance) where {M, G, O}
         _check_solver_gauge(gauge, model)
-        return new{M, G, O}(model, gauge, hyper_optimizer)
+        return new{M, G, O}(model, gauge, hyper_optimizer, hyper_tolerance)
     end
 end
 solution_name(::Adhoc) = :adhoc
@@ -227,7 +230,7 @@ _group_setup(::Adhoc, ctx::SolveContext) = (; ctx.layout, plans = Fring._adhoc_p
 
 _solve_group(s::Adhoc, ctx::SolveContext, setup, group) = Fring.adhoc_scan!(
     ctx.θ, group, ctx.geom, setup, ctx.gauge;
-    executor = inner_executor(ctx.exec), s.hyper_optimizer,
+    executor = inner_executor(ctx.exec), s.hyper_optimizer, s.hyper_tolerance,
 )
 
 function solve(s::Adhoc, ctx::SolveContext)

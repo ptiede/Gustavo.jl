@@ -322,7 +322,7 @@ end
 
 """
     JointSmoother(; max_iterations = 200, max_hyper_iterations = 100, tolerance = 0.01,
-                  flat_span = 0.01, warn_fraction = 0.25, eltype = nothing,
+                  hyper_tolerance = 5.0, flat_span = 0.01, warn_fraction = 0.25, eltype = nothing,
                   linsolve = KrylovJL_CG(; linesearch = true), hyper_optimizer = LBFGSB(m = 20))
 
 Fit the station bandpass against the actual complex visibilities, with each
@@ -379,13 +379,12 @@ half a turn of that mean.
 
 Each MAP solve stops once the undamped step would move no station gain by more
 than `tolerance` of its standard error, and warns if `max_iterations` steps pass
-first. The hyperparameters are fit by `hyper_optimizer`, an
-[Optimization.jl](https://docs.sciml.ai/Optimization/stable/) optimizer that
-takes a gradient and bounds (L-BFGS-B by default), over their logs within the
-support the samples measure; the fit stops once an iteration moves no station
-gain by more than `tolerance` of its standard error, from one converged MAP to
-the next, or the optimizer stops, with a warning if `max_hyper_iterations`
-iterations pass first. Each step is a
+first. The hyperparameters are fit on their Laplace evidence by
+`hyper_optimizer`, an [Optimization.jl](https://docs.sciml.ai/Optimization/stable/)
+optimizer that takes a gradient and bounds (L-BFGS-B by default), over their
+logs within the support the samples measure; the fit stops once a Newton step would gain less than
+`hyper_tolerance` nats of log evidence, or the optimizer stops, with a warning
+if `max_hyper_iterations` iterations pass first. Each step is a
 linear system over every parameter, solved matrix-free by `linsolve`, a Krylov
 method of [LinearSolve.jl](https://docs.sciml.ai/LinearSolve/stable/) (e.g.
 `KrylovJL_CG`), preconditioned by a sparse Cholesky factorization. Its system
@@ -410,6 +409,7 @@ struct JointSmoother{E, L, O}
     max_iterations::Int
     max_hyper_iterations::Int
     tolerance::Float64
+    hyper_tolerance::Float64
     flat_span::Float64
     warn_fraction::Float64
     eltype::E
@@ -418,11 +418,11 @@ struct JointSmoother{E, L, O}
 end
 JointSmoother(;
     max_iterations::Integer = 200, max_hyper_iterations::Integer = 100, tolerance::Real = 0.01,
-    flat_span::Real = 0.01, warn_fraction::Real = 0.25,
+    hyper_tolerance::Real = 5.0, flat_span::Real = 0.01, warn_fraction::Real = 0.25,
     eltype::Union{Nothing, Type{<:AbstractFloat}} = nothing, linsolve = LinearSolve.KrylovJL_CG(; linesearch = true),
     hyper_optimizer = LBFGSB(m = 20),
 ) = JointSmoother{_eltype_parameter(eltype), typeof(linsolve), typeof(hyper_optimizer)}(
-    max_iterations, max_hyper_iterations, tolerance, flat_span, warn_fraction, eltype, linsolve, hyper_optimizer,
+    max_iterations, max_hyper_iterations, tolerance, hyper_tolerance, flat_span, warn_fraction, eltype, linsolve, hyper_optimizer,
 )
 
 _eltype_parameter(::Nothing) = Nothing
@@ -444,7 +444,7 @@ function _solve_bandpass!(sm::JointSmoother, θ, results, setup; gauge::Abstract
     for idx in _joint_scan_groups(tseg)
         fits = solve_joint_bandpass!(
             results[idx], geom, components;
-            gauge, sm.max_iterations, sm.max_hyper_iterations, sm.tolerance, sm.flat_span, sm.eltype,
+            gauge, sm.max_iterations, sm.max_hyper_iterations, sm.tolerance, sm.hyper_tolerance, sm.flat_span, sm.eltype,
             sm.linsolve, sm.hyper_optimizer, executor,
         )
         _record_track_fits!(status.phase, priors.phase, fits.phase, fits.status.phase, setup.paths.phase.chained, geom, chained.phase)

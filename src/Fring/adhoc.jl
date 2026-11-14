@@ -235,12 +235,12 @@ end
 
 """
     adhoc_scan!(θ, group::XRadio.ProcessingSet, geom::DataGeometry, setup, gauge;
-                executor = SerialScheduler(), hyper_optimizer = LBFGSB(m = 20)) -> NamedTuple
+                executor = SerialScheduler(), hyper_optimizer = LBFGSB(m = 20), hyper_tolerance = 5.0) -> NamedTuple
 
 The adhoc solve of one scan group, on data already gain-corrected: sum the
 per-(station pair, feed pair, AP) inverse-variance residual over every band
 (`weighted_sums`), fit the adhoc components under each station's priors
-(`solve_joint_gains!`, its hyperparameters by `hyper_optimizer`), and write
+(`solve_joint_gains!`, its hyperparameters by `hyper_optimizer` to `hyper_tolerance`), and write
 this scan's `PerIntegration` θ entries
 (disjoint per scan, so scan groups may solve in parallel). `setup` holds the
 parameter `layout` and the adhoc components' `plans` (`(; phase, logamp)`).
@@ -253,7 +253,7 @@ with no unflagged cross-correlation keeps its θ entries, with a warning, and ev
 """
 function adhoc_scan!(
         θ, group::XRadio.ProcessingSet, geom::DataGeometry, setup, gauge;
-        executor = SerialScheduler(), hyper_optimizer = LBFGSB(m = 20),
+        executor = SerialScheduler(), hyper_optimizer = LBFGSB(m = 20), hyper_tolerance = 5.0,
     )
     (; rbar, wbar, ti) = _ap_sums(group, geom; executor)
     t0 = minimum(gti -> geom.times[gti], ti)
@@ -264,6 +264,6 @@ function adhoc_scan!(
         return map(_ -> per_scan(_unfit_priors(geom)), setup.plans)
     end
     blocks = map(p -> isnothing(p) ? nothing : antenna_blocks(setup.layout, θ, p.path...), setup.plans)
-    priors = _solve_adhoc!(blocks, rbar, wbar, ti, geom, _gauge_for(gauge, setup.plans.phase.path); executor, hyper_optimizer)
+    priors = _solve_adhoc!(blocks, rbar, wbar, ti, geom, _gauge_for(gauge, setup.plans.phase.path); executor, hyper_optimizer, hyper_tolerance)
     return map(per_scan, priors)
 end

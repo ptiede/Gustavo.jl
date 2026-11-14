@@ -92,7 +92,5 @@ export gains, plot_gain_phases
 export save_solution, load_solution
 
 # Unexported because the names are common: a solver author extends `solve`.
-@static if VERSION >= v"1.11"
-    eval(Meta.parse("public solve, SolveContext"))
-end
+public solve, SolveContext
 end

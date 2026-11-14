@@ -752,7 +752,7 @@ end
         @test rep.amp_priors === only(amp_priors)
 
         θ1 = zeros(l.nθ)
-        @test_logs (:warn, r"stopped at 1 iterations") match_mode = :any FP.solve_joint_bandpass!(
+        @test_logs (:warn, r"max_hyper_iterations = 1\)") match_mode = :any FP.solve_joint_bandpass!(
             results, geom, _jb_components(l, θ1); gauge = PinAntenna(1), max_hyper_iterations = 1,
         )
     end
@@ -1289,8 +1289,10 @@ end
     init = MvNormal(zeros(2), Diagonal([10.0^2, (10.0 / 32.0e6)^2]))
     rw2(σ) = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(σ * unit), 1.0), init)
     bpc(prior) = GainComponent(ConstantTerm(); Ti = CAL.GlobalTime(), Frequency = ChannelBlocks(1), Feed = PerFeed(), prior)
+    # The two fits are compared at their optima, so their hyperparameters are fit to a tight tolerance.
     solver = Bandpass(;
         model = CAL.GainModel(; phase = (; bandpass = bpc(rw2(0.05))), logamp = (; bandpass = bpc(rw2(0.02)))), gauge = PinAntenna(1),
+        smoother = JointSmoother(; hyper_tolerance = 1.0e-3),
     )
     sol = fit(solver, ps)
 

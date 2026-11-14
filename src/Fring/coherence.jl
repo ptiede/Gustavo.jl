@@ -21,13 +21,11 @@
 #
 # CAVEAT: η is computed against the data's own finest resolution (a single
 # integration / channel gives η ≡ 1), so it is self-normalized and needs no
-# external gain model. By default it is not thermal-noise-debiased: pure thermal
-# noise alone pulls η below 1 at coarse averaging (the incoherent |V| is
-# noise-inflated while the coherent sum averages noise down), so at native per-cell
-# SNR the absolute η UNDERSTATES a good solution — read the *shape* and the
-# *before/after* comparison, not the absolute value. Pass `debias = true` to
-# remove that bias; it takes the weights as inverse variances per real
-# component (`w = 1/Var(Re V)`).
+# external gain model. By default it is thermal-noise-debiased, taking the
+# weights as inverse variances per real component (`w = 1/Var(Re V)`). The raw η
+# (`debias = false`) is pulled below 1 at coarse averaging by thermal noise alone
+# (the incoherent |V| is noise-inflated while the coherent sum averages noise
+# down), so at low per-cell SNR it UNDERSTATES a good solution.
 #
 # The debiased estimator works in POWER, with a single square root at the end:
 # per averaging bin, `|Σ w·V|² − 2Σw` is an unbiased estimate of the bin's
@@ -311,7 +309,7 @@ DimensionalData.@dim AveragingBandwidth "Frequency-averaging width (Hz)"
 
 """
     coherence_report(group; timescales = nothing, bandwidths = nothing,
-                     debias = false, marginalize = true) -> DimStack
+                     debias = true, marginalize = true) -> DimStack
 
 The coherence factor η = |Σ w·V| / Σ(w·|V|) of `group`, one scan
 (`groupby(ps, ByScan())`), against time-averaging interval and
@@ -332,20 +330,21 @@ needed. A cell with no usable data is `NaN`. `timescales` (s) and
 spacing until one interval spans the whole extent.
 
 `debias` removes the thermal-noise bias, which otherwise pulls η below 1 at
-coarse averaging; it takes the weights as inverse variances per real
-component (`w = 1/Var(Re V)`). The debiased η pools unbiased per-bin powers and
-takes one square root at the end; where the pooled power does not clear 3σ of
-its null fluctuation it is `NaN`. `marginalize` measures each curve on data
-coherently averaged over the other axis first (the time curve on per-integration
-window averages, the frequency curve on per-channel scan averages), which
-raises the per-sample SNR the debias needs.
+coarse averaging on weak baselines; it takes the weights as inverse variances
+per real component (`w = 1/Var(Re V)`). The debiased η pools unbiased per-bin
+powers and takes one square root at the end; where the pooled power does not
+clear 3σ of its null fluctuation it is `NaN`. `debias = false` gives the raw η,
+defined at any SNR but below 1 from thermal noise alone. `marginalize`
+measures each curve on data coherently averaged over the other axis first (the
+time curve on per-integration window averages, the frequency curve on
+per-channel scan averages), which raises the per-sample SNR the debias needs.
 
 Per-scan results combine with [`cat_scans`](@ref); pass the same `timescales`
 and `bandwidths` to every scan so the intervals line up.
 """
 function coherence_report(
         group::XRadio.ProcessingSet;
-        timescales = nothing, bandwidths = nothing, debias::Bool = false, marginalize::Bool = true,
+        timescales = nothing, bandwidths = nothing, debias::Bool = true, marginalize::Bool = true,
     )
     scan = _group_scan(group)
     members = collect(values(group))

@@ -695,10 +695,27 @@ with ``z^*`` the MAP of the unknowns (the step above), ``O`` its objective,
 ``\chi^2/2`` with ``S`` at its optimum plus the prior energy,
 ``N = \tfrac12 \sum_k \log\det(2\pi Q_k)`` (and the start's term) the priors'
 log normalizer, and ``A`` the Gauss–Newton curvature of the profiled
-objective. With ``S`` as unknowns beside the gains the held-``S`` system is
-sparse, ``M = [K\; B;\, B^\top\; D]`` with ``D`` diagonal, one entry per
-``S_J``, and ``A = K - B D^{-1} B^\top``, so
-``\log\det A = \log\det M - \sum_J \log D_J`` takes one sparse factorization.
+objective. With ``S`` as unknowns beside the gains, the held-``S`` curvature
+``K`` is sparse, and ``A = K - B D^{-1} B^\top`` with ``D`` diagonal, one entry
+per ``S_J``. Each ``S_J`` spans every channel (or AP) of its baseline, so ``A``
+itself is nearly dense; by Woodbury, with ``\tilde B = B D^{-1/2}`` and
+``T = \tilde B^\top K^{-1} \tilde B``,
+
+```math
+\log\det A = \log\det K + \log\det(I - T), \qquad
+A^{-1} = K^{-1} + K^{-1}\tilde B\, (I - T)^{-1} \tilde B^\top K^{-1}.
+```
+
+The eigenvalues of ``T`` lie in ``[0, 1)``. A few are near 1, about one per
+track: the directions along which ``S`` takes up a track's level over the band
+or scan, held only by the prior; the rest are typically orders of magnitude
+smaller. So ``T`` is taken at its largest eigenpairs ``T \approx U \Theta U^\top``
+and the rest as zero, the pairs found by subspace iteration from a fixed
+Gaussian block (Halko, Martinsson & Tropp 2011), with products by ``\tilde B``
+and one sparse factor of ``K``, over a block that doubles until its smallest
+eigenvalue is below ``10^{-3}``: ``\log\det A \approx \log\det K + \sum \log(1 - \theta)`` and
+``A^{-1} \approx K^{-1} + V (I - \Theta)^{-1} V^\top`` with
+``V = K^{-1}\tilde B U``.
 
 Its gradient over the log hyperparameters has two parts. With the MAP held,
 the Fisher identity gives the gradient of each chain's expected log prior
@@ -715,8 +732,8 @@ at ``\psi' = \psi``, with ``v_k = (s_k, s_{k-1})`` and its moments under the
 Gaussian of precision ``A``. They need only the covariances of unknowns that
 share a term, which lie on the sparsity pattern of the system and so of its
 Cholesky factor; the recursion of Takahashi, Fagan & Chen (1973), in its
-supernodal form (SelectedInversion.jl), gives those entries of ``M^{-1}``,
-whose gains block is ``A^{-1}``, without forming the rest. The expected log
+supernodal form (SelectedInversion.jl), gives those entries of ``K^{-1}``
+without forming the rest, and the low-rank term adds its part of ``A^{-1}``. The expected log
 prior is linear in the moments, so they are summed once per distinct step, and
 each evaluation costs one transition per distinct step, not one per sample.
 Then the MAP moves with ``\psi``, and ``\log\det A`` with it, through the
@@ -747,11 +764,11 @@ the same: for any family of joint densities ``f_\psi(y, s)`` over the same
 \log \int f_\psi``, and the data enter only through the first entry, which is
 the same in every basis.
 
-The fit stops once the evidence an exact Newton step would still gain,
-``\tfrac12 \sum_i g_i^2 / C_i`` over the gradient projected onto the support,
-is below ``\texttt{tolerance}^2/2``, the rule the MAP solve applies to its own
-objective, or after `max_hyper_iterations` iterations, the EM maps among
-them. The expectation in ``L`` carries the posterior's spread, so the fit does
+The fit stops once the evidence a Newton step would still gain, per track
+``\tfrac12 g^\top H^{-1} g`` over its gradient ``g`` projected onto the support
+and the complete data's curvature ``H`` of its hyperparameters, summed over
+the tracks, is below `hyper_tolerance` nats (5 by default), or after
+`max_hyper_iterations` iterations, the EM maps among them. The expectation in ``L`` carries the posterior's spread, so the fit does
 not collapse a prior onto its mode as a joint MAP over the gains and ``\psi``
 would, where ``-\tfrac12 \log\det Q_k`` grows without bound as
 ``\sigma \to 0``. The hyperparameters start from type-II MAP on each chain
@@ -779,6 +796,9 @@ bound constrained optimization, *SIAM Journal on Scientific Computing* 16(5),
 A. P. Dempster, N. M. Laird, and D. B. Rubin (1977), Maximum likelihood from
 incomplete data via the EM algorithm, *Journal of the Royal Statistical Society
 B* 39(1), 1–38.
+N. Halko, P.-G. Martinsson, and J. A. Tropp (2011), Finding structure with
+randomness: probabilistic algorithms for constructing approximate matrix
+decompositions, *SIAM Review* 53(2), 217–288.
 K. Madsen, H. B. Nielsen, and O. Tingleff (2004), *Methods for Non-Linear Least
 Squares Problems*, 2nd ed., Technical University of Denmark.
 J. Mandel (1993), Balancing domain decomposition, *Communications in Numerical

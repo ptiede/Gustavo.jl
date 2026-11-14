@@ -38,9 +38,9 @@ parameters nearest those estimates under the priors. The MAP is found by
 Levenberg–Marquardt with the damping scaled by each parameter's curvature, and
 hyperparameters given as densities at their type-II MAP, by `hyper_optimizer`
 (an Optimization.jl optimizer that takes a gradient and bounds; L-BFGS-B by
-default) on their Laplace evidence within their support (`_fit_hypers!`),
-stopping once the evidence a Newton step would still gain is below
-`tolerance²/2` or after `max_hyper_iterations` iterations. The gauge then
+default) on their Laplace evidence within their support
+(`_fit_hypers!`), stopping once the evidence a Newton step would still gain is
+below `hyper_tolerance` nats or after `max_hyper_iterations` iterations. The gauge then
 moves the phases along the freedoms the data leave, at least cost in prior
 energy (`_meet_phase_gauge!`).
 
@@ -58,15 +58,17 @@ not solved and keeps its value.
 function solve_joint_gains!(
         components, data, geom::DataGeometry;
         cover, gauge::AbstractGauge, max_iterations::Integer = 200, max_hyper_iterations::Integer = 100,
-        tolerance::Real = 0.01, linsolve = LinearSolve.KrylovJL_CG(; linesearch = true), hyper_optimizer = LBFGSB(m = 20),
-        executor = SerialScheduler(),
+        tolerance::Real = 0.01, hyper_tolerance::Real = 5.0, linsolve = LinearSolve.KrylovJL_CG(; linesearch = true),
+        hyper_optimizer = LBFGSB(m = 20), executor = SerialScheduler(),
     )
     (; ctx, priors, x, solved, sg, parts, hasdata, weight, observables) =
         _joint_setup(components, data, geom; cover, max_iterations, tolerance, linsolve, executor)
     (; cells, fitted, tracks, params) = ctx
     hyper_converged, hyper_remaining = true, 0.0
     if !isempty(_estimated(ctx))
-        hyper = _fit_hypers!(priors, x, ctx, solved; tolerance, max_iterations, max_hyper_iterations, linsolve, optimizer = hyper_optimizer)
+        hyper = _fit_hypers!(
+            priors, x, ctx, solved; tolerance, hyper_tolerance, max_iterations, max_hyper_iterations, linsolve, optimizer = hyper_optimizer,
+        )
         solved, hyper_converged, hyper_remaining = hyper.solved, hyper.converged, hyper.remaining
     end
     (; converged, stalled, change) = solved
@@ -74,12 +76,13 @@ function solve_joint_gains!(
         "damping; that step would have moved a gain by $change of its standard error."
     stalled || converged || @warn "solve_joint_gains! did not converge in $max_iterations iterations: the " *
         "last step moved a gain by $change of its standard error, against a tolerance of $tolerance."
-    hyper_converged || @warn "the hyperparameter fit of solve_joint_gains! stopped at $max_hyper_iterations " *
-        "iterations with $hyper_remaining nats of log evidence left to gain, against $(tolerance^2 / 2)."
+    hyper_converged || @warn "the hyperparameter fit of solve_joint_gains! stopped with $hyper_remaining nats of " *
+        "log evidence left to gain, against a tolerance of $hyper_tolerance (max_hyper_iterations = $max_hyper_iterations)."
 
     fitted.amp && _warn_free_amplitudes(cells, sg, geom)
 
     fitted.phase && _meet_phase_gauge!(params.phase, tracks.phase, priors.phase, gauge, cells, sg, components.phase)
+    fitted.amp && _zero_amplitude_levels!(params.amp, tracks.amp, hasdata)
     for (obs, o) in pairs(observables)
         fitted[obs] && _write_params!(components[o], sg.params[o][parts[obs].kept], params[obs].θ)
     end
@@ -89,6 +92,29 @@ function solve_joint_gains!(
         map((t, prior) -> (; t.chain..., prior, t.pieces, values = xs[t.gains]), part.gain_tracks, priors)
     end
     return (; fits.phase, fits.amp, gains = (; sg, x.phase, x.amp), converged, stalled)
+end
+
+# Each amplitude track's level over each group of its pieces whose constant the
+# source term absorbs (`constants`), which the data cannot measure and the
+# track's prior alone would set: the track's parameters move by one constant
+# so that its own part of its station gains with data has mean log-amplitude
+# zero. The flux scale is then the a priori calibration's, and any other
+# component keeps the level its prior gives it. Each of those gains must read
+# the track's parameters with coefficients summing to one.
+function _zero_amplitude_levels!(p, tracks, hasdata)
+    for t in tracks, group in unique(t.constants)
+        us = reduce(vcat, (t.gains[piece] for (piece, c) in zip(t.pieces, t.constants) if c == group))
+        reached = sort!(unique(rowvals(p.J)[r] for u in us for r in nzrange(p.J, u)))
+        ns = filter(n -> hasdata[n], reached)
+        isempty(ns) && continue
+        Jt = p.J[ns, us]
+        all(≈(1), sum(Jt; dims = 2)) || error(
+            "solve_joint_gains!: the log-amplitude track of $(join(t.chain.path, '.')) does not read its station gains " *
+                "with unit coefficients, so its level cannot be set to zero by one constant",
+        )
+        p.θ[us] .-= sum(Jt * p.θ[us]) / length(ns)
+    end
+    return p
 end
 
 # The structure of `solve_joint_gains!` up to its hyperparameter fit: the

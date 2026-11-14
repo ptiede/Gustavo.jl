@@ -247,6 +247,8 @@ end
     d .-= mean(d; dims = 2)
     @test maximum(abs, d) < 0.02
     @test parent(sol.logamp)[:, 1, :] == parent(sol.logamp)[:, 2, :]
+    # The data cannot measure a station's log-amplitude level over the scan; it is held at zero.
+    @test maximum(abs, mean(parent(sol.logamp)[:, 1, :]; dims = 2)) < 1.0e-12
     @test all(p -> p isa OUPrior && p.scale isa Real && p.σ isa Real, sol.logamp_prior)
     @test maximum(abs, adhoc_error(sol, screen)) < 0.05
 
@@ -305,6 +307,29 @@ end
         return (first(evidence(ψ .+ e)) - first(evidence(ψ .- e))) / 2h
     end
     @test all(i -> abs(G[i] - fd[i]) < 0.02 * max(abs(fd[i]), 1), eachindex(ψ))
+
+    # The curvature's log determinant and inverse against dense algebra: the scan has
+    # fewer source terms than the eigenpairs `_top_eigenpairs` keeps, so they are exact.
+    systems, _ = FRa._profiled_systems(x, ctx, priors; exact = true)
+    for obs in (:phase, :amp)
+        (; sys, profile) = systems[obs]
+        (; g, S, cells, σ) = profile
+        n = size(sys.layout.K, 1)
+        B = zeros(n, length(cells.ranges))
+        D = zeros(length(cells.ranges))
+        for (j, rng) in pairs(cells.ranges), k in rng
+            q = cells.w[k] * abs2(g[cells.na[k]] * S[j] * conj(g[cells.nb[k]]))
+            D[j] += q
+            B[axes(sys.J, 2), j] .+= q .* (sys.J[cells.na[k], :] .+ σ .* sys.J[cells.nb[k], :])
+        end
+        live = D .> 0
+        A = Matrix(sys.layout.K) - B[:, live] * Diagonal(1 ./ D[live]) * B[:, live]'
+        joint = FRa._joint_curvature!(sys, profile, ctx.hpos)
+        @test joint.logdet ≈ logdet(A) rtol = 1.0e-10
+        Σ, Ainv = joint.inverse(), inv(A)
+        K = sys.layout.K
+        @test all(j -> all(p -> isapprox(FRa.nonzeros(Σ.Σ)[p], Ainv[FRa.rowvals(K)[p], j]; rtol = 1.0e-8, atol = 1.0e-12), FRa.nzrange(K, j)), axes(K, 2))
+    end
 end
 
 @testset "Adhoc models" begin

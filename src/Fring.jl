@@ -32,6 +32,7 @@ using FFTW: fft, fftfreq, plan_fft, MEASURE
 import DimensionalData
 using DimensionalData: lookup, dims, dimnum, Ti, At, DimArray, DimStack, AbstractDimArray, AbstractDimStack, @d
 using Statistics: median, mean, quantile
+using Random: Xoshiro, randn!
 using LinearAlgebra
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, findnz, nnz, nzrange, nonzeros, rowvals, blockdiag, dropzeros!, CHOLMOD
 import Graphs
