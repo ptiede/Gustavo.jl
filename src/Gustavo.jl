@@ -85,6 +85,7 @@ export outer_executor, inner_executor
 export each_group, model_components, solution_name, solver_gauge
 export supports_antenna_heterogeneity
 export scale_weights!, weight_scales, normalize_by_autocorrelations!
+export signal_information, flag_low_signal!
 export apriori_calibrate!, TsysPlacement, ScanMean, LinearInTime, NearestInTime
 # The solution surface: the container, its components, and serialization.
 export CalibrationSolution, ComponentFit

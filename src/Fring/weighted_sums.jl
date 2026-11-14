@@ -4,6 +4,22 @@
 # function barrier (a Measurement Set's layers do not infer).
 _member_layers(ms::XRadio.MeasurementSet) = (ms[:visibility], ms[:weight], ms[:flag])
 
+# A Measurement Set's visibility, weight and flag layers as plain
+# `(Frequency, Ti, BaselineID, Polarization)` arrays. A Measurement Set's layers
+# do not infer, so a per-sample loop runs where these have concrete types: in a
+# function taking a `Cubes`, or in the body of `with_cubes`.
+struct Cubes{V, W, F}
+    V::V
+    W::W
+    F::F
+end
+Cubes(ms::XRadio.MeasurementSet) = Cubes(map(_coherence_cube, _member_layers(ms))...)
+
+# Calls `f(V, W, F)` with the cubes of `ms`; the call on a `Cubes` is the
+# function barrier.
+with_cubes(f, ms::XRadio.MeasurementSet) = with_cubes(f, Cubes(ms))
+with_cubes(f, c::Cubes) = f(c.V, c.W, c.F)
+
 @inline _usable(f, w, v) = !f && w > 0 && isfinite(w) && isfinite(v)
 
 """

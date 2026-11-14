@@ -591,6 +591,20 @@ the solve warns. Any prior the joint solve accepts works: an `IIDPrior` (each AP
 its own), or a state-space prior along `Ti` with a proper start (`OUPrior`,
 `CARMAPrior`, or `RandomWalkPrior` with an `init`). A prior is required.
 
+Where a station loses the source for part of a scan, its log-amplitude falls
+and correcting for it scales that stretch's noise up, with its weight scaled
+down by the same factor squared. [`signal_information`](@ref) gives each
+station's information per AP relative to its peak in the scan, and
+[`flag_low_signal!`](@ref) flags the station's baselines where it falls below a
+fraction of that peak:
+
+```julia
+ad = fit(Adhoc(), g)
+info = signal_information(ad, g)          # (Scan, AntennaName, Ti), peak 1
+flag_low_signal!(g, info; below = 0.01)   # signal under a tenth of its best
+calibrate!(ad, g)
+```
+
 ### The gauge
 
 The data see only phase differences within an AP, so the priors hold each AP's
