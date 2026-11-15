@@ -593,9 +593,9 @@ its own), or a state-space prior along `Ti` with a proper start (`OUPrior`,
 
 Where a station loses the source for part of a scan, its log-amplitude falls
 and correcting for it scales that stretch's noise up, with its weight scaled
-down by the same factor squared. [`signal_information`](@ref) gives each
+down by the same factor squared. [`signal_information`](@ref Gustavo.signal_information) gives each
 station's information per AP relative to its peak in the scan, and
-[`flag_low_signal!`](@ref) flags the station's baselines where it falls below a
+[`flag_low_signal!`](@ref Gustavo.flag_low_signal!) flags the station's baselines where it falls below a
 fraction of that peak:
 
 ```julia
