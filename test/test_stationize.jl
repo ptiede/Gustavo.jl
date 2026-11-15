@@ -163,7 +163,7 @@ end
         s32 = stationize(d, bl, pols, nant; opts = FR.Stationization(eltype = Float32))
         @test s32.ref_covered == s64.ref_covered
         @test s32.delay ≈ s64.delay atol = 16 * eps(Float32) * maximum(abs, s64.delay)
-        @test s32.rate ≈ s64.rate atol = 1.0e-9
+        @test s32.rate ≈ s64.rate atol = 16 * eps(Float32) * maximum(abs, s64.rate)
     end
 
     layout = perfeed_scan_layout(nant)
@@ -691,7 +691,7 @@ end
         # A delay-rate floor needs the scan's mean frequency.
         @test_throws "needs the scan's mean frequency" stationize(
             s.D, s.bl, s.pols, 4; gauge = PinAntenna(1), spreads = (;),
-            opts = FR.Stationization(loss = FR.LeastSquares()),
+            opts = FR.Stationization(loss = FR.LeastSquares(), systematic_delay_rate = 2.3e-15),
         )
         # `LeastSquares` without floors needs no geometry: scaling every weight
         # in a system by a common factor leaves the solution invariant (to
@@ -802,12 +802,29 @@ end
     @test maximum(abs, θs .- θp) < 1.0e-11
 end
 
+@testset "Stationize: a rate alias on the weakest baseline stays on it" begin
+    # Three stations, one closure. The weakest baseline's search picked a rate
+    # alias 0.52 Hz off; the two strong baselines see no rate.
+    bl = all_baselines(3)
+    pols = [(1, 1), (2, 2)]
+    D = inject_detections(bl, pols, zeros(3, 2), zeros(3, 2))
+    snrs = Dict((1, 2) => 117.0, (1, 3) => 37.0, (2, 3) => 704.0)
+    for (bi, b) in pairs(bl), p in eachindex(pols)
+        alias = b == (1, 3) ? -0.52 : 0.0
+        D[bi, p] = merge(D[bi, p], (; rate = alias, snr = snrs[b]))
+    end
+    strong_rates(sol) = maximum(abs(sol.rate[a, f] - sol.rate[b, f]) for (a, b) in ((1, 2), (2, 3)), f in 1:2)
+    @test strong_rates(stationize(D, bl, pols, 3)) < 4 * rate_sigma(117.0)
+    @test strong_rates(stationize(D, bl, pols, 3; opts = FR.Stationization(irls_iters = 5))) > 4 * rate_sigma(117.0)
+    @test strong_rates(stationize(D, bl, pols, 3; opts = FR.Stationization(systematic_delay_rate = 2.3e-15))) > 0.1
+end
+
 @testset "Stationize: systematic floor constructor defaults" begin
     o = FR.Stationization(systematic_delay = 3.0e-12, systematic_delay_rate = 1.0e-14)
     @test o.systematic_delay == 3.0e-12
     @test o.systematic_delay_rate == 1.0e-14
     @test FR.Stationization().systematic_delay == 0
-    @test FR.Stationization().systematic_delay_rate == 2.3e-15
+    @test FR.Stationization().systematic_delay_rate == 0
     @test FR._rate_floor(2.0e-15, 86.0e9) ≈ 1.72e-4
     @test FR._rate_floor(0.0, nothing) == 0
     @test_throws "needs the scan's mean frequency" FR._rate_floor(2.0e-15, nothing)
