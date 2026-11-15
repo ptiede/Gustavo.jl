@@ -127,10 +127,10 @@ Weights come from the noise model rather than the residual spread, so
 are floors added in quadrature to a row's CRB uncertainty:
 `w = 1/(σ_CRB² + systematic²)`. A rate row's floor is `systematic_delay_rate`
 times its scan's mean frequency (`freq_mean`), since a non-dispersive delay
-rate τ̇ moves the fringe rate by `ν·τ̇`. The default delay-rate floor, 2.3e-15,
-is the tropospheric floor measured at 43 GHz on the VLBA (a fringe-rate floor
-of 1e-4 Hz). Without a floor, data with no real systematics drives `z` to the
-numerical noise floor and the loss reweights rounding noise.
+rate τ̇ moves the fringe rate by `ν·τ̇`. Both default to 0. A floor above the
+CRB σ of a scan's rows gives them equal weight, and the robust loss can then
+no longer tell which side of an inconsistent closure is wrong: it splits the
+misfit among the closure's rows instead of leaving it on the weakest.
 `weak_sys_scale` multiplies the total σ of an above-threshold row, floor
 included.
 
@@ -156,8 +156,8 @@ Stationization(; eltype::Type{<:AbstractFloat} = Float64, kw...) = Stationizatio
 
 function Stationization{T}(;
         pfa_max = 1.0e-4, weak_sys_scale = 1.0e3,
-        loss = SoftL1(), loss_scale = 8.0, irls_iters = 5,
-        systematic_delay = 0.0, systematic_delay_rate = 2.3e-15,
+        loss = SoftL1(), loss_scale = 8.0, irls_iters = 20,
+        systematic_delay = 0.0, systematic_delay_rate = 0.0,
         max_em_iterations = 200, em_tolerance = 1.0e-3,
     ) where {T}
     return Stationization{T, typeof(loss)}(

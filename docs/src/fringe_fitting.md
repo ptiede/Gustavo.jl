@@ -413,16 +413,21 @@ gives ``\sigma_\nu = B/\sqrt{12}``. The actual spread is used instead, which
 remains correct for sparse or unevenly spaced bands, where the contiguous
 expression overstates the lever arm.
 
-A systematic floor is added in quadrature,
-``w = 1/(\sigma_\mathrm{CRB}^2 + \sigma_\mathrm{sys}^2)``. Without it, data free
-of systematics drives the normalized residuals to the numerical noise floor,
-and the robust loss below then reweights rounding error. The rate floor is a
+An optional systematic floor is added in quadrature,
+``w = 1/(\sigma_\mathrm{CRB}^2 + \sigma_\mathrm{sys}^2)``. The rate floor is a
 delay rate, ``\sigma_\mathrm{sys} = \bar\nu\,\sigma_{\dot\tau}`` with
 ``\bar\nu`` the scan's mean frequency, because a non-dispersive delay rate
 ``\dot\tau``, such as the troposphere's, moves the fringe rate by
 ``\bar\nu\dot\tau``; a floor stated in hertz would hold at one observing
-frequency only. The default ``\sigma_{\dot\tau} = 2.3\times10^{-15}`` is the
-floor measured on the VLBA at 43 GHz, ``10^{-4}`` Hz in fringe rate.
+frequency only. Both floors default to zero. A station-based systematic, such
+as the troposphere over one station within a scan, closes and is absorbed by
+that station's parameter, so it adds nothing to a row's error. A floor above
+the CRB ``\sigma`` of a scan's rows gives them equal weight. Far out in its tail
+the robust loss below minimizes ``\sum_i |r_i|/\sigma_i`` over the rows of an
+inconsistent closure, which has a unique minimum, with the whole misfit on the
+row of largest ``\sigma``, only while the ``\sigma_i`` differ. With equal
+``\sigma_i`` it splits the misfit among the closure's rows and moves every
+station on it.
 
 A weighted least-squares solution is invariant under scaling every weight of a
 system by a common constant, and ``\sigma_\nu``, ``\sigma_t`` are common to all
