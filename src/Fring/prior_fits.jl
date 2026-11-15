@@ -47,17 +47,15 @@ marginal likelihood: zero-mean, or with `mean` integrated out under a flat
 prior, given as one level group id per block or one design per block
 (`_level_design`). A walk without an `init` leaves its own level free, so it
 takes no `mean`; its likelihood is
-the restricted one ([`_random_walk_loglik`](@ref)). With `branches`, the blocks
-are phases on unknown 2π branches and the likelihood is summed over their
-branches ([`_branch_filter`](@ref)).
+the restricted one ([`_random_walk_loglik`](@ref)).
 
 Blocks without data (for a walk without an `init` of order `m`, with fewer
 than `m` usable segments) are ignored; with none left the hyperpriors cannot
 be resolved and this throws.
 """
-_estimate_hypers(::Nothing, ys, ws, xs; mean = nothing, branches::Bool = false) = nothing
+_estimate_hypers(::Nothing, ys, ws, xs; mean = nothing) = nothing
 
-function _estimate_hypers(prior::RandomWalkPrior, ys, ws, xs; mean = nothing, branches::Bool = false)
+function _estimate_hypers(prior::RandomWalkPrior, ys, ws, xs; mean = nothing)
     _proper_prior(prior) || isnothing(mean) || throw(
         ArgumentError("a RandomWalkPrior without an init leaves its level free; it takes no mean"),
     )
@@ -72,16 +70,16 @@ function _estimate_hypers(prior::RandomWalkPrior, ys, ws, xs; mean = nothing, br
     problems = [_random_walk_problem(ys[i], ws[i], xs[i]) for i in usable]
     neglp = _RandomWalkNegLogPost(
         [_masked(ys[i], ws[i]) for i in usable], first.(problems), getindex.(problems, 2), last.(problems),
-        m, prior.init, prior.σ, isnothing(mean) ? nothing : mean[usable], branches,
+        m, prior.init, prior.σ, isnothing(mean) ? nothing : mean[usable],
     )
-    lσ, _ = _nelder_mead(neglp, T[log(_random_walk_σ_seed(ys[usable], ws[usable], xs[usable], m; branches))])
+    lσ, _ = _nelder_mead(neglp, T[log(_random_walk_σ_seed(ys[usable], ws[usable], xs[usable], m))])
     return RandomWalkPrior(; order = m, σ = exp(only(lσ)), prior.init)
 end
 
 # The negative log posterior of a random walk's `log σ` over blocks already set
 # up for the filter (masked values `ys`, variances `rs`, rescaled coordinates
 # `us`, spacings `hs`): their pooled marginal likelihood (restricted, for a flat
-# init or with `mean`; over the 2π branches, with `branches`), the hyperprior
+# init or with `mean`), the hyperprior
 # density of `σ`, and the Jacobian `log σ`.
 struct _RandomWalkNegLogPost{Y, R, U, H, S, P, L}
     ys::Y
@@ -92,7 +90,6 @@ struct _RandomWalkNegLogPost{Y, R, U, H, S, P, L}
     init::S
     hyper::P
     mean::L
-    branches::Bool
 end
 
 function (f::_RandomWalkNegLogPost)(p)
@@ -100,8 +97,7 @@ function (f::_RandomWalkNegLogPost)(p)
     σ = exp(lσ)
     S = eltype(eltype(f.rs))
     models = [_random_walk_model(f.order, σ, f.init, h, S) for h in f.hs]
-    loglik = f.branches ? _branch_pooled_loglik : _pooled_loglik
-    lp = loglik(models, f.ys, f.rs, f.us, f.mean)::S + logdensityof(f.hyper, σ) + lσ
+    lp = _pooled_loglik(models, f.ys, f.rs, f.us, f.mean)::S + logdensityof(f.hyper, σ) + lσ
     if isnothing(f.init)
         for h in f.hs
             lp -= _flat_start_jacobian(f.order, h)
@@ -110,7 +106,7 @@ function (f::_RandomWalkNegLogPost)(p)
     return isfinite(lp) ? -lp : oftype(lp, Inf)
 end
 
-function _estimate_hypers(prior::OUPrior, ys, ws, xs; mean = nothing, branches::Bool = false)
+function _estimate_hypers(prior::OUPrior, ys, ws, xs; mean = nothing)
     is_fixed_hyper(prior.scale) && is_fixed_hyper(prior.σ) && return prior
     usable = [i for i in eachindex(ys, ws, xs) if any(k -> _shape_usable(ys[i][k], ws[i][k]), eachindex(ys[i], ws[i]))]
     isempty(usable) && throw(
@@ -123,12 +119,12 @@ function _estimate_hypers(prior::OUPrior, ys, ws, xs; mean = nothing, branches::
     τ, σ2 = _map_ou_hypers(
         yus, wus, xus, prior.scale, prior.σ;
         τ_lo, τ_hi, σ2_seed = _init_track_var(reduce(vcat, yus), reduce(vcat, wus)),
-        mean = isnothing(mean) ? nothing : mean[usable], branches,
+        mean = isnothing(mean) ? nothing : mean[usable],
     )
     return OUPrior(; scale = τ, σ = sqrt(σ2))
 end
 
-function _estimate_hypers(prior::CARMAPrior, ys, ws, xs; mean = nothing, branches::Bool = false)
+function _estimate_hypers(prior::CARMAPrior, ys, ws, xs; mean = nothing)
     _hyper_count(prior) == 0 && return prior
     usable = [i for i in eachindex(ys, ws, xs) if any(k -> _shape_usable(ys[i][k], ws[i][k]), eachindex(ys[i], ws[i]))]
     isempty(usable) && throw(
@@ -142,7 +138,7 @@ function _estimate_hypers(prior::CARMAPrior, ys, ws, xs; mean = nothing, branche
     σ0 = sqrt(_init_track_var(reduce(vcat, yus), reduce(vcat, ws[usable])))
     neglp = _CARMANegLogPost(
         prior, yus, first.(problems), us, last.(problems),
-        isnothing(mean) ? nothing : mean[usable], branches, box,
+        isnothing(mean) ? nothing : mean[usable], box,
     )
     lθ, _ = _nelder_mead(neglp, _into_box(_carma_seed(prior, Δ, W, σ0), box))
     return _with_log_hypers(prior, lθ)
@@ -166,8 +162,8 @@ end
 
 # The negative log posterior of a `CARMAPrior`'s log hyperparameters over blocks
 # set up for the filter (masked values `ys`, variances `rs`, coordinates `us` of
-# unit `hs`): their pooled marginal likelihood (with `mean` integrated out; over
-# the 2π branches, with `branches`) and the hyperprior density over the logs,
+# unit `hs`): their pooled marginal likelihood (with `mean` integrated out) and
+# the hyperprior density over the logs,
 # restricted to the support the blocks measure, `box` (`_log_hyper_box`).
 struct _CARMANegLogPost{P, Y, R, U, H, L, B}
     prior::P
@@ -176,7 +172,6 @@ struct _CARMANegLogPost{P, Y, R, U, H, L, B}
     us::U
     hs::H
     mean::L
-    branches::Bool
     box::B
 end
 
@@ -186,8 +181,7 @@ function (f::_CARMANegLogPost)(lθ)
     S = eltype(eltype(f.rs))
     dim = Val(_statedim(f.prior))
     models = [_carma_model(dim, p, h, S) for h in f.hs]
-    loglik = f.branches ? _branch_pooled_loglik : _pooled_loglik
-    lp = loglik(models, f.ys, f.rs, f.us, f.mean) + _log_hyperprior(f.prior, lθ)
+    lp = _pooled_loglik(models, f.ys, f.rs, f.us, f.mean) + _log_hyperprior(f.prior, lθ)
     return isfinite(lp) ? -lp : oftype(lp, Inf)
 end
 
@@ -374,7 +368,7 @@ end
 # segments, less their noise variance, against the walk's variance of an m-th
 # difference at the median spacing `h`, `c_m σ² h^(2m−1)`. `c_m` is the order-2m
 # cardinal B-spline at its center (1, 2/3, 11/20, …).
-function _random_walk_σ_seed(ys, ws, xs, m::Integer; branches::Bool = false)
+function _random_walk_σ_seed(ys, ws, xs, m::Integer)
     T = _blocks_eltype(ys, ws)
     c = sum(k -> (-1)^k * binomial(2m, k) * T(m - k)^(2m - 1), 0:m) / factorial(2m - 1)
     binom = [binomial(m, k) for k in 0:m]
@@ -387,9 +381,6 @@ function _random_walk_σ_seed(ys, ws, xs, m::Integer; branches::Bool = false)
         for j in firstindex(o):(lastindex(o) - m)
             idx = o[j:(j + m)]
             d = sum((-1)^k * binom[k + 1] * T(y[idx[k + 1]]) for k in 0:m)
-            # An m-th difference has integer coefficients, so on unknown branches it
-            # is known modulo 2π.
-            branches && (d = rem2pi(d, RoundNearest))
             sig += d^2
             noise += sum(binom[k + 1]^2 / T(w[idx[k + 1]]) for k in 0:m)
             nd += 1

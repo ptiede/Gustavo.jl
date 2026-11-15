@@ -42,7 +42,6 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     ps, _ = _build_fringe_ps(;
         nant, nspw, nchan, bandpass = bp_true, amp_bandpass = abp_true,
     )
-    adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
     fm = default_fringe_model()
 
     fr_n, bp_n = _fit_chain(
@@ -69,11 +68,11 @@ _by_channel(p) = permutedims(dropdims(parent(p); dims = 1), (2, 1, 3, 4))
     end
 
     @testset "fits run in any order" begin
-        # AdhocPhase solves for a fringe-corrected residual, but that is an
+        # Adhoc solves for a fringe-corrected residual, but that is an
         # assumption of its own solve kernel, not a checked precondition: fit
         # before the fringe fit, it fits the UNCORRECTED residual instead and
         # completes without error — a quietly worse fit, not a rejection.
-        solts = _fit_chain((AdhocPhase(; gauge = PinAntenna(1)), FringeClosure(; model = fm, gauge = PinAntenna(1))), ps)
+        solts = _fit_chain((Adhoc(; gauge = PinAntenna(1)), FringeClosure(; model = fm, gauge = PinAntenna(1))), ps)
         @test all(s -> s isa CAL.CalibrationSolution, solts)
         # Bandpass's model is self-contained, so bandpass-before-fringe is legal.
         solbf = _fit_chain((Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1)), FringeClosure(; model = fm, gauge = PinAntenna(1))), ps)
@@ -511,8 +510,7 @@ end
     @test nfilter <= 1
 
     # With one branch history the summed likelihood is that history's own, as the
-    # filter computes it on the lifted track, so the hyperparameters estimated over
-    # every branch match those of the lifted track. A flat start leaves the first
+    # filter computes it on the lifted track. A flat start leaves the first
     # sample's branch free, so a clean track has one history.
     truth = cumsum(cumsum(sq .* randn(rng, n))) .+ 0.3 .* x
     wclean = fill(1.0e4, n)
@@ -523,9 +521,6 @@ end
     @test length(bf.histories) == 1
     @test bf.loglik ≈ bf.best ≈ FP._kalman_loglik(model, only(bf.histories).lift, r, u)
     @test maximum(abs, diff(only(bf.histories).lift .- truth)) < 0.1
-    hyper = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(0.02), 1.0))
-    @test FP._estimate_hypers(hyper, [θ], [wclean], [x]; branches = true).σ ≈
-        FP._estimate_hypers(hyper, [only(bf.histories).lift], [wclean], [x]).σ rtol = 1.0e-6
 end
 
 @testset "Bandpass: EM's fixed point is the type-II MAP" begin
@@ -537,7 +532,7 @@ end
         A = FP.sparse(randn(rng, n, n) .* (rand(rng, n, n) .< 4 / n))
         A = A * A' + 5I
         F = FP._factor(A, rand(rng, n))
-        Σ = FP._selected_inverse(F, A)
+        Σ = FP.SelectedInverse(F, A)
         pattern = [(i, j) for j in 1:n for i in FP.rowvals(A)[FP.nzrange(A, j)]]
         @test maximum(((a, b),) -> abs(Σ(a, b) - inv(Matrix(A))[a, b]), pattern) < 1.0e-12
         outside = first((a, b) for a in 1:n, b in 1:n if !((a, b) in pattern))
@@ -553,19 +548,25 @@ end
     w = fill(400.0, m)
     # With `constant`, the data see the track up to its constant, as in the
     # joint solve, which matches the type-II MAP with that constant integrated out.
-    function em_map(spec, resolved; constant = false)
+    function moments(spec, resolved; constant = false)
         t = (; gains = collect(1:m), x = xf, pieces = [1:m], constants = [1], prior = spec)
         H = constant ? _blind_to_constant(w) : FP.spdiagm(w)
         sys = FP._posterior_system(H, H * y, FP.sparse(1.0FP.I, m, m), zeros(m), [t], xf)
         K, h, _ = FP._reduce!(sys, FP._assemble!(sys.layout, [resolved]), 0.0)
         G = FP._factor(K, sys.key)
         chains = only(sys.chains)
-        mom = FP._chain_moments(chains, G \ h, FP._selected_inverse(G, K), first(chains).dim)
-        return first(FP._m_step(spec, resolved, chains, mom))
+        return chains, FP._chain_moments(chains, G \ h, FP.SelectedInverse(G, K), first(chains).dim)
     end
+    em_map(spec, resolved; constant = false) = first(FP._m_step(spec, resolved, moments(spec, resolved; constant)...))
+    # The Fisher identity's gradient of the log evidence over the log
+    # hyperparameters, which vanishes at the type-II MAP.
+    hyper_gradient(spec, resolved; constant = false) =
+        first(FP._hyper_gradient(spec, FP._log_hypers(spec, resolved), moments(spec, resolved; constant)...))
     rw = CAL.RandomWalkPrior(; order = 2, σ = LogNormal(log(1.0e-12), 2.0))
     σ̂ = FP._estimate_hypers(rw, [y], [w], [xf]).σ
     @test em_map(rw, CAL.RandomWalkPrior(; order = 2, σ = σ̂)).σ ≈ σ̂ rtol = 1.0e-3
+    @test abs(only(hyper_gradient(rw, CAL.RandomWalkPrior(; order = 2, σ = σ̂)))) < 1.0e-2
+    @test only(hyper_gradient(rw, CAL.RandomWalkPrior(; order = 2, σ = 3σ̂))) < -1
 
     # An OU prior, both hyperparameters, its band constant integrated out.
     ou = CAL.OUPrior(; scale = LogNormal(log(1.0e7), 1.0), σ = LogNormal(log(0.3), 1.0))
@@ -578,6 +579,9 @@ end
     next = em_map(ou, start; constant = true)
     @test abs(log(next.scale / ref.scale)) < abs(log(start.scale / ref.scale))
     @test abs(log(next.σ / ref.σ)) < abs(log(start.σ / ref.σ))
+    @test maximum(abs, hyper_gradient(ou, ref; constant = true)) < 1.0e-2
+    g = hyper_gradient(ou, start; constant = true)
+    @test g[1] < 0 && g[2] > 0
 
     # A CARMA prior with a moving-average root, whose latent states change with
     # the hyperparameters: EM's fixed point is still the type-II MAP.
@@ -587,6 +591,11 @@ end
     )
     ref = FP._estimate_hypers(carma, [y], [w], [xf]; mean = [1])
     @test FP._log_hypers(carma, em_map(carma, ref; constant = true)) ≈ FP._log_hypers(carma, ref) atol = 1.0e-3
+    # Its MA scale rests on its support's lower bound, one sample spacing, so
+    # there the gradient points out of the support and vanishes along the rest.
+    g = hyper_gradient(carma, ref; constant = true)
+    @test FP._log_hypers(carma, ref)[2] ≈ log(xf[2] - xf[1])
+    @test g[2] < 0 && abs(g[1]) < 1.0e-2 && abs(g[3]) < 1.0e-2
 end
 
 @testset "_bandpass_track_report: counts and the unfitted observable" begin

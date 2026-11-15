@@ -104,7 +104,7 @@ _rms(x) = sqrt(sum(abs2, x) / length(x))
     closure = FringeClosure(; model = track_model, gauge, closure = Stationization(; loss = OutlierMixture()))
     track = fit(closure, fit(search, bandpassed))
     tracked = _precal(track, bandpassed)
-    flat = _precal(fit(AdhocPhase(; gauge), tracked), tracked)
+    flat = _precal(fit(Adhoc(; gauge), tracked), tracked)
     sums = _synth_sums(flat)
 
     @test isempty(track.info.flagged_ant)

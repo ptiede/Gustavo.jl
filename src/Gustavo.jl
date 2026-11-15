@@ -64,7 +64,7 @@ export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate, calibrate!
 export FringeSearch, FringeClosure, Stationization, OutlierMixture, default_fringe_model, Bandpass,
-    AdhocPhase, default_adhoc_model, JointSmoother
+    Adhoc, default_adhoc_model, JointSmoother
 # The gain-model vocabulary: everything a `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare
 # `using Gustavo`.
@@ -85,6 +85,7 @@ export outer_executor, inner_executor
 export each_group, model_components, solution_name, solver_gauge
 export supports_antenna_heterogeneity
 export scale_weights!, weight_scales, normalize_by_autocorrelations!
+export signal_information, flag_low_signal!
 export apriori_calibrate!, TsysPlacement, ScanMean, LinearInTime, NearestInTime
 # The solution surface: the container, its components, and serialization.
 export CalibrationSolution, ComponentFit
@@ -92,7 +93,5 @@ export gains, plot_gain_phases
 export save_solution, load_solution
 
 # Unexported because the names are common: a solver author extends `solve`.
-@static if VERSION >= v"1.11"
-    eval(Meta.parse("public solve, SolveContext"))
-end
+public solve, SolveContext
 end

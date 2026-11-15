@@ -7,6 +7,7 @@ using Random
 using LinearAlgebra
 using Statistics: mean, median, std
 using Distributions: LogNormal, Normal, MvNormal
+import Distributions
 
 const FRpf = Gustavo.Fring
 const CALpf = Gustavo.Calibration
@@ -422,10 +423,15 @@ end
     σ1 = 1.0e-3
     @test energy(CALpf.RandomWalkPrior(; order = 1, σ = σ1)) ≈ sum(abs2.(diff(y)) ./ (2 .* σ1^2 .* diff(x))) rtol = 1.0e-10
 
-    # A stationary OU from its stationary start: the Gaussian's whitened energy.
+    # A stationary OU from its stationary start: the Gaussian's whitened energy,
+    # and with the log normalizer its log density.
     τ, σ = 3.0e6, 0.5
     P = inv(_ou_cov(x, τ, σ^2))
     @test energy(CALpf.OUPrior(; scale = τ, σ)) ≈ dot(y, P * y) / 2 rtol = 1.0e-10
+    ou = CALpf.OUPrior(; scale = τ, σ)
+    lay = FRpf._quadratic_layout([FRpf._track_chains!(copy(x), (; gains = collect(1:n), x, pieces = [1:n], constants = [1], prior = ou))], n)
+    @test -FRpf._prior_energy(lay, [ou], y) - FRpf._prior_log_normalizer(lay, [ou]) ≈
+        Distributions.logpdf(MvNormal(zeros(n), Symmetric(_ou_cov(x, τ, σ^2))), y) rtol = 1.0e-10
 
     # A stiff second-order walk from a flat start, against a Kalman filter in
     # 256-bit arithmetic with a start variance far above any step's.

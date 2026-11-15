@@ -20,7 +20,9 @@ Measurement Sets, `ProcessingSet(out)` for processing sets.
 
 Units run on `exec`'s `outer_executor`, largest first, and a unit's
 Measurement Sets are read on its `inner_executor`. With more than one task,
-`f` must be safe to run concurrently. `exec.progress` receives
+`f` must be safe to run concurrently; the units are read one at a time, and
+each is released and collected before its task reads the next, so memory holds
+the units `f` is running on and the one being read. `exec.progress` receives
 `(:mapsets, done, total)` as units finish.
 
 ```julia
@@ -39,8 +41,7 @@ bp = fit(Bandpass(; model, gauge), ProcessingSet(averaged))
 function mapsets(f, src; exec::ExecutionConfig = ExecutionConfig())
     units = collect(values(src))
     sizes = [_unit_bytes(u) for u in units]
-    work(unit) = f(_read_unit(unit, inner_executor(exec)))
-    results = _map_groups(work, units, sizes, exec; stage = :mapsets)
+    results = _map_read(f, unit -> _read_unit(unit, inner_executor(exec)), units, sizes, exec; stage = :mapsets)
     return OrderedDict(zip(keys(src), results))
 end
 

@@ -11,7 +11,7 @@
     sols = _fit_chain(
         (
             FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge),
-            AdhocPhase(FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0)); gauge),
+            Adhoc(; gauge),
         ), ps,
     )
     sol = first(sols)

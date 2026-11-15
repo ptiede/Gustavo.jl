@@ -44,7 +44,7 @@
 
         @testset "$(nameof(typeof(spec)))" for spec in (
                 FringeClosure(; gauge = PinAntenna(1)),
-                AdhocPhase(; gauge = PinAntenna(1)),
+                Adhoc(; gauge = PinAntenna(1)),
                 Bandpass(; model = _bandpass_model(), gauge = PinAntenna(1)),
             )
             a = _fit_one(spec, ps)

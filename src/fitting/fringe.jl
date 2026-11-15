@@ -29,8 +29,9 @@ function StatsAPI.fit(
     _check_blas_threads()
     groups = groupby(ps, XRadio.ByScan())
     sizes = [_group_bytes(g) for g in values(groups)]
-    return _map_groups(groups, sizes, exec; stage = :fringe_search) do group
-        _search_one_scan(search, _read_group(group, inner_executor(exec)), at, inner_executor(exec))
+    read(group) = _read_group(group, inner_executor(exec))
+    return _map_read(read, groups, sizes, exec; stage = :fringe_search) do group
+        _search_one_scan(search, group, at, inner_executor(exec))
     end
 end
 

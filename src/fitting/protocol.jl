@@ -127,12 +127,15 @@ other than θ entries belonging to its own scan; it returns its scan's
 contribution instead, and the caller combines the returned values.
 """
 function each_group(f::F, ctx::SolveContext) where {F}
-    out = _map_groups(ctx.groups, ctx.sizes, ctx.exec; stage = ctx.stage) do group
+    function read(group)
         ta = time_ns()
         data = _read_group(group, inner_executor(ctx.exec))
+        return (; data, decode = (time_ns() - ta) / 1.0e9)
+    end
+    out = _map_read(read, ctx.groups, ctx.sizes, ctx.exec; stage = ctx.stage) do (; data, decode)
         tb = time_ns()
         r = f(data)
-        (; decode = (tb - ta) / 1.0e9, work = (time_ns() - tb) / 1.0e9, r)
+        (; decode, work = (time_ns() - tb) / 1.0e9, r)
     end
     push!(ctx.passes, (; decode = Float64[o.decode for o in out], work = Float64[o.work for o in out]))
     return map(o -> o.r, out)
@@ -183,6 +186,25 @@ function _map_groups(work::F, groups, sizes, exec::ExecutionConfig; stage::Symbo
     end
     return _scheduled_map(wrapped, items, sizes; executor = outer_executor(exec))
 end
+
+# `work(read(item))` for each of `items` (their values), as `_map_groups` runs
+# them. With more than one task at once the reads take turns and a task collects
+# its group before reading the next, so the groups in memory are those being
+# worked on and the one being read: concurrent reads would each hold their
+# decompression buffers, and a finished group, having outlived young
+# collections, waits for a full one.
+function _map_read(work::F, read::R, items, sizes, exec::ExecutionConfig; stage::Symbol) where {F, R}
+    max_tasks(outer_executor(exec)) > 1 || return _map_groups(work ∘ read, items, sizes, exec; stage)
+    return _map_groups(items, sizes, exec; stage) do item
+        data = lock(() -> read(item), _READ_LOCK)
+        r = work(data)
+        data = nothing
+        GC.gc()
+        return r
+    end
+end
+
+const _READ_LOCK = ReentrantLock()
 
 # Largest-first parallel map: run `work` over `items` on `executor`, dispatching
 # the largest item (by `sizes`) first so the long poles start immediately.

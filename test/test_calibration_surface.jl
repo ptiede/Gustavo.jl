@@ -7,7 +7,7 @@
     @testset "fit, then calibrate" begin
         ps, _ = _build_fringe_ps()
         gauge = PinAntenna(1)
-        sols = _fit_chain((FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(; gauge)), ps)
+        sols = _fit_chain((FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge), Adhoc(; gauge)), ps)
         @test all(s -> s isa CAL.CalibrationSolution, sols)
         @test all(s -> length(s.geom.antennas) == 4, sols)
         @test [s.name for s in sols] == [:fringe, :bandpass, :adhoc]
@@ -76,10 +76,9 @@
         @test b.model == model
         @test b.smoother isa FP.JointSmoother
 
-        t = AdhocPhase(; gauge = PinAntenna(1))
+        t = Adhoc(; gauge = PinAntenna(1))
         @test t.model == default_adhoc_model()
-        @test t.smoother == FP.PerTrackAdhocSmoother()
-        @test t.model.phase.adhoc.prior == FP.default_adhoc_prior()
+        @test t.model.phase.adhoc.prior == FP.default_adhoc_phase_prior()
     end
 end
 

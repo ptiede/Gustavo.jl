@@ -1,6 +1,6 @@
-# ── AdhocPhase + calibrate ────────────────────────────────────────────────────
+# ── Adhoc + calibrate ────────────────────────────────────────────────────
 #
-# The fringe fit, Bandpass and AdhocPhase fit in turn on a ProcessingSet,
+# The fringe fit, Bandpass and Adhoc fit in turn on a ProcessingSet,
 # each on the data the earlier solutions corrected:
 # - θ is bit-deterministic across runs, and the multi-scan solve flattens the
 #   data.
@@ -29,8 +29,7 @@ function _worst_parallel_coherence(corr)
     return worst
 end
 
-@testset "AdhocPhase + output sink (new engine)" begin
-    adhoc = FP.PerTrackAdhocSmoother(; options = FP.AdhocOptions(; snr_floor = 0.0))
+@testset "Adhoc + output sink (new engine)" begin
     gauge = PinAntenna(1)
     nant = 4
     nglob = 16
@@ -55,7 +54,7 @@ end
         bandpass = bp_true, amp_bandpass = abp_true,
     )
     fm = default_fringe_model()
-    specs = (FringeClosure(; model = fm, gauge), Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(adhoc; gauge))
+    specs = (FringeClosure(; model = fm, gauge), Bandpass(; model = _bandpass_model(), gauge), Adhoc(; gauge))
     sols_n = _fit_chain(specs, ps; exec = ExecutionConfig())
     ad_n = last(sols_n)
 
@@ -75,9 +74,9 @@ end
         @test _worst_parallel_coherence(_calibrate_chain(sols_n, ps)) > 0.99
     end
 
-    @testset "fringe fit then AdhocPhase (no bandpass)" begin
+    @testset "fringe fit then Adhoc (no bandpass)" begin
         fr_fs, ad_fs = _fit_chain(
-            (FringeClosure(; model = fm, gauge), AdhocPhase(adhoc; gauge)), ps;
+            (FringeClosure(; model = fm, gauge), Adhoc(; gauge)), ps;
             exec = ExecutionConfig(),
         )
         components = vcat(fr_fs.components, ad_fs.components)
@@ -97,10 +96,27 @@ end
                 for (k, ms) in pairs(ps)
         )
         fit(Bandpass(; model = _bandpass_model(), gauge), ps)
-        fit(AdhocPhase(adhoc; gauge), ps)
+        fit(Adhoc(; gauge), ps)
         @test all(
             isequal(snap[k][1], parent(ms[:visibility])) && isequal(snap[k][2], parent(ms[:weight]))
                 for (k, ms) in pairs(ps)
         )
     end
+end
+
+@testset "Adhoc: a scan with no unflagged data is left unsolved, with a warning" begin
+    ps, _ = _build_fringe_ps(; nant = 3, nspw = 1, nscans = 2)
+    scan(ms) = only(unique(String.(collect(ms[:scan_name]))))
+    flagged = scan(first(values(ps)))
+    for ms in values(ps)
+        scan(ms) == flagged && (parent(ms[:flag]) .= true)
+    end
+    sol = @test_logs (:warn, "Adhoc: scan $flagged carries no unflagged cross-correlation; its gains are not solved.") match_mode = :any fit(
+        Adhoc(; gauge = PinAntenna(1)), ps,
+    )
+    θ = _per_integration_params(sol)
+    times = unique(reduce(vcat, [collect(XRadio.times(ms)) for ms in values(ps) if scan(ms) == flagged]))
+    @test all(iszero, θ[Ti = At(times)])
+    @test any(!=(0), θ)
+    @test all(obs -> count(isnothing, sol.info.priors[obs]) == length(sol.info.priors[obs]) ÷ 2, (:phase, :logamp))
 end

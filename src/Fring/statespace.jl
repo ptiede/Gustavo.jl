@@ -153,7 +153,7 @@ function transition(m::CARMAModel{P}, Δ, ::Type{T}) where {P, T}
     stiffness = opnorm(F, Inf) * abs(T(Δ))
     k = stiffness > 1 ? ceil(Int, log2(stiffness)) : 0
     d = abs(T(Δ)) / 2^k
-    E = exp([-F G; zero(F) F'] .* d)
+    E = _generic_exp(vcat(hcat(-F, G), hcat(zero(F), F')) .* d)
     A = SMatrix{P, P, T}(ntuple(l -> E[P + 1 + (l - 1) ÷ P, P + 1 + (l - 1) % P], Val(P * P)))
     E12 = SMatrix{P, P, T}(ntuple(l -> E[1 + (l - 1) % P, P + 1 + (l - 1) ÷ P], Val(P * P)))
     Q = A * E12
@@ -163,6 +163,25 @@ function transition(m::CARMAModel{P}, Δ, ::Type{T}) where {P, T}
         A = A * A
     end
     return A, (Q + Q') / 2
+end
+
+# The exponential of a small matrix `M` in any element type, so that dual
+# numbers carry derivatives through it: `M` scaled to norm at most 1/2, its
+# Taylor series to degree 13 (truncation below `Float64` rounding there), and
+# the result squared back.
+function _generic_exp(M)
+    n = opnorm(M, Inf)
+    s = n > 1 / 2 ? ceil(Int, log2(n)) + 1 : 0
+    X = M / 2^s
+    term, E = one(X), one(X)
+    for k in 1:13
+        term = term * X / k
+        E += term
+    end
+    for _ in 1:s
+        E = E * E
+    end
+    return E
 end
 
 # The transition into a step `Δ`, reusing `last`, a previous step's `(Δ, A, Q)`,
@@ -582,17 +601,15 @@ end
 _track_model(models::AbstractVector, i) = models[i]
 _track_model(model, i) = model
 
-_ou_loglik(ys, rs, xs, mean; τ, σ2, branches::Bool = false) =
-    (branches ? _branch_pooled_loglik : _pooled_loglik)(OUModel(τ, σ2), ys, rs, xs, mean)
+_ou_loglik(ys, rs, xs, mean; τ, σ2) = _pooled_loglik(OUModel(τ, σ2), ys, rs, xs, mean)
 
 # Type-II MAP of an `OUPrior`'s hyperparameters shared by a group of tracks:
 # the pooled Kalman marginal likelihood (`_ou_loglik`, zero-mean or with the
 # `mean` integrated out) plus the hyperprior density over
 # `(log τ, log σ)`, whose Jacobian adds `log τ + log σ`. `scale` and `σ` are each
 # a fixed value or a density (`is_fixed_hyper`); only the densities are searched.
-# `[τ_lo, τ_hi]` bounds the `τ` search and seeds it at its geometric mean. With
-# `branches` the tracks are phases on unknown 2π branches.
-function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real, mean = nothing, branches::Bool = false)
+# `[τ_lo, τ_hi]` bounds the `τ` search and seeds it at its geometric mean.
+function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_seed::Real, mean = nothing)
     T = float(
         promote_type(
             typeof(τ_lo), typeof(τ_hi), typeof(σ2_seed), _blocks_eltype(ys, ws), mapreduce(eltype, promote_type, xs),
@@ -605,7 +622,7 @@ function _map_ou_hypers(ys, ws, xs, scale, σ; τ_lo::Real, τ_hi::Real, σ2_see
     lτ_lo, lτ_hi = log(T(τ_lo)), log(T(τ_hi))
     lτ0 = fixτ ? log(T(scale)) : (lτ_lo + lτ_hi) / 2
     lσ20 = fixσ ? 2 * log(T(σ)) : log(max(T(σ2_seed), σ2_lo))
-    neglp = _OUNegLogPost(ys, rs, xs, mean, scale, σ, lτ_lo, lτ_hi, lτ0, lσ20, σ2_lo, branches)
+    neglp = _OUNegLogPost(ys, rs, xs, mean, scale, σ, lτ_lo, lτ_hi, lτ0, lσ20, σ2_lo)
     x0 = fixτ ? T[lσ20] : fixσ ? T[clamp(lτ0, lτ_lo, lτ_hi)] : T[clamp(lτ0, lτ_lo, lτ_hi), lσ20]
     xbest, _ = _nelder_mead(neglp, x0)
     lτ̂, lσ̂2 = _unpack(neglp, xbest)
@@ -627,7 +644,6 @@ struct _OUNegLogPost{Y, R, X, L, S, G, T}
     lτ0::T
     lσ20::T
     σ2_lo::T
-    branches::Bool
 end
 
 function _unpack(f::_OUNegLogPost, p)
@@ -642,7 +658,7 @@ function (f::_OUNegLogPost)(p)
     lτ, lσ2 = _unpack(f, p)
     τ = _tau(f, lτ)
     σ2 = max(exp(lσ2), f.σ2_lo)
-    lp = _ou_loglik(f.ys, f.rs, f.xs, f.mean; τ, σ2, f.branches)
+    lp = _ou_loglik(f.ys, f.rs, f.xs, f.mean; τ, σ2)
     is_fixed_hyper(f.scale) || (lp += logdensityof(f.scale, τ) + log(τ))
     is_fixed_hyper(f.σ) || (lp += logdensityof(f.σ, sqrt(σ2)) + log(σ2) / 2)
     val = isfinite(lp) ? -lp : oftype(lp, Inf)

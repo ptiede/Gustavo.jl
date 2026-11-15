@@ -270,7 +270,7 @@ covers every component under it.
 
     FringeClosure(; gauge = ByComponent((; rate = PinAntenna("A2")); default = PinAntenna("A1")))
 
-A `FringeClosure`, `Bandpass` or `AdhocPhase` rejects, when constructed, a
+A `FringeClosure`, `Bandpass` or `Adhoc` rejects, when constructed, a
 name its model does not have. A freedom
 spanning components with different choices is an error.
 """
@@ -292,13 +292,18 @@ function _component_choice(g::ByComponent, path::Tuple)
 end
 _component_choice(g::ByComponent, ::Tuple{}) = g.default
 
-function _component_choice(g::ByComponent, f::GaugeFreedom)
-    c = _component_choice(g, first(f.component))
-    for p in f.component
+_component_choice(g::ByComponent, f::GaugeFreedom) = _common_choice(g, f.component)
+
+# The one gauge `g` gives every component path of `paths`, which one freedom
+# moves together; an error where they differ.
+_common_choice(g::AbstractGauge, paths) = g
+function _common_choice(g::ByComponent, paths)
+    c = _component_choice(g, first(paths))
+    for p in paths
         _component_choice(g, p) === c || throw(
             ArgumentError(
                 "ByComponent: one gauge freedom spans components with different gauges " *
-                    "($(join(unique(f.component), ", "))); give them the same choice.",
+                    "($(join(unique(paths), ", "))); give them the same choice.",
             ),
         )
     end

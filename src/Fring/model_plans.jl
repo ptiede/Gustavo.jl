@@ -29,7 +29,3 @@ function _perscan_delay_plan(model, layout)
     i = findfirst(_is_perscan_delay, phase_components(model))
     return i === nothing ? nothing : layout.plans[i]
 end
-
-# The adhoc component's plan (the per-integration phase term).
-_adhoc_plan(model, layout) =
-    layout.plans[findfirst(tc -> tc.Ti isa PerIntegration, phase_components(model))]

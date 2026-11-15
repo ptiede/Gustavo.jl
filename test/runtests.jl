@@ -101,9 +101,10 @@ include("test_joint_gains.jl")
 # The weight convention behind the bandpass SNRs and gain-estimate weights.
 include("test_noise_convention.jl")
 
-# The AdhocPhase solver + output sink: multi-scan solves of the three fits in
+# The Adhoc solver + output sink: multi-scan solves of the three fits in
 # turn, and calibrate.
 include("test_adhoc_phase.jl")
+include("test_low_signal.jl")
 include("test_gauge_invariance.jl")
 
 # The whole chain on a synthetic track: a feed-common fringe fit, the bandpass,

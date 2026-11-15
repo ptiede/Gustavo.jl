@@ -839,8 +839,8 @@ function _covered_antenna_feeds(rows, node_col, accepted, chained)
     return (; touched, determined, tied)
 end
 
-# Constrained WLS over a tagged node graph, the column-space generalization of
-# `_solve_observable!`, on the gauge rows `g` (`_gauge_rows`). Row `i` observes
+# Constrained WLS over a tagged node graph, on the gauge rows `g`
+# (`_gauge_rows`). Row `i` observes
 # `Σ x[rows.A[i]] − Σ x[rows.B[i]]` with weight `w[i]`, and the prior rows
 # `rows.prior` hold with weight one. Returns the solution and the residuals.
 function _solve_tagged_system(rows, w, g)

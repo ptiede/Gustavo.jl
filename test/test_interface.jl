@@ -27,7 +27,7 @@ Gustavo.solve(::_BadInfoSolver, ctx) = 1.0
 struct _OpaqueTerm end
 
 # The fringe closure, bandpass and adhoc fits at defaults.
-_full_chain(; gauge = PinAntenna(1)) = (FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge), AdhocPhase(; gauge))
+_full_chain(; gauge = PinAntenna(1)) = (FringeClosure(; gauge), Bandpass(; model = _bandpass_model(), gauge), Adhoc(; gauge))
 
 # Every parameter of a solution, in component order.
 _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
@@ -60,7 +60,7 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
     @testset "built-in solver declarations" begin
         @test Gustavo.solution_name(Bandpass(; model = _bandpass_model(), gauge)) == :bandpass
-        @test Gustavo.solution_name(AdhocPhase(; gauge)) == :adhoc
+        @test Gustavo.solution_name(Adhoc(; gauge)) == :adhoc
         # The default fringe model (every term per-scan) closes each scan on
         # its own.
         @test Gustavo._closes_per_scan(default_fringe_model())
@@ -97,13 +97,13 @@ _all_params(sol) = reduce(vcat, [vec(parent(c.params)) for c in sol.components])
 
         corrected = _precal(fr, ps)
         calibrate!(bp_sub, corrected; flag_bad = false, apply_flags = false)
-        sol = fit(AdhocPhase(; gauge), corrected)
+        sol = fit(Adhoc(; gauge), corrected)
         @test calibrate(sol, ps) isa XRadio.ProcessingSet
     end
 
     @testset "every fit defaults to ZeroSumPhase; an unknown antenna is named" begin
         ps, _ = _build_fringe_ps()
-        @test all(s -> s.gauge === ZeroSumPhase(), (FringeClosure(), Bandpass(; model = _bandpass_model()), AdhocPhase(), AdhocPhase(FP.PerTrackAdhocSmoother())))
+        @test all(s -> s.gauge === ZeroSumPhase(), (FringeClosure(), Bandpass(; model = _bandpass_model()), Adhoc()))
         @test_throws "none of the references [\"ZZ\"] is in antenna table" _fringe_fit(ps, FringeClosure(; gauge = PinAntenna("ZZ")))
     end
 

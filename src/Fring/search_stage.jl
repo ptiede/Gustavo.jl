@@ -35,7 +35,7 @@ The closure fits no constant phase. A station's per-scan phase trades against
 the source's phase, so the data do not determine it without a source model;
 it stays in the data for imaging or self-calibration. The later solves do not
 need it: [`Bandpass`](@ref Gustavo.Bandpass) aligns each scan's band-averaged
-phase per baseline and feed pair, and [`AdhocPhase`](@ref Gustavo.AdhocPhase)
+phase per baseline and feed pair, and [`Adhoc`](@ref Gustavo.Adhoc)
 removes each track's scan mean. The inter-feed delay is fit because a delay
 decoheres across the band, so leaving it in costs signal.
 
