@@ -42,9 +42,11 @@ Base.@kwdef struct PhaseCal{T <: Union{PerScan, PerIntegration}, D <: Union{Glob
     time::T = PerScan()
     delay_time::D = time
     function PhaseCal{T, D}(time, delay_time) where {T, D}
-        delay_time isa GlobalTime || delay_time == time || throw(ArgumentError(
-            "PhaseCal: delay_time must be GlobalTime() or the same as time ($time), got $delay_time"
-        ))
+        delay_time isa GlobalTime || delay_time == time || throw(
+            ArgumentError(
+                "PhaseCal: delay_time must be GlobalTime() or the same as time ($time), got $delay_time"
+            )
+        )
         return new{T, D}(time, delay_time)
     end
 end
@@ -178,9 +180,11 @@ function _delay_grid_size(ν, period, spw)
     isfinite(period) || return 0
     f = reduce(vcat, ν)
     n = max(512, ceil(Int, 4 * period * (maximum(f) - minimum(f))))
-    n <= 65536 || throw(ArgumentError(
-        "PhaseCal: the tones of spectral window $spw repeat only every $period s; a delay search across that period needs $n points, over 65536"
-    ))
+    n <= 65536 || throw(
+        ArgumentError(
+            "PhaseCal: the tones of spectral window $spw repeat only every $period s; a delay search across that period needs $n points, over 65536"
+        )
+    )
     return n
 end
 
