@@ -21,6 +21,14 @@ Conversion happens at the format boundary, not in the solver.
 verbatim; a FITS-IDI file is converted, conjugation included, by
 `XRadio.fitsidi2msv4`.
 
+Injected phase-calibration tones are the one exception. A Measurement Set's
+`phase_calibration` sub-dataset records them in the correlator's sense, not in
+the sense of `VISIBILITY`: `XRadio.fitsidi2msv4` copies a FITS-IDI file's
+`PC_REAL`/`PC_IMAG` unchanged while conjugating its `FLUX`. A tone phase
+``\psi_a`` therefore enters the correlator's visibilities as
+``e^{i(\psi_a - \psi_b)}`` and the stored ones as ``e^{-i(\psi_a - \psi_b)}``,
+so [`PhaseCal`](@ref) takes ``-\psi_a`` as station ``a``'s gain phase.
+
 ## Fitted parameters
 
 A delay ``\tau``, rate ``\dot r`` and phase ``\varphi`` are defined by the

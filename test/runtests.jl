@@ -107,6 +107,9 @@ include("test_adhoc_phase.jl")
 include("test_low_signal.jl")
 include("test_gauge_invariance.jl")
 
+# Station phases from injected phase-calibration tones.
+include("test_phasecal.jl")
+
 # The whole chain on a synthetic track: a feed-common fringe fit, the bandpass,
 # the track closure and ad hoc phasing leave each scan and product flat.
 include("test_synthetic_chain.jl")

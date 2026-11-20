@@ -886,3 +886,22 @@ end
     @test length(rows) > 2n
     @test all(Σ[i, j] ≈ dense[i, j] for (i, j) in zip(rows, cols))
 end
+
+@testset "gauge solve: weights spanning many orders of magnitude" begin
+    # A chain 1–2–3 with station 1 pinned; one row 10¹⁸ times the other's weight.
+    As = FR.sparse([-1.0 1.0 0.0; 0.0 -1.0 1.0])
+    w = [1.0e12, 1.0e-6]
+    rows = (; val = [2.0, 3.0], prior = (; M = FR.spzeros(0, 3), rhs = Float64[]))
+    basis = FR._gauge_basis([1.0 0.0 0.0], [0.0])
+    x, F = FR._gauge_solve(As, w, rows, basis)
+    @test x ≈ [0.0, 2.0, 5.0]
+    cov = FR._covariance(F, basis.Z)
+    @test cov(2, 2) ≈ 1.0e-12
+    @test cov(3, 3) ≈ 1.0e6 + 1.0e-12
+    @test cov(2, 3) ≈ 1.0e-12
+
+    # Station 3 reached by no row.
+    @test_throws "the system does not determine every unknown" FR._gauge_solve(
+        As[1:1, :], w[1:1], merge(rows, (; val = [2.0])), basis
+    )
+end
