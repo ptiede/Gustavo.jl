@@ -935,18 +935,21 @@ function _gauge_solve(As, w, rows, basis)
     M = rows.prior.M
     H = transpose(As) * Diagonal(w) * As + transpose(M) * M
     g = transpose(As) * (w .* rows.val) + transpose(M) * rows.prior.rhs
-    F = cholesky(Symmetric(transpose(Z) * H * Z); check = false)
-    _determines(F) || throw(ArgumentError("the system does not determine every unknown"))
+    K = Symmetric(transpose(Z) * H * Z)
+    F = cholesky(K; check = false)
+    _determines(F, diag(K)) || throw(ArgumentError("the system does not determine every unknown"))
     return x0 + Z * (F \ (transpose(Z) * (g - H * x0))), F
 end
 
-# Whether the Cholesky factor `F` of normal equations has every pivot above the
-# rounding of the largest: a direction the rows leave free shows up as a failed
-# or rounding-sized pivot.
-function _determines(F)
+# Whether every pivot of the Cholesky factor `F` of a matrix with diagonal `k`
+# stands above the rounding of its own diagonal entry: a direction the rows
+# leave free shows up as a failed or rounding-sized pivot. The test is per
+# unknown because row weights span many orders of magnitude, so an unknown only
+# weak rows reach has a small pivot without being undetermined.
+function _determines(F, k)
     issuccess(F) || return false
     d = diag(F)
-    return isempty(d) || minimum(d)^2 > length(d) * eps(eltype(d)) * maximum(d)^2
+    return all(d[i]^2 > length(d) * eps(eltype(d)) * k[F.p[i]] for i in eachindex(d))
 end
 
 # Overwrite the lower-triangular Cholesky factor `L` with the entries of
