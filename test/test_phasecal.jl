@@ -131,6 +131,22 @@ _pc_delays(sol) = parent(only(sol[:phase, :phasecal_delay].components).params)
         @test d[1, :, :, 2, 2:end] .- d[1, :, :, 1, 2:end] ≈ fill(-2.0e-9, 2, 2, 3)
     end
 
+    @testset "lines are referred to the window's center, not the tones'" begin
+        ψ(a, f, ν, t, ms) = 0.6 * station(a) - 0.3f + 2π * (2.5e-9 * station(a) + 1.0e-9 * f) * (ν - _pc_center(ms))
+        ps = _pc_track()
+        for ms in values(ps)
+            _pc_corrupt!(ms, ψ)
+            _pc_tones!(ms, ψ, (0:5:15) .* 1.0e6, XRadio.times(ms); untoned = ==("A4"))
+        end
+        sol = @test_logs (:warn, r"no tone measurement") match_mode = :any fit(PhaseCal(), ps)
+        @test all(isfinite, parent(only(sol[:phase, :phasecal].components).params))
+        for ms in values(_precal(sol, ps))
+            a1, a2 = collect(ms[:baseline_antenna1_name]), collect(ms[:baseline_antenna2_name])
+            toned = [b for b in eachindex(a1) if "A4" ∉ (a1[b], a2[b])]
+            @test maximum(abs, parent(ms[:visibility])[:, :, toned, :] .- PC_A0) < 1.0e-6
+        end
+    end
+
     @testset "degenerate tone sets give finite lines" begin
         νc = 6.6e9
         ν = νc .+ (-10:10:10) .* 1.0e6

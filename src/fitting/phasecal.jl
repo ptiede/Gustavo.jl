@@ -123,10 +123,10 @@ function _tone_window(ms, geom, fseg_id)
             for it in eachindex(tpc), p in receptors
                 at = (XRadio.AntennaName(ia), XRadio.TimePhaseCal(it))
                 cell = (at..., XRadio.ReceptorLabel(p))
-                z, ν = parent(tones[cell]), parent(freqs[cell])
-                keep = isfinite.(z) .& isfinite.(ν)
+                z, νtone = parent(tones[cell]), parent(freqs[cell])
+                keep = isfinite.(z) .& isfinite.(νtone)
                 any(keep) || continue
-                push!(measurements, (; station = a, feed = p, t = tpc[it], interval = interval[at], z = z[keep], ν = ν[keep]))
+                push!(measurements, (; station = a, feed = p, t = tpc[it], interval = interval[at], z = z[keep], ν = νtone[keep]))
             end
         end
     end
