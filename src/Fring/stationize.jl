@@ -1054,7 +1054,11 @@ function _null_basis(X)
     n = size(G, 1)
     τ = 2n * eps(real(eltype(G))) * opnorm(G, Inf)
     τ > 0 && issuccess(cholesky(Symmetric(G - τ * I); check = false)) && return zeros(eltype(G), n, 0)
-    return nullspace(Matrix(G))
+    # `G` is positive semidefinite, so its eigenvalues are its singular values;
+    # the symmetric eigensolver avoids `gesdd`, which can fail to converge here.
+    E = eigen(Symmetric(Matrix(G)))
+    tol = n * eps(real(eltype(G))) * maximum(abs, E.values)
+    return E.vectors[:, abs.(E.values) .<= tol]
 end
 
 # Each (station, feed, scan) a row side measures, and the columns whose sum is
