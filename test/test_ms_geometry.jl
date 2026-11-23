@@ -128,10 +128,15 @@ end
         @test g.channel_freqs == vcat(reverse(low), high)
         @test g.spw_names == ["low", "high"]
         @test g.spw_of_chan == repeat([1, 2]; inner = 4)
-        @test CALg._channel_range(g, XRadio.frequencies(data[:a])) === 5:1:8
-        @test CALg._channel_range(g, XRadio.frequencies(data[:b])) === 4:-1:1
-        @test CALg.GeometryWindow(g, data[:c]).chan_idx == 4:-1:1
-        @test_throws "not one contiguous run" CALg._channel_range(g, [low[1], high[2]])
+        @test CALg._channel_run(g, data[:a]) === 5:1:8
+        @test CALg._channel_run(g, data[:b]) === 4:-1:1
+        @test CALg.GeometryWindow(g, data[:c]).chan_idx === 4:-1:1
+        @test CALg._channel_run(g, view(data[:b], XRadio.Frequency(At(low[2:3])))) === 3:-1:2
+
+        stray = _subarray_ms(["A1", "A2"], "1"; spw = "high", frequencies = low)
+        @test_throws "not one contiguous run of spectral window 'high'" CALg._channel_run(g, stray)
+        unnamed = _subarray_ms(["A1", "A2"], "1"; spw = "other", frequencies = high)
+        @test_throws "spectral window 'other' is not in the geometry" CALg.GeometryWindow(g, unnamed)
 
         flipped = XRadio.ProcessingSet(
             OrderedDict(

@@ -446,7 +446,7 @@ end
 # rounding to a grid: a grid still splits two values that straddle a bucket
 # edge, which is the case this exists to remove. The canonical value is a real
 # observed value, so the axis keeps feeding physical `t - t0` and `f - f0`
-# arithmetic. `_time_indices` and `_channel_indices` match the geometry with the
+# arithmetic. `_time_indices` and `_channel_run` match the geometry with the
 # same tolerances, so the constructor and its readers agree.
 _freq_atol(f::Real) = 1.0e-9 * abs(Float64(f))
 
@@ -730,22 +730,21 @@ one Measurement Set, with no data attached.
 - `antennas` — for each baseline, in `baseline_id` order, the pair of indices
   into `geom.antennas` of its two antennas.
 
-θ is addressed by POSITION — a component's leaf indexed `(param, node, fseg_id,
-tseg_id, ant)` over global-length segment-id tables — while a Measurement Set's
-coordinates are PHYSICAL (Hz, seconds, antenna names, correlation labels), so
-this join cannot be recovered from the data alone.
-
-`GeometryWindow(geom, ms)` matches channels by frequency (`isapprox`, rtol
-1e-9), times by `_epoch_atol` on absolute seconds, and antennas by name, and
-throws on any that `geom` does not hold. The three-argument form addresses
-channels and times only, which is all evaluating gains needs; its station
-map is empty.
+`GeometryWindow(geom, ms)` throws when `geom` lacks the Measurement Set's
+spectral window, channels, times or antennas. The three-argument form has no
+antennas.
 """
-struct GeometryWindow
+struct GeometryWindow{C <: AbstractVector{Int}}
     geom::DataGeometry
-    chan_idx::Vector{Int}
+    chan_idx::C
     ti_idx::Vector{Int}
     antennas::Vector{Tuple{Int, Int}}
+    GeometryWindow{C}(geom, chan_idx, ti_idx, antennas) where {C} = new{C}(geom, chan_idx, ti_idx, antennas)
+end
+
+function GeometryWindow(geom, chan_idx, ti_idx, antennas)
+    c = convert(AbstractVector{Int}, chan_idx)
+    return GeometryWindow{typeof(c)}(geom, c, ti_idx, antennas)
 end
 
 GeometryWindow(geom::DataGeometry, chan_idx, ti_idx) =
@@ -766,33 +765,32 @@ function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
     end
     antennas = [(antenna(a), antenna(b)) for (a, b) in XRadio.baselines(ms)]
     return GeometryWindow(
-        geom, _channel_indices(geom, XRadio.frequencies(ms)), _time_indices(geom, XRadio.times(ms)), antennas,
+        geom, _channel_run(geom, ms), _time_indices(geom, XRadio.times(ms)), antennas,
     )
 end
 
-_channel_indices(geom::DataGeometry, fs) = [_channel_index(geom, Float64(f)) for f in fs]
-
-# The positions of channels `fs` on `geom`'s channel axis, which they must cover
-# as one contiguous run, rising or falling.
-function _channel_range(geom::DataGeometry, fs)
+# The positions of `ms`'s channels on `geom`'s channel axis, in the order `ms`
+# stores them: a contiguous run within its spectral window, rising or falling.
+function _channel_run(geom::DataGeometry, ms::XRadio.MeasurementSet)
+    spw = XRadio.spectralwindow(ms)
+    s = findfirst(==(spw), geom.spw_names)
+    isnothing(s) && throw(ArgumentError("spectral window '$spw' is not in the geometry"))
+    window = findfirst(==(s), geom.spw_of_chan):findlast(==(s), geom.spw_of_chan)
+    fs = XRadio.frequencies(ms)
     isempty(fs) && return 1:1:0
-    lo = _channel_index(geom, Float64(first(fs)))
-    hi = _channel_index(geom, Float64(last(fs)))
-    r = lo:(hi < lo ? -1 : 1):hi
-    (length(r) == length(fs) && all(((j, f),) -> abs(geom.channel_freqs[j] - f) <= _freq_atol(f), zip(r, fs))) ||
-        throw(
+    start = findfirst(j -> abs(geom.channel_freqs[j] - first(fs)) <= _freq_atol(first(fs)), window)
+    step = last(fs) < first(fs) ? -1 : 1
+    run = isnothing(start) ? (1:1:0) : (window[start]:step:(window[start] + step * (length(fs) - 1)))
+    (
+        length(run) == length(fs) && last(run) in window &&
+            all(((j, f),) -> abs(geom.channel_freqs[j] - f) <= _freq_atol(f), zip(run, fs))
+    ) || throw(
         ArgumentError(
             "the channels from $(first(fs)) Hz to $(last(fs)) Hz are not one contiguous " *
-                "run of the geometry's channel axis"
+                "run of spectral window '$spw' in the geometry"
         )
     )
-    return r
-end
-
-function _channel_index(geom::DataGeometry, f)
-    j = findfirst(g -> abs(g - f) <= _freq_atol(f), geom.channel_freqs)
-    isnothing(j) && throw(ArgumentError("channel frequency $f Hz is not in the geometry"))
-    return j
+    return run
 end
 
 _time_indices(geom::DataGeometry, ts) = [_time_index(geom, Float64(t)) for t in ts]

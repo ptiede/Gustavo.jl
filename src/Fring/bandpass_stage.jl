@@ -100,7 +100,7 @@ end
 
 function _member_bandpass_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
     wv, ws = weighted_sums(_member_layers(ms)...; dims = Ti)
-    chan = Calibration._channel_range(geom, XRadio.frequencies(ms))
+    chan = Calibration._channel_run(geom, ms)
     return (; wv, ws, antennas = _member_antenna_pairs(ms), feeds = feed_pairs(ms), chan)
 end
 
