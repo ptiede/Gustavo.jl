@@ -133,10 +133,8 @@ end
         @test CALg.GeometryWindow(g, data[:c]).chan_idx === 4:-1:1
         @test CALg._channel_run(g, view(data[:b], XRadio.Frequency(At(low[2:3])))) === 3:-1:2
 
-        stray = _subarray_ms(["A1", "A2"], "1"; spw = "high", frequencies = low)
-        @test_throws "not one contiguous run of spectral window 'high'" CALg._channel_run(g, stray)
-        unnamed = _subarray_ms(["A1", "A2"], "1"; spw = "other", frequencies = high)
-        @test_throws "spectral window 'other' is not in the geometry" CALg.GeometryWindow(g, unnamed)
+        gapped = _subarray_ms(["A1", "A2"], "1"; spw = "high", frequencies = high[[1, 3]])
+        @test_throws "not one contiguous run" CALg.GeometryWindow(g, gapped)
 
         flipped = XRadio.ProcessingSet(
             OrderedDict(
@@ -214,13 +212,13 @@ end
 
     @testset "errors" begin
         other = XRadio.ProcessingSet(OrderedDict(:o => _subarray_ms(["A1", "Z9"], "1")))
-        @test_throws "`Z9` is not among the geometry's antennas" CALg.GeometryWindow(
+        @test_throws "does not hold" CALg.GeometryWindow(
             CALg.DataGeometry(XRadio.ProcessingSet(OrderedDict(:a => _subarray_ms(["A1", "A2"], "1")))),
             other[:o],
         )
         late = _subarray_ms(["A1", "A2"], "1"; times = 2.0e9 .+ 30.0 .* (0:3))
         @test_throws "is not in the geometry" CALg.GeometryWindow(geom, late)
-        @test_throws "names no antennas" CALg.GeometryWindow(
+        @test_throws "does not hold" CALg.GeometryWindow(
             CALg.DataGeometry(; geom.nfeed, times = geom.times, channel_freqs = geom.channel_freqs), ms,
         )
     end

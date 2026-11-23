@@ -731,8 +731,7 @@ one Measurement Set, with no data attached.
   into `geom.antennas` of its two antennas.
 
 `GeometryWindow(geom, ms)` throws when `geom` lacks the Measurement Set's
-spectral window, channels, times or antennas. The three-argument form has no
-antennas.
+channels, times or antennas. The three-argument form has no antennas.
 """
 struct GeometryWindow{C <: AbstractVector{Int}}
     geom::DataGeometry
@@ -750,45 +749,34 @@ end
 GeometryWindow(geom::DataGeometry, chan_idx, ti_idx) =
     GeometryWindow(geom, chan_idx, ti_idx, Tuple{Int, Int}[])
 
-function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
-    isempty(geom.antennas) && throw(
-        ArgumentError("the geometry names no antennas; build it with `DataGeometry(ps)`")
-    )
-    index = Dict(n => i for (i, n) in pairs(geom.antennas))
-    antenna(n) = get(index, String(n)) do
-        throw(
-            ArgumentError(
-                "baseline antenna `$n` is not among the geometry's antennas, " *
-                    join(geom.antennas, ", ")
-            )
-        )
-    end
-    antennas = [(antenna(a), antenna(b)) for (a, b) in XRadio.baselines(ms)]
+GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet) = _geometry_window(
+    geom, DimensionalData.lookup(ms, XRadio.Frequency), XRadio.times(ms), XRadio.baselines(ms),
+)
+
+function _geometry_window(geom, fs, ts, baselines)
+    (
+        all(((a, b),) -> a in geom.antennas && b in geom.antennas, baselines) &&
+            any(f -> abs(f - first(fs)) <= _freq_atol(f), geom.channel_freqs)
+    ) || throw(ArgumentError("the geometry does not hold this Measurement Set's channels and antennas"))
     return GeometryWindow(
-        geom, _channel_run(geom, ms), _time_indices(geom, XRadio.times(ms)), antennas,
+        geom, _channel_run(geom, fs), _time_indices(geom, ts),
+        [(_antenna_position(geom, a), _antenna_position(geom, b)) for (a, b) in baselines],
     )
 end
 
-# The positions of `ms`'s channels on `geom`'s channel axis, in the order `ms`
-# stores them: a contiguous run within its spectral window, rising or falling.
-function _channel_run(geom::DataGeometry, ms::XRadio.MeasurementSet)
-    spw = XRadio.spectralwindow(ms)
-    s = findfirst(==(spw), geom.spw_names)
-    isnothing(s) && throw(ArgumentError("spectral window '$spw' is not in the geometry"))
-    window = findfirst(==(s), geom.spw_of_chan):findlast(==(s), geom.spw_of_chan)
-    fs = XRadio.frequencies(ms)
-    isempty(fs) && return 1:1:0
-    start = findfirst(j -> abs(geom.channel_freqs[j] - first(fs)) <= _freq_atol(first(fs)), window)
+_antenna_position(geom::DataGeometry, name) = findfirst(==(name), geom.antennas)::Int
+
+# The positions of channels `fs` on `geom`'s channel axis, in their own order:
+# a contiguous run, rising or falling.
+_channel_run(geom::DataGeometry, ms::XRadio.MeasurementSet) =
+    _channel_run(geom, DimensionalData.lookup(ms, XRadio.Frequency))::StepRange{Int, Int}
+
+function _channel_run(geom::DataGeometry, fs::AbstractVector)
+    i = findfirst(f -> abs(f - first(fs)) <= _freq_atol(f), geom.channel_freqs)
     step = last(fs) < first(fs) ? -1 : 1
-    run = isnothing(start) ? (1:1:0) : (window[start]:step:(window[start] + step * (length(fs) - 1)))
-    (
-        length(run) == length(fs) && last(run) in window &&
-            all(((j, f),) -> abs(geom.channel_freqs[j] - f) <= _freq_atol(f), zip(run, fs))
-    ) || throw(
-        ArgumentError(
-            "the channels from $(first(fs)) Hz to $(last(fs)) Hz are not one contiguous " *
-                "run of spectral window '$spw' in the geometry"
-        )
+    run = i:step:(i + step * (length(fs) - 1))
+    all(((j, f),) -> abs(geom.channel_freqs[j] - f) <= _freq_atol(f), zip(run, fs)) || throw(
+        ArgumentError("the Measurement Set's channels are not one contiguous run of the geometry's channel axis")
     )
     return run
 end
