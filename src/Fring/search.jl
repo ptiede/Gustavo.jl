@@ -84,10 +84,8 @@ recorded `pfa`.
   An explicit positive `Int` overrides it; raise it if detections are landing on
   a multi-band alias, or lower it if the axis is contiguous and the search is the
   bottleneck. Cost is quadratic — the grid is `oversample·nchan ×
-  oversample·ntime`, so 8 is ~16× the work of 2. [`_resolve_oversample`](@ref)
-  gives the rule and the measurements behind its thresholds.
-- `quad_interp`   : polish the peak on the exact matched filter (sub-cell, per-axis
-  parabolic steps on the true objective — `_polish_peak_exact!`). Default true.
+  oversample·ntime`, so 8 is ~16× the work of 2.
+- `quad_interp`   : polish the peak off-grid on the exact matched filter. Default true.
 - `algorithm`     : an [`AbstractSearchAlgorithm`](@ref) — [`FullGrid`](@ref) or
   [`HierarchicalMBD`](@ref) — or the sentinel `:auto` (default), which picks
   between them from the frequency axis: `HierarchicalMBD` when the axis has ≥ 2
@@ -154,15 +152,8 @@ end
     FringeWorkspace(::Type{C})
 
 Reusable scratch for [`baseline_fringe_search`](@ref) at compute type `C`
-(`ComplexF32` or `ComplexF64`, matching a visibility block's own eltype): the
-zero-padded gridding buffer `G` and the FFT output `D`, lazily (re)allocated
-when the padded grid size changes, and the weighted plane a cell is gathered
-into (`_weigh_plane!`), resized to it. Pass one per task to avoid allocating the
-grid (tens of MB where `oversample` resolves high) on every call — the search runs thousands
-of times per solve, so reuse removes essentially all of its allocation/GC churn.
-The FFT plan is not here: it is a pure function of the grid size (and `C`), so
-the search-grid geometry carries it (built once per scan, shared read-only
-across the workspaces that execute it).
+(`ComplexF32` or `ComplexF64`, matching the visibilities' element type). Pass
+one per task so the search does not allocate its grid on every call.
 """
 mutable struct FringeWorkspace{C, T}
     nf::Int

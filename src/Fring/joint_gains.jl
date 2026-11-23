@@ -35,14 +35,13 @@ each phase chain on its most probable 2π branches (a sample that several
 station gains share, as a per-scan component splits them, at their mean), and
 solves for the
 parameters nearest those estimates under the priors. The MAP is found by
-Levenberg–Marquardt with the damping scaled by each parameter's curvature, and
-hyperparameters given as densities at their type-II MAP, by `hyper_optimizer`
-(an Optimization.jl optimizer that takes a gradient and bounds; L-BFGS-B by
-default) on their Laplace evidence within their support
-(`_fit_hypers!`), stopping once the evidence a Newton step would still gain is
-below `hyper_tolerance` nats or after `max_hyper_iterations` iterations. The gauge then
-moves the phases along the freedoms the data leave, at least cost in prior
-energy (`_meet_phase_gauge!`).
+Levenberg–Marquardt with the damping scaled by each parameter's curvature.
+Hyperparameters given as densities are set to their type-II MAP by
+`hyper_optimizer` (an Optimization.jl optimizer that takes a gradient and
+bounds; L-BFGS-B by default), stopping once the evidence a Newton step would
+still gain is below `hyper_tolerance` nats or after `max_hyper_iterations`
+iterations. The gauge then moves the phases along the freedoms the data leave,
+at least cost in prior energy.
 
 Returns `(; phase, amp, gains, converged, stalled)`: per observable one
 `(; path, block, station, node, across, axis, windows, prior, pieces, values)`
