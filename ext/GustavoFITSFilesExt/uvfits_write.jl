@@ -156,17 +156,24 @@ function _windows_of(scans)
     return reference
 end
 
-# The FQ row and the (FREQ, IF) placement of each (window, channel).
+# The FQ row and the (FREQ, IF) placement of each (window, channel). A window
+# whose channels fall in frequency is written rising and labeled upper sideband,
+# as AIPS writes lower-sideband data (AIPS Memo 117, the FQ table): every IF of
+# the file then runs up by its positive `CH WIDTH`, and `place` puts the
+# window's channel `c` at its rising position.
 function _frequency_layout(windows)
     ref_freq = first(windows).ref_freq
     nchan = [length(w.channel_freqs) for w in windows]
+    falls = [first(w.channel_freqs) > last(w.channel_freqs) for w in windows]
+    rising(k) = falls[k] ? reverse(windows[k].channel_freqs) : windows[k].channel_freqs
+    upward(k, c) = falls[k] ? nchan[k] + 1 - c : c
+    width = [abs(w.ch_width) for w in windows]
     if length(windows) == 1
-        w = only(windows)
         n = only(nchan)
         return (;
-            ref_freq, nfreq = 1, nif = n, place = (_, c) -> (1, c),
-            if_freq = w.channel_freqs .- ref_freq, ch_width = fill(w.ch_width, n),
-            total_bandwidth = fill(w.total_bandwidth, n), sideband = fill(w.sideband, n),
+            ref_freq, nfreq = 1, nif = n, place = (_, c) -> (1, upward(1, c)),
+            if_freq = rising(1) .- ref_freq, ch_width = fill(only(width), n),
+            total_bandwidth = fill(only(windows).total_bandwidth, n), sideband = fill(1, n),
         )
     end
     allequal(nchan) || throw(
@@ -176,31 +183,29 @@ function _frequency_layout(windows)
         )
     )
     if first(nchan) == 1
-        allequal((w.ch_width, w.sideband, w.total_bandwidth) for w in windows) || throw(
+        allequal(zip(width, (w.total_bandwidth for w in windows))) || throw(
             ArgumentError(
                 "write_uvfits: one-channel windows are written as the IFs of one window, " *
-                    "which states one channel width, sideband and total bandwidth; " *
+                    "which states one channel width and total bandwidth; " *
                     "these windows differ in them"
             )
         )
     else
-        for w in windows
-            spacing = diff(w.channel_freqs)
-            all(s -> isapprox(s, w.ch_width; rtol = 1.0e-9), spacing) || throw(
+        for k in eachindex(windows)
+            all(s -> isapprox(s, width[k]; rtol = 1.0e-9), diff(rising(k))) || throw(
                 ArgumentError(
-                    "write_uvfits: the window starting at $(first(w.channel_freqs)) Hz " *
+                    "write_uvfits: the window starting at $(first(windows[k].channel_freqs)) Hz " *
                         "has channels not evenly spaced by its channel width " *
-                        "$(w.ch_width) Hz, which the FREQ axis requires"
+                        "$(width[k]) Hz, which the FREQ axis requires"
                 )
             )
         end
     end
     return (;
-        ref_freq, nfreq = first(nchan), nif = length(windows), place = (w, c) -> (c, w),
-        if_freq = [first(w.channel_freqs) - ref_freq for w in windows],
-        ch_width = [w.ch_width for w in windows],
-        total_bandwidth = [w.total_bandwidth for w in windows],
-        sideband = [w.sideband for w in windows],
+        ref_freq, nfreq = first(nchan), nif = length(windows), place = (w, c) -> (upward(w, c), w),
+        if_freq = [first(rising(k)) - ref_freq for k in eachindex(windows)],
+        ch_width = width, total_bandwidth = [w.total_bandwidth for w in windows],
+        sideband = fill(1, length(windows)),
     )
 end
 

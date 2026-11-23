@@ -554,7 +554,8 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
     mbd = FR.FringeSearch(algorithm = FR.HierarchicalMBD())
     auto = FR.FringeSearch()
     @test_throws "not at least two" FR._search_axes(contig, times, mbd, ComplexF64)
-    @test_throws "not sorted" FR._search_axes(reverse(freqs), times, mbd, ComplexF64)
+    overlapping = vcat(freqs, freqs[1:16] .+ 4.0e6)
+    @test_throws "overlap in frequency" FR._search_axes(overlapping, times, mbd, ComplexF64)
     @test_throws "no rate falls inside the rate window" FR._search_axes(
         freqs, times, FR.FringeSearch(algorithm = FR.HierarchicalMBD(), rate_window = (0.7, 0.8)), ComplexF64,
     )
@@ -573,6 +574,19 @@ struct _ProbeUnimplemented <: FR.AbstractSearchAlgorithm end
     )
     @test d_probe.delay == d_full.delay
     @test d_probe.snr == d_full.snr
+
+    # Channel order is immaterial: the whole axis reversed, or every band running
+    # down in frequency as a lower-sideband window does, takes the same
+    # hierarchical search and finds the same fringe.
+    d_up = FR.baseline_fringe_search(FR.fringe_plane(V, W, freqs, times), f0, t0; opts = mbd)
+    for perm in (reverse(eachindex(freqs)), reduce(vcat, [reverse(b * 16 .+ (1:16)) for b in 0:7]))
+        @test FR._search_axes(freqs[perm], times, mbd, ComplexF64).mbd !== nothing
+        @test FR._search_axes(freqs[perm], times, auto, ComplexF64).mbd !== nothing
+        d = FR.baseline_fringe_search(FR.fringe_plane(V[perm, :], W[perm, :], freqs[perm], times), f0, t0; opts = mbd)
+        @test d.delay ≈ d_up.delay
+        @test d.rate ≈ d_up.rate
+        @test d.snr ≈ d_up.snr
+    end
 
     # No silent fallback: an algorithm with no `_mbd_axes` method is an error,
     # not a quiet switch to a different search.
@@ -598,7 +612,7 @@ end
     # so each cell is joined across members by label and A4's cells take no
     # rows from the second window.
     full, _ = _build_fringe_ps(; nspw = 1, spw_origins = [230.0e9])
-    partial, _ = _build_fringe_ps(; nspw = 1, spw_origins = [230.1e9], omit_antenna = 4)
+    partial, _ = _build_fringe_ps(; nspw = 1, spw_origins = [230.1e9], spw_names = ["band_2"], omit_antenna = 4)
     group = XRadio.ProcessingSet(
         OrderedDict{Symbol, XRadio.MeasurementSet}(
             :hi => only(values(partial)), :lo => only(values(full)),

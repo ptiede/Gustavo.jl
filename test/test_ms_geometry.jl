@@ -111,6 +111,45 @@ end
         @test CALg.GeometryWindow(g, split[:b]).chan_idx == CALg.GeometryWindow(g, split[:a]).chan_idx
     end
 
+    @testset "a falling window maps onto the sorted channel axis in reverse" begin
+        # The higher window listed first, and the lower one running down in
+        # frequency as a lower-sideband window stores it.
+        high = 230.2e9 .+ 2.0e6 .* (0:3)
+        low = 230.0e9 .- 2.0e6 .* (0:3)
+        later = 1.7e9 .+ 30.0 .* (0:3)
+        data = XRadio.ProcessingSet(
+            OrderedDict(
+                :a => _subarray_ms(["A1", "A2"], "1"; spw = "high", frequencies = high),
+                :b => _subarray_ms(["A1", "A2"], "1"; spw = "low", frequencies = low),
+                :c => _subarray_ms(["A1", "A2"], "2"; times = later, spw = "low", frequencies = low),
+            )
+        )
+        g = CALg.DataGeometry(data)
+        @test g.channel_freqs == vcat(reverse(low), high)
+        @test g.spw_names == ["low", "high"]
+        @test g.spw_of_chan == repeat([1, 2]; inner = 4)
+        @test CALg._channel_range(g, XRadio.frequencies(data[:a])) === 5:1:8
+        @test CALg._channel_range(g, XRadio.frequencies(data[:b])) === 4:-1:1
+        @test CALg.GeometryWindow(g, data[:c]).chan_idx == 4:-1:1
+        @test_throws "not one contiguous run" CALg._channel_range(g, [low[1], high[2]])
+
+        flipped = XRadio.ProcessingSet(
+            OrderedDict(
+                :a => _subarray_ms(["A1", "A2"], "1"; spw = "low", frequencies = low),
+                :b => _subarray_ms(["A1", "A2"], "2"; times = later, spw = "low", frequencies = reverse(low)),
+            )
+        )
+        @test_throws "hold different channels" CALg.DataGeometry(flipped)
+
+        interleaved = XRadio.ProcessingSet(
+            OrderedDict(
+                :a => _subarray_ms(["A1", "A2"], "1"; spw = "high", frequencies = high),
+                :b => _subarray_ms(["A1", "A2"], "1"; spw = "shifted", frequencies = high .+ 1.0e6),
+            )
+        )
+        @test_throws "must not overlap in frequency" CALg.DataGeometry(interleaved)
+    end
+
     @testset "errors" begin
         @test_throws "holds no Measurement Sets" CALg.DataGeometry(filter(_ -> false, ps))
         unlabelled = copy(first(ps))
@@ -121,7 +160,7 @@ end
         # Two spectral windows sharing a channel frequency cannot rank it to one.
         overlapping, _ = _build_fringe_ps(; nant = 3, spw_sep = 0.0)
         @test_throws ArgumentError CALg.DataGeometry(overlapping)
-        @test_throws "conflicting spectral windows" CALg.DataGeometry(overlapping)
+        @test_throws "must not overlap in frequency" CALg.DataGeometry(overlapping)
     end
 end
 

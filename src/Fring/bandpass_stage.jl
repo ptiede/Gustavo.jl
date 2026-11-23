@@ -93,15 +93,14 @@ function accumulate_bandpass(
     rl = zeros(mapreduce(p -> eltype(p.wv), promote_type, parts), ax)
     wl = zeros(mapreduce(p -> eltype(p.ws), promote_type, parts), ax)
     for p in parts
-        chans = Frequency(At(geom.channel_freqs[p.chan]))
-        _add_by_label!(rl, wl, p.wv, p.ws, p.antennas, p.feeds, chans; autos = false)
+        _add_by_label!(rl, wl, p.wv, p.ws, p.antennas, p.feeds, Frequency(p.chan); autos = false)
     end
     return rl, wl
 end
 
 function _member_bandpass_sums(ms::XRadio.MeasurementSet, geom::DataGeometry)
     wv, ws = weighted_sums(_member_layers(ms)...; dims = Ti)
-    chan = Calibration._channel_indices(geom, XRadio.frequencies(ms))
+    chan = Calibration._channel_range(geom, XRadio.frequencies(ms))
     return (; wv, ws, antennas = _member_antenna_pairs(ms), feeds = feed_pairs(ms), chan)
 end
 
