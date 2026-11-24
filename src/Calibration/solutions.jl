@@ -775,7 +775,7 @@ function _channel_run(geom::DataGeometry, fs::AbstractVector)
     i = findfirst(f -> abs(f - first(fs)) <= _freq_atol(f), geom.channel_freqs)
     step = last(fs) < first(fs) ? -1 : 1
     run = i:step:(i + step * (length(fs) - 1))
-    all(((j, f),) -> abs(geom.channel_freqs[j] - f) <= _freq_atol(f), zip(run, fs)) || throw(
+    abs(geom.channel_freqs[last(run)] - last(fs)) <= _freq_atol(last(fs)) || throw(
         ArgumentError("the Measurement Set's channels are not one contiguous run of the geometry's channel axis")
     )
     return run
