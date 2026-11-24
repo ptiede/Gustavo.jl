@@ -191,6 +191,28 @@ end
     @test all(iszero, wp[FeedPair = At([(1, 2), (2, 1)])])
     @test rp[FeedPair = At([(1, 1), (2, 2)])] == rl[FeedPair = At([(1, 1), (2, 2)])]
 
+    # The same signal stored with every window running down in frequency gives
+    # the same sums on the same sorted channel axis.
+    kw = (; nant = 4, nspw = 2, nchan = 8, ntime = 6, nscans = 1, seed = 5)
+    up, _ = _build_fringe_ps(; kw..., spw_origins = [230.0e9, 230.1e9], chan_bw = 2.0e6)
+    down, _ = _build_fringe_ps(; kw..., spw_origins = [230.014e9, 230.114e9], chan_bw = -2.0e6)
+    function group_sums(data)
+        g = CAL.DataGeometry(data)
+        ms = collect(values(data))
+        pairs = FP._canonical_antenna_pairs([p for m in ms for p in FP._member_antenna_pairs(m) if p[1] != p[2]], g)
+        fps = sort!(unique!([f for m in ms for f in feed_pairs(m)]))
+        r, w = FP.accumulate_bandpass(data, g, pairs, fps; executor = exec)
+        return (; g, r, w, ap = FP._ap_sums(data, g; executor = exec))
+    end
+    su, sd = group_sums(up), group_sums(down)
+    @test all(m -> issorted(XRadio.frequencies(m); rev = true), values(down))
+    @test sd.g.channel_freqs ≈ su.g.channel_freqs
+    @test issorted(sd.g.channel_freqs)
+    @test parent(sd.r) ≈ parent(su.r)
+    @test parent(sd.w) ≈ parent(su.w)
+    @test parent(sd.ap.rbar) ≈ parent(su.ap.rbar)
+    @test parent(sd.ap.wbar) ≈ parent(su.ap.wbar)
+
     @test_throws "stored in both orders" FP._canonical_antenna_pairs([("A1", "A2"), ("A2", "A1")], geom)
     @test_throws "not among the geometry's antennas" FP._canonical_antenna_pairs([("A1", "Z9")], geom)
 end

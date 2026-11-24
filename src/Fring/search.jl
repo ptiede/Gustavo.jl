@@ -84,10 +84,8 @@ recorded `pfa`.
   An explicit positive `Int` overrides it; raise it if detections are landing on
   a multi-band alias, or lower it if the axis is contiguous and the search is the
   bottleneck. Cost is quadratic — the grid is `oversample·nchan ×
-  oversample·ntime`, so 8 is ~16× the work of 2. [`_resolve_oversample`](@ref)
-  gives the rule and the measurements behind its thresholds.
-- `quad_interp`   : polish the peak on the exact matched filter (sub-cell, per-axis
-  parabolic steps on the true objective — `_polish_peak_exact!`). Default true.
+  oversample·ntime`, so 8 is ~16× the work of 2.
+- `quad_interp`   : polish the peak off-grid on the exact matched filter. Default true.
 - `algorithm`     : an [`AbstractSearchAlgorithm`](@ref) — [`FullGrid`](@ref) or
   [`HierarchicalMBD`](@ref) — or the sentinel `:auto` (default), which picks
   between them from the frequency axis: `HierarchicalMBD` when the axis has ≥ 2
@@ -154,15 +152,8 @@ end
     FringeWorkspace(::Type{C})
 
 Reusable scratch for [`baseline_fringe_search`](@ref) at compute type `C`
-(`ComplexF32` or `ComplexF64`, matching a visibility block's own eltype): the
-zero-padded gridding buffer `G` and the FFT output `D`, lazily (re)allocated
-when the padded grid size changes, and the weighted plane a cell is gathered
-into (`_weigh_plane!`), resized to it. Pass one per task to avoid allocating the
-grid (tens of MB where `oversample` resolves high) on every call — the search runs thousands
-of times per solve, so reuse removes essentially all of its allocation/GC churn.
-The FFT plan is not here: it is a pure function of the grid size (and `C`), so
-the search-grid geometry carries it (built once per scan, shared read-only
-across the workspaces that execute it).
+(`ComplexF32` or `ComplexF64`, matching the visibilities' element type). Pass
+one per task so the search does not allocate its grid on every call.
 """
 mutable struct FringeWorkspace{C, T}
     nf::Int
@@ -783,15 +774,18 @@ function _approx_gcd(vals::AbstractVector{<:Real}, tol::Real)
     return g
 end
 
-# Split a sorted frequency axis into contiguous band blocks: a new block starts
-# wherever the spacing exceeds 1.5× the in-band spacing Δf.
+# Split the stacked channel axis into contiguous band blocks: runs of channels
+# that step by at most 1.5× the in-band spacing Δf, all in one direction. A
+# block may run up or down in frequency.
 function _detect_freq_groups(freqs::AbstractVector, Δf::Real)
     # The returned ranges index the stacked channel axis, which is 1-based.
     Base.require_one_based_indexing(freqs)
     freqgroups = UnitRange{Int}[]
     lo = 1
     for i in 1:(length(freqs) - 1)
-        if freqs[i + 1] - freqs[i] > 1.5 * Δf
+        step = freqs[i + 1] - freqs[i]
+        turns = i > lo && sign(step) != sign(freqs[i] - freqs[i - 1])
+        if abs(step) > 1.5 * Δf || turns
             push!(freqgroups, lo:i)
             lo = i + 1
         end
@@ -807,8 +801,8 @@ end
 # values and track the search's compute precision `T`, like `_SearchAxes`'s
 # `delays`/`rates`.
 struct _MBDAxes{T, PB, PC}
-    freqgroups::Vector{UnitRange{Int}}   # channel-index blocks (ascending frequency)
-    f_lo::Vector{Float64}           # per-band grid origin (first channel freq)
+    freqgroups::Vector{UnitRange{Int}}   # channel-index blocks, each monotonic in frequency
+    f_lo::Vector{Float64}           # per-band grid origin (lowest channel freq)
     bc_bin::Vector{Int}             # band-origin bin on the Δbc grid (1-based)
     bc_step::Float64                # Δbc: common band-origin grid spacing
     nbc_pad::Int                    # padded band-center FFT length
@@ -838,7 +832,7 @@ function _resolve_algorithm(alg::Symbol, freqs, fax::_Axis)
     )
     # Hierarchical only when the common grid is mostly padding (> 4× the real
     # channel count) — else the single FFT is simple and fast enough.
-    hierarchical = !fax.degenerate && issorted(freqs) && fax.n > 4 * length(freqs)
+    hierarchical = !fax.degenerate && fax.n > 4 * length(freqs)
     return hierarchical ? HierarchicalMBD() : FullGrid()
 end
 
@@ -924,7 +918,6 @@ end
 # The hierarchical band geometry, or the reason the axis cannot support one.
 function _hierarchical_axes(freqs, fax, tax, rates, opts, ::Type{C}) where {C}
     fax.degenerate && return "the frequency axis is degenerate"
-    issorted(freqs) || return "the channel frequencies are not sorted"
     freqgroups = _detect_freq_groups(freqs, fax.step)
     length(freqgroups) >= 2 || return "the channels form $(length(freqgroups)) band block(s), not at least two"
     return _build_mbd_axes(freqs, freqgroups, fax, tax, rates, opts, C)
@@ -943,8 +936,12 @@ function _build_mbd_axes(
         fax::_Axis, tax::_Axis, rates::AbstractVector{T}, opts::FringeSearch, ::Type{C},
     ) where {T, C}
     Δf = fax.step
-    f_lo = [Float64(freqs[first(b)]) for b in freqgroups]
-    maxbins = maximum(round(Int, (freqs[last(b)] - freqs[first(b)]) / Δf) + 1 for b in freqgroups)
+    spans = [extrema(view(freqs, b)) for b in freqgroups]
+    f_lo = Float64[first(s) for s in spans]
+    order = sortperm(f_lo)
+    all(k -> spans[order[k]][2] < spans[order[k + 1]][1], 1:(length(order) - 1)) ||
+        return "two band blocks overlap in frequency"
+    maxbins = maximum(round(Int, (hi - lo) / Δf) + 1 for (lo, hi) in spans)
     # The internal axes are tiny, so oversample them at least 4× regardless of
     # `opts.oversample` (which still governs the rate axis via `nt_pad`).
     osb = max(opts.oversample, 4)
@@ -958,7 +955,7 @@ function _build_mbd_axes(
     # must satisfy 2π·τmax·ε ≤ 0.3 rad across the delay window (the exact
     # matched filter, which uses the true frequencies, then removes even that
     # from the final delay/amp/phase/SNR).
-    offs = f_lo .- f_lo[1]
+    offs = f_lo .- minimum(f_lo)
     τmax = max(abs(opts.delay_window[1]), abs(opts.delay_window[2]), 1.0e-12)
     tol = 0.3 / (2π * τmax)
     Δbc = _approx_gcd(offs, tol)

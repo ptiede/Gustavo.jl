@@ -234,6 +234,23 @@ _quiet_write(path, ps) = Test.@test_logs (:warn, r"earth_orientation") write_uvf
         @test_throws "no direction to derive one from" _FITS_EXT._channel_direction([2.3e11])
     end
 
+    @testset "a window falling in frequency is written rising, as upper sideband" begin
+        path, _ = uvfits_fixture()
+        ps = load_uvfits(path)
+        falling = XRadio.ProcessingSet(
+            OrderedDict(k => read(ms)[Frequency = At(reverse(XRadio.frequencies(ms)))] for (k, ms) in pairs(ps)),
+            DimensionalData.metadata(ps),
+        )
+        @test all(ms -> issorted(XRadio.frequencies(ms); rev = true), falling)
+        out = _tmp()
+        write_uvfits(out, falling)
+        back = load_uvfits(out)
+        _test_same_set(ps, back; same_keys = false, time_atol = 0.01)
+        fq = only(h for h in fits(out) if get(h.cards, "EXTNAME", "") == "AIPS FQ").data
+        @test all(==(1), fq.SIDEBAND)
+        @test all(>(0), getproperty(fq, Symbol("CH WIDTH")))
+    end
+
     @testset "refusals" begin
         path, _ = uvfits_fixture()
         ps = load_uvfits(path)

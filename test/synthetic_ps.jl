@@ -38,6 +38,7 @@ keywords always give the same data.
 - `polarizations`: the stored correlation labels.
 - `receptors`: every station's receptors; the feed count is their number.
 - `ref_freq`, `chan_bw`, `spw_sep`, or `spw_origins` for explicit window starts.
+- `spw_names`: the spectral-window names, `band_1`, `band_2`, … by default.
 - `bandpass`, `amp_bandpass`: per-channel phase (rad) and log-amplitude, sized
   `(nant, nfeed, nspw·nchan)`, or `(nant, nfeed, nspw·nchan, nscans)` to change between
   scans.
@@ -60,7 +61,8 @@ function _build_fringe_ps(;
         seed = 1234,
         bandpass = nothing, amp_bandpass = nothing, dtec = nothing,
         feed_common = false, antenna_rate = nothing, rel_rate = nothing,
-        spw_origins = nothing, antenna_positions = nothing, omit_antenna = nothing,
+        spw_origins = nothing, spw_names = ["band_$b" for b in 1:nspw],
+        antenna_positions = nothing, omit_antenna = nothing,
         receptor_order = Dict{String, Vector{String}}(),
         antenna_gains = true, eltype = ComplexF32,
         weight = isnothing(noise) ? 1.0e3 : 2 / noise^2,
@@ -137,7 +139,7 @@ function _build_fringe_ps(;
             antennas = names, drop, antenna_xds,
             times = times .+ (s - 1) * scan_span, frequencies = freqs[b],
             polarizations, integration_time = integration, channel_width = chan_bw,
-            reference_frequency = ref_freq, spectral_window = "band_$b",
+            reference_frequency = ref_freq, spectral_window = spw_names[b],
             scan = string(s), field = "SRC1", source = "SRC1", direction = (1.234, -0.56),
             eltype,
         )

@@ -18,7 +18,7 @@ using OhMyThreads: DynamicScheduler, StaticScheduler, GreedyScheduler, SerialSch
 using OhMyThreads: Scheduler, tforeach, tmap
 using OhMyThreads.Schedulers: chunking_enabled, has_nchunks, nchunks
 
-using LinearAlgebra: BLAS
+using LinearAlgebra: BLAS, dot
 import StatsAPI
 using StatsAPI: fit
 
@@ -64,7 +64,7 @@ export DynamicScheduler, StaticScheduler, GreedyScheduler, SerialScheduler
 export AbstractGauge, PinAntenna, ZeroSumPhase, ByComponent, resolve_gauge
 export calibrate, calibrate!
 export FringeSearch, FringeClosure, Stationization, OutlierMixture, default_fringe_model, Bandpass,
-    Adhoc, default_adhoc_model, JointSmoother
+    Adhoc, default_adhoc_model, JointSmoother, PhaseCal
 # The gain-model vocabulary: everything a `model =` argument is written
 # in — components, terms, segmentations, feed tyings — under a bare
 # `using Gustavo`.

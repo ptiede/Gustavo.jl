@@ -446,7 +446,7 @@ end
 # rounding to a grid: a grid still splits two values that straddle a bucket
 # edge, which is the case this exists to remove. The canonical value is a real
 # observed value, so the axis keeps feeding physical `t - t0` and `f - f0`
-# arithmetic. `_time_indices` and `_channel_indices` match the geometry with the
+# arithmetic. `_time_indices` and `_channel_run` match the geometry with the
 # same tolerances, so the constructor and its readers agree.
 _freq_atol(f::Real) = 1.0e-9 * abs(Float64(f))
 
@@ -487,7 +487,8 @@ A Measurement Set may hold several scans. Sub-arrays observing different
 scans at the same timestamps are supported when their station sets are
 disjoint and they share the whole scan window, as for
 `DataGeometry`. Throws when a Measurement Set states no `scan_name` or `channel_width`,
-when a frequency falls in two spectral windows or has two widths, when two scans share a
+when the Measurement Sets of one spectral window hold different channels or widths, when
+a window's channels are not monotonic or two windows overlap in frequency, when two scans share a
 timestamp and a station, when a scan overlaps another over part of its
 span, and when the Measurement Sets' receptor counts differ.
 """
@@ -578,36 +579,23 @@ end
 
 # The union geometry of `pieces`, each holding channels `freqs` of one spectral
 # window `spw` and time samples `times` labeled per sample by `scans`, observed
-# by the stations in `active`.
+# by the stations in `active`. The first piece of a window sets its channels and
+# width; every later piece of that window must repeat them in the same order.
+# The channel axis is sorted, so a piece maps onto one contiguous run of it,
+# rising or falling.
 function _span_geometry(pieces, antennas, nfeed; f0, t0)
-    freq_spw = Dict{Float64, String}()
-    freq_width = Dict{Float64, Float64}()
+    windows = Dict{String, @NamedTuple{freqs::Vector{Float64}, width::Float64}}()
     time_scan = Dict{Float64, String}()
     time_antennas = Dict{Float64, Set{String}}()
     time_canon = Float64[]
-    freq_canon = Float64[]
     for piece in pieces
-        for f in piece.freqs
-            f = Float64(f)
-            f = _canonical!(freq_canon, f, _freq_atol(f))
-            prev = get(freq_spw, f, nothing)
-            (prev === nothing || prev == piece.spw) || throw(
-                ArgumentError(
-                    "channel frequency $f Hz appears in conflicting spectral " *
-                        "windows '$prev' and '$(piece.spw)' — a single concatenated channel " *
-                        "axis cannot dense-rank it to one spw. Partition the set so each " *
-                        "frequency belongs to one spw, or rename the spws consistently."
-                )
+        window = get!(() -> (; piece.freqs, piece.width), windows, piece.spw)
+        _repeats_window(window, piece) || throw(
+            ArgumentError(
+                "the Measurement Sets of spectral window '$(piece.spw)' hold different " *
+                    "channels or channel widths; each window has one frequency setup"
             )
-            freq_spw[f] = piece.spw
-            w = get!(freq_width, f, piece.width)
-            w == piece.width || throw(
-                ArgumentError(
-                    "channel frequency $f Hz has widths $w Hz and $(piece.width) Hz in " *
-                        "different Measurement Sets of spectral window '$(piece.spw)'"
-                )
-            )
-        end
+        )
         for (t, scan) in zip(piece.times, piece.scans)
             tk = _canonical!(time_canon, t, _epoch_atol(t))
             prev = get(time_scan, tk, nothing)
@@ -653,10 +641,29 @@ function _span_geometry(pieces, antennas, nfeed; f0, t0)
         )
     end
 
-    freqs = sort!(collect(keys(freq_spw)))
-    times = sort!(collect(keys(time_scan)))
+    freqs = Float64[]
+    spw_labels = String[]
+    channel_widths = Float64[]
+    for name in sort!(collect(keys(windows)); by = s -> minimum(windows[s].freqs))
+        w = windows[name]
+        for f in view(w.freqs, _rising_order(w.freqs))
+            push!(freqs, f)
+            push!(spw_labels, name)
+            push!(channel_widths, w.width)
+        end
+    end
+    for i in firstindex(freqs):(lastindex(freqs) - 1)
+        freqs[i + 1] - freqs[i] > _freq_atol(freqs[i + 1]) || throw(
+            ArgumentError(
+                "channels at $(freqs[i]) Hz (spectral window '$(spw_labels[i])') and " *
+                    "$(freqs[i + 1]) Hz (spectral window '$(spw_labels[i + 1])') do not " *
+                    "rise on the sorted channel axis: a window's channels must run " *
+                    "monotonically and windows must not overlap in frequency"
+            )
+        )
+    end
 
-    spw_labels = [freq_spw[f] for f in freqs]
+    times = sort!(collect(keys(time_scan)))
     scan_labels = [time_scan[t] for t in times]
 
     spw_of_chan, _ = _dense_rank_labels(spw_labels)
@@ -667,11 +674,19 @@ function _span_geometry(pieces, antennas, nfeed; f0, t0)
 
     return DataGeometry(;
         times, channel_freqs = freqs, scan_of_time, spw_of_chan,
-        channel_widths = [freq_width[f] for f in freqs], t0 = t0v, f0 = f0v,
+        channel_widths, t0 = t0v, f0 = f0v,
         scan_names = _unique_in_order(scan_labels), spw_names = _unique_in_order(spw_labels),
         antennas, nfeed,
     )
 end
+
+_repeats_window(window, piece) =
+    window.width == piece.width && length(window.freqs) == length(piece.freqs) &&
+    all(((a, b),) -> abs(a - b) <= _freq_atol(a), zip(window.freqs, piece.freqs))
+
+# The indices of `v`, in the order that runs up the values if `v` is monotonic.
+_rising_order(v::AbstractVector) =
+    last(v) < first(v) ? (lastindex(v):-1:firstindex(v)) : (firstindex(v):1:lastindex(v))
 
 # Dense-rank string labels to 1..k preserving first-appearance order.
 function _dense_rank_labels(labels::AbstractVector{<:AbstractString})
@@ -715,52 +730,55 @@ one Measurement Set, with no data attached.
 - `antennas` — for each baseline, in `baseline_id` order, the pair of indices
   into `geom.antennas` of its two antennas.
 
-θ is addressed by POSITION — a component's leaf indexed `(param, node, fseg_id,
-tseg_id, ant)` over global-length segment-id tables — while a Measurement Set's
-coordinates are PHYSICAL (Hz, seconds, antenna names, correlation labels), so
-this join cannot be recovered from the data alone.
-
-`GeometryWindow(geom, ms)` matches channels by frequency (`isapprox`, rtol
-1e-9), times by `_epoch_atol` on absolute seconds, and antennas by name, and
-throws on any that `geom` does not hold. The three-argument form addresses
-channels and times only, which is all evaluating gains needs; its station
-map is empty.
+`GeometryWindow(geom, ms)` throws when `geom` lacks the Measurement Set's
+channels, times or antennas. The three-argument form has no antennas.
 """
-struct GeometryWindow
+struct GeometryWindow{C <: AbstractVector{Int}}
     geom::DataGeometry
-    chan_idx::Vector{Int}
+    chan_idx::C
     ti_idx::Vector{Int}
     antennas::Vector{Tuple{Int, Int}}
+    GeometryWindow{C}(geom, chan_idx, ti_idx, antennas) where {C} = new{C}(geom, chan_idx, ti_idx, antennas)
+end
+
+function GeometryWindow(geom, chan_idx, ti_idx, antennas)
+    c = convert(AbstractVector{Int}, chan_idx)
+    return GeometryWindow{typeof(c)}(geom, c, ti_idx, antennas)
 end
 
 GeometryWindow(geom::DataGeometry, chan_idx, ti_idx) =
     GeometryWindow(geom, chan_idx, ti_idx, Tuple{Int, Int}[])
 
-function GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet)
-    isempty(geom.antennas) && throw(
-        ArgumentError("the geometry names no antennas; build it with `DataGeometry(ps)`")
-    )
-    index = Dict(n => i for (i, n) in pairs(geom.antennas))
-    antenna(n) = get(index, String(n)) do
-        throw(
-            ArgumentError(
-                "baseline antenna `$n` is not among the geometry's antennas, " *
-                    join(geom.antennas, ", ")
-            )
-        )
-    end
-    antennas = [(antenna(a), antenna(b)) for (a, b) in XRadio.baselines(ms)]
+GeometryWindow(geom::DataGeometry, ms::XRadio.MeasurementSet) = _geometry_window(
+    geom, DimensionalData.lookup(ms, XRadio.Frequency), XRadio.times(ms), XRadio.baselines(ms),
+)
+
+function _geometry_window(geom, fs, ts, baselines)
+    (
+        all(((a, b),) -> a in geom.antennas && b in geom.antennas, baselines) &&
+            any(f -> abs(f - first(fs)) <= _freq_atol(f), geom.channel_freqs)
+    ) || throw(ArgumentError("the geometry does not hold this Measurement Set's channels and antennas"))
     return GeometryWindow(
-        geom, _channel_indices(geom, XRadio.frequencies(ms)), _time_indices(geom, XRadio.times(ms)), antennas,
+        geom, _channel_run(geom, fs), _time_indices(geom, ts),
+        [(_antenna_position(geom, a), _antenna_position(geom, b)) for (a, b) in baselines],
     )
 end
 
-_channel_indices(geom::DataGeometry, fs) = [_channel_index(geom, Float64(f)) for f in fs]
+_antenna_position(geom::DataGeometry, name) = findfirst(==(name), geom.antennas)::Int
 
-function _channel_index(geom::DataGeometry, f)
-    j = findfirst(g -> abs(g - f) <= _freq_atol(f), geom.channel_freqs)
-    isnothing(j) && throw(ArgumentError("channel frequency $f Hz is not in the geometry"))
-    return j
+# The positions of channels `fs` on `geom`'s channel axis, in their own order:
+# a contiguous run, rising or falling.
+_channel_run(geom::DataGeometry, ms::XRadio.MeasurementSet) =
+    _channel_run(geom, DimensionalData.lookup(ms, XRadio.Frequency))::StepRange{Int, Int}
+
+function _channel_run(geom::DataGeometry, fs::AbstractVector)
+    i = findfirst(f -> abs(f - first(fs)) <= _freq_atol(f), geom.channel_freqs)
+    step = last(fs) < first(fs) ? -1 : 1
+    run = i:step:(i + step * (length(fs) - 1))
+    abs(geom.channel_freqs[last(run)] - last(fs)) <= _freq_atol(last(fs)) || throw(
+        ArgumentError("the Measurement Set's channels are not one contiguous run of the geometry's channel axis")
+    )
+    return run
 end
 
 _time_indices(geom::DataGeometry, ts) = [_time_index(geom, Float64(t)) for t in ts]

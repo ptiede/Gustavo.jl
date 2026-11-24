@@ -442,9 +442,7 @@ held-`S` quadratic `K` (its factor `F`) on the complement of the coarse space
 
 with `U = A·Z`. `Z` holds the constant of each track whose prior holds it:
 `S` absorbs those constants, so `A` sees them through the priors alone while
-`K` sees them through every correlation of the track. `F` and `U` are read
-where they are, so a refactorization of `F` and a new `U` in place carry over
-once `E` is refactored (`_refactor_coarse!`).
+`K` sees them through every correlation of the track.
 """
 mutable struct ProfilePreconditioner{F, E}
     const F::F

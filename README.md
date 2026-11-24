@@ -8,10 +8,10 @@
 Gustavo is a modular VLBI fringe-fitting and station-gain calibration package
 for radio interferometry. Data are MSv4: an XRadio.jl `ProcessingSet` of
 `MeasurementSet`s, each holding one spectral window. Gustavo fits
-calibration steps on them (fringe search for delay, rate and phase; ionospheric
-dispersion and single-band delay; station bandpass; per-integration
-atmospheric phase), one scan group at a time, and applies the solutions to the
-data.
+calibration steps on them (instrumental phase from injected phase-calibration
+tones; fringe search for delay, rate and phase; ionospheric dispersion and
+single-band delay; station bandpass; per-integration atmospheric phase), one
+scan group at a time, and applies the solutions to the data.
 
 Gustavo is experimental and unregistered: the API changes freely and without
 deprecation. (It also operates entirely on vibes and fried chicken.)
