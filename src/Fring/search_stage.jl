@@ -31,9 +31,10 @@ fits one offset per station for the whole track (the EHT-HOPS / rPICARD
 assumption) — bright scans pin it and weak scans inherit it, at the cost of
 coupling every scan into one system, solved after every scan is searched.
 
-The closure fits no constant phase. A station's per-scan phase trades against
-the source's phase, so the data do not determine it without a source model;
-it stays in the data for imaging or self-calibration. The later solves do not
+The model holds no constant phase. A station's per-scan phase across the band
+trades against the source's phase, so the data do not determine it without a
+source model; it stays in the data for imaging or self-calibration. (A phase
+split in frequency can be fit; see [`FringeClosure`](@ref Gustavo.FringeClosure).) The later solves do not
 need it: [`Bandpass`](@ref Gustavo.Bandpass) aligns each scan's band-averaged
 phase per baseline and feed pair, and [`Adhoc`](@ref Gustavo.Adhoc)
 removes each track's scan mean. The inter-feed delay is fit because a delay
@@ -85,7 +86,7 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 
 # What the matched filter does with a compiled component's θ block:
 #
-#   :delay / :rate          — stage B's station system of that kind writes it,
+#   :delay / :rate / :phase — stage B's station system of that kind writes it,
 #                             from the per-baseline search observable of the
 #                             same name.
 #   nothing                 — the matched filter does not touch it.
@@ -93,29 +94,28 @@ _same_component_signature(a::GainComponent, b::GainComponent) =
 # This is the matched filter's vocabulary, hence private: a global
 # least-squares fringe fitter fits θ through `evaluate_gains` directly.
 #
-# The stage-B kinds cover the single-parameter, band-wide terms whose observable
-# the search measures. Everything else must map to `nothing`, so that it is
-# unfittable by the matched filter rather than approximated: `_solve_kind_cols!`
-# writes one θ column per (station, feed, time) node — the block's first
-# parameter at the first frequency segment — so a multi-parameter term such as a
-# polynomial would have its trailing parameters left at zero. A constant phase,
-# a `Dispersion` and a frequency-segmented term fall through to `nothing` on the
-# checks below, so `can_fit` rejects them.
+# The stage-B kinds cover the single-parameter terms whose observable the search
+# measures, in any frequency segmentation: the closure places each detection
+# in the segment its channels fall in, and rejects one spanning several.
+# Everything else must map to `nothing`, so that it is unfittable by the
+# matched filter rather than approximated: `_solve_kind_cols!` writes one θ
+# column per (station, feed, frequency segment, time) node — the block's first
+# parameter — so a multi-parameter term such as a polynomial would have its
+# trailing parameters left at zero. A `Dispersion` falls through to `nothing`
+# on the checks below, so `can_fit` rejects it.
 #
 # The time axis is not decided here: whether a segmentation leaves a scan with
 # more than one θ column depends on the scan lengths, so `can_fit` answers it
 # against the geometry.
 function matched_kind(tc)
-    # The per-baseline search measures one delay and rate across the whole
-    # band, so only a component spanning it can receive that estimate.
-    tc.Frequency isa GlobalFrequency || return nothing
     term = tc.term
     term isa Delay && return :delay
     term isa Rate && return :rate
+    term isa ConstantTerm && return :phase
     return nothing
 end
 
-# Stage-B engine components `(plan, kind)` — the delay and rate terms the
+# Stage-B engine components `(plan, kind)` — the delay, rate and phase terms the
 # search + stationization solve, as declared by `matched_kind`, over every
 # phase component of `model`, the fringe closure's own model, so no other
 # solve's component can collide with a stage-B signature.
@@ -123,7 +123,7 @@ function fringe_stage_components(model, layout)
     comps = Tuple{ComponentPlan, Symbol}[]
     for (i, tc) in enumerate(phase_components(model))
         kind = matched_kind(tc)
-        kind in (:delay, :rate) || continue
+        kind in (:delay, :rate, :phase) || continue
         push!(comps, (layout.plans[i], kind))
     end
     return comps
@@ -174,13 +174,14 @@ end
 
 # EHT-HOPS-style station flags: a station's feed that participates in a scan
 # (has products there) but is left unconstrained by the surviving stage-B rows
-# keeps identity gains — record it as (station name, feed, geometry scan id) so
-# `calibrate` flags its products instead of passing raw phases through as if
-# they had been corrected. `covered` holds (station name, feed, position in
-# `dets`).
+# keeps identity gains — record it as (station name, feed, geometry scan id,
+# spectral window) so `calibrate` flags its products instead of passing raw
+# phases through as if they had been corrected. The window is `""` for a stack
+# searched across every window of `geom`, and each window it holds otherwise.
+# `covered` holds (station name, feed, position in `dets`).
 function unconstrained_flags(dets, covered, geom::DataGeometry)
     Base.require_one_based_indexing(dets)
-    flags = Tuple{String, Int, Int}[]
+    flags = Tuple{String, Int, Int, String}[]
     for gi in eachindex(dets)
         scanid = geom.scan_of_time[_scan_ti(dets[gi])]
         feeds = _scan_feeds(dets[gi])
@@ -188,11 +189,26 @@ function unconstrained_flags(dets, covered, geom::DataGeometry)
             st for (a, b) in _scan_pairs(dets[gi]) if a != b
                 for (fa, fb) in feeds for st in ((a, fa), (b, fb))
         )
-        for (name, f) in present
-            (name, f, gi) in covered || push!(flags, (name, f, scanid))
+        windows = _stack_windows(dets[gi], geom)
+        for (name, f) in present, w in windows
+            (name, f, gi) in covered || push!(flags, (name, f, scanid, w))
         end
     end
     return flags
+end
+
+# The spectral windows of `geom` a detection stack was searched over, or `[""]`
+# for all of them.
+function _stack_windows(sc, geom::DataGeometry)
+    chans = get(DimensionalData.metadata(sc), :channels, nothing)
+    isnothing(chans) && return [""]
+    rank, nspw = Calibration._dense_rank(geom.spw_of_chan)
+    ids = unique(rank[c] for c in chans)
+    length(ids) == nspw && return [""]
+    isempty(geom.spw_names) && throw(
+        ArgumentError("a detection stack covers some spectral windows of a geometry that names none, so its flags cannot name them"),
+    )
+    return [geom.spw_names[i] for i in ids]
 end
 
 """
@@ -215,7 +231,14 @@ function scan_antenna_terms(model, layout, θ, ti::Integer, antennas)
     for a in axes(delay, 1), f in axes(delay, 2)
         d = 0.0; r = 0.0; hd = false; hr = false
         for (plan, kind) in comps
-            node = _feed_node(plan.tying, f)        # fseg 1: stage-B terms are GlobalFrequency
+            kind === :phase && continue
+            plan.shape.Frequency == 1 || throw(
+                ArgumentError(
+                    "the $kind component $(join(plan.path, '.')) takes a value per frequency " *
+                        "segment, so a station has no one $kind for the scan",
+                ),
+            )
+            node = _feed_node(plan.tying, f)
             node == 0 && continue
             v = _component_leaf(plan, θ)[1, node, 1, plan.tseg_id[ti], a]
             if kind === :delay
@@ -298,11 +321,13 @@ function steer_scan(
 end
 
 # The flag block for the solution `info` (plain parallel vectors): the
-# stage-B-unconstrained (station name, feed, scan) triples.
+# stage-B-unconstrained (station name, feed, scan, spectral window) entries,
+# the window `""` for every window.
 function flag_table(antenna_flags)
     return (;
         flagged_ant = String[f[1] for f in antenna_flags],
         flagged_feed = Int[f[2] for f in antenna_flags],
         flagged_scan = Int[f[3] for f in antenna_flags],
+        flagged_window = String[f[4] for f in antenna_flags],
     )
 end

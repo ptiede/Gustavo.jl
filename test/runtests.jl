@@ -81,6 +81,10 @@ include("test_axis_order.jl")
 # opt-in, fit-on-subset masking, corrections before the fit.
 include("test_fringe_fit.jl")
 
+# The closure split by spectral window: a delay and phase per window beside a
+# band-wide rate, against a source phase the windows share.
+include("test_fringe_window_phase.jl")
+
 # The Bandpass solver: model vetting, deterministic folding, the per-track
 # record, and portable calibrate!.
 include("test_bandpass.jl")

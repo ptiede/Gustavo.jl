@@ -193,25 +193,28 @@ function _flag_absent_antennas!(ms::XRadio.MeasurementSet, win::GeometryWindow, 
     return ms
 end
 
-# The unconstrained (station name, feed, scan id) triples `sol` records,
-# as a lookup set, `nothing` when it records none.
+# The unconstrained (station name, feed, scan id, spectral window) entries
+# `sol` records, as a lookup set, `nothing` when it records none. The window
+# `""` stands for every window.
 function _solution_flag_sets(sol::CalibrationSolution)
     info = sol.info
     haskey(info, :flagged_ant) || return nothing
+    window = get(() -> fill("", length(info.flagged_ant)), info, :flagged_window)
     flagged = Set(
-        (String(info.flagged_ant[i]), Int(info.flagged_feed[i]), Int(info.flagged_scan[i]))
-            for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan)
+        (String(info.flagged_ant[i]), Int(info.flagged_feed[i]), Int(info.flagged_scan[i]), String(window[i]))
+            for i in eachindex(info.flagged_ant, info.flagged_feed, info.flagged_scan, window)
     )
     return isempty(flagged) ? nothing : flagged
 end
 
 # Flag the samples of each product whose (station, feed) on either side is in
 # `flagged` for that scan, scans indexing the solution's geometry `solgeom`,
-# matched by name.
+# matched by name, and for every window or this Measurement Set's.
 function _flag_unconstrained!(ms::XRadio.MeasurementSet, win::GeometryWindow, solgeom::DataGeometry, flagged)
     isnothing(flagged) && return ms
     station = Dict(n => i for (i, n) in pairs(win.geom.antennas))
-    unconstrained = Set((station[st], f, s) for (st, f, s) in flagged if haskey(station, st))
+    spw = XRadio.spectralwindow(ms)
+    unconstrained = Set((station[st], f, s) for (st, f, s, w) in flagged if haskey(station, st) && (isempty(w) || w == spw))
     scan = [_solution_scan(solgeom, String(c)) for c in ms[:scan_name]]
     feeds = feed_pairs(ms)
     flag = ms[:flag]

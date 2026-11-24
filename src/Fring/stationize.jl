@@ -90,7 +90,7 @@ robust_weight(::Cauchy, u::Real) = inv(1 + u)
 
 """
     Stationization(; eltype = Float64, pfa_max, weak_sys_scale, loss, loss_scale,
-                     irls_iters, systematic_delay, systematic_delay_rate,
+                     irls_iters, systematic_delay, systematic_delay_rate, systematic_phase,
                      max_em_iterations, em_tolerance)
     Stationization{T}(; kw...)
 
@@ -111,7 +111,7 @@ joins stations into a group, so a marginal baseline is measured at the
 fringe location the accepted detections fixed without being able to invent
 one.
 
-Every correlation product contributes a row to the delay and rate systems;
+Every correlation product contributes a row to each system the model has;
 which parameters a row touches is set by the model's feed tying.
 
 `loss`/`loss_scale`/`irls_iters` control robust downweighting: after each
@@ -123,11 +123,11 @@ Weights come from the noise model rather than the residual spread, so
 `loss_scale` cuts at the same effective threshold whatever the system size.
 `loss = LeastSquares()` disables downweighting.
 
-`systematic_delay` (seconds) and `systematic_delay_rate` (seconds per second)
-are floors added in quadrature to a row's CRB uncertainty:
-`w = 1/(σ_CRB² + systematic²)`. A rate row's floor is `systematic_delay_rate`
-times its scan's mean frequency (`freq_mean`), since a non-dispersive delay
-rate τ̇ moves the fringe rate by `ν·τ̇`. Both default to 0. A floor above the
+`systematic_delay` (seconds), `systematic_delay_rate` (seconds per second) and
+`systematic_phase` (radians) are floors added in quadrature to a row's CRB
+uncertainty: `w = 1/(σ_CRB² + systematic²)`. A rate row's floor is
+`systematic_delay_rate` times its scan's mean frequency (`freq_mean`), since a
+non-dispersive delay rate τ̇ moves the fringe rate by `ν·τ̇`. All default to 0. A floor above the
 CRB σ of a scan's rows gives them equal weight, and the robust loss can then
 no longer tell which side of an inconsistent closure is wrong: it splits the
 misfit among the closure's rows instead of leaving it on the weakest.
@@ -148,6 +148,7 @@ struct Stationization{T <: AbstractFloat, L <: AbstractRobustLoss}
     irls_iters::Int
     systematic_delay::T
     systematic_delay_rate::T
+    systematic_phase::T
     max_em_iterations::Int
     em_tolerance::T
 end
@@ -157,12 +158,12 @@ Stationization(; eltype::Type{<:AbstractFloat} = Float64, kw...) = Stationizatio
 function Stationization{T}(;
         pfa_max = 1.0e-4, weak_sys_scale = 1.0e3,
         loss = SoftL1(), loss_scale = 8.0, irls_iters = 20,
-        systematic_delay = 0.0, systematic_delay_rate = 0.0,
+        systematic_delay = 0.0, systematic_delay_rate = 0.0, systematic_phase = 0.0,
         max_em_iterations = 200, em_tolerance = 1.0e-3,
     ) where {T}
     return Stationization{T, typeof(loss)}(
         pfa_max, weak_sys_scale, loss, loss_scale, irls_iters, systematic_delay, systematic_delay_rate,
-        max_em_iterations, em_tolerance,
+        systematic_phase, max_em_iterations, em_tolerance,
     )
 end
 
@@ -208,7 +209,7 @@ end
 
 # Statistical σ of one observable, from the CRB.
 _sigma_stat(kind::Symbol, snr::Real, σ_ν::Real, σ_t::Real) =
-    kind === :delay ? inv(2π * σ_ν * snr) : inv(2π * σ_t * snr)
+    kind === :delay ? inv(2π * σ_ν * snr) : kind === :rate ? inv(2π * σ_t * snr) : inv(snr)
 
 # Inverse-variance weight: statistical σ with a systematic floor in quadrature,
 # the whole σ then inflated by `scale` (1 for an accepted detection, and
@@ -251,6 +252,139 @@ function _rate_floor(delay_rate, freq_mean)
         ),
     )
     return delay_rate * freq_mean
+end
+
+# The frequency segment of `plan` a detection stack's channels fall in. A
+# stack recording no channels was searched across the whole band, which only a
+# component unsplit in frequency can take.
+function _stack_segment(plan::ComponentPlan, sc)
+    chans = get(DimensionalData.metadata(sc), :channels, nothing)
+    if isnothing(chans)
+        plan.shape.Frequency == 1 && return 1
+        throw(
+            ArgumentError(
+                "the component $(join(plan.path, '.')) is split in frequency, but a detection " *
+                    "stack records no `channels` to place it in a segment",
+            ),
+        )
+    end
+    segs = unique(plan.fseg_id[c] for c in chans)
+    length(segs) == 1 || throw(
+        ArgumentError(
+            "a detection's channels span $(length(segs)) frequency segments of the component " *
+                "$(join(plan.path, '.')), which takes one value per segment; search each " *
+                "segment on its own, e.g. grouping the data by scan and spectral window",
+        ),
+    )
+    return only(segs)
+end
+
+# The phase station `a`'s feed `f` has from the delay and rate components of
+# `reference` at the stack's reference frequency and epoch, from the values
+# already in `θ`.
+function _reference_phase(θ, reference, sc, a, f)
+    meta = DimensionalData.metadata(sc)
+    f0, epoch = get(meta, :f0, nothing), get(meta, :epoch, nothing)
+    (isnothing(f0) || isnothing(epoch)) && throw(
+        ArgumentError(
+            "a phase row needs the frequency `f0` and epoch `epoch` its detection's phase " *
+                "is referenced to, which this detection stack's metadata does not record",
+        ),
+    )
+    ti = _scan_ti(sc)
+    φ = 0.0
+    for (plan, kind) in something(reference, ())
+        node = _feed_node(plan.tying, f)
+        node == 0 && continue
+        fs, ts = _stack_segment(plan, sc), plan.tseg_id[ti]
+        v = θ[_block_index(plan, node, fs, ts, a)]
+        φ += kind === :delay ? 2π * v * Calibration.freq_coordinate(plan.term, f0, plan.fstate, fs) :
+            2π * v * Calibration.time_coordinate(plan.term, epoch, plan.tstate, ts)
+    end
+    return φ
+end
+
+# Move each phase row by whole turns to within half a turn of the value the
+# station and source phases predict. Row `i` observes
+# `Σ x[A[i]] − Σ x[B[i]] + x[extra[i]]`, from the detection stack `stack[i]`.
+# The phases start from the accepted rows: each source phase from its row in
+# the heaviest stack that has one, so every baseline of a scan takes the same
+# reference, then the station phases along a maximum-weight spanning tree of
+# the rows relating one station node to another. Averaging unit phasors node by
+# node, weighted by `w`, then refines them until no phase moves by more than
+# `tol`.
+function _unwrap_phase_rows!(val, A, B, extra, w, accept, stack, nnodes; sweeps = 500, tol = 1.0e-9)
+    x = zeros(nnodes)
+    used = [i for i in eachindex(val, A, B, extra, w, accept, stack) if accept[i]]
+    stack_weight = Dict{Int, Float64}()
+    for i in used
+        stack_weight[stack[i]] = get(stack_weight, stack[i], 0.0) + w[i]
+    end
+    reference = Dict{Int, Int}()
+    for i in used
+        extra[i] == 0 && continue
+        r = get(reference, extra[i], 0)
+        (r == 0 || (stack_weight[stack[i]], w[i]) > (stack_weight[stack[r]], w[r])) && (reference[extra[i]] = i)
+    end
+    for (n, i) in reference
+        x[n] = val[i]
+    end
+    # A union–find over station nodes holding each node's phase relative to
+    # its root, joined along the heaviest rows first.
+    root = collect(1:nnodes)
+    offset = zeros(nnodes)
+    path = Int[]
+    function find(n)
+        empty!(path)
+        while root[n] != n
+            push!(path, n)
+            n = root[n]
+        end
+        total = 0.0
+        for m in Iterators.reverse(path)
+            total += offset[m]
+            root[m], offset[m] = n, total
+        end
+        return n, isempty(path) ? 0.0 : offset[first(path)]
+    end
+    for i in sort(used; by = i -> -w[i])
+        (length(A[i]) == 1 && length(B[i]) == 1) || continue
+        ra, oa = find(only(A[i]))
+        rb, ob = find(only(B[i]))
+        ra == rb && continue
+        target = val[i] - (extra[i] == 0 ? 0.0 : x[extra[i]])
+        root[rb], offset[rb] = ra, oa - ob - target
+    end
+    for n in eachindex(x)
+        haskey(reference, n) && continue
+        r, o = find(n)
+        r == n || (x[n] = o)
+    end
+
+    touching = [Tuple{Int, Int}[] for _ in 1:nnodes]
+    for i in used
+        foreach(n -> push!(touching[n], (i, 1)), A[i])
+        foreach(n -> push!(touching[n], (i, -1)), B[i])
+        extra[i] == 0 || push!(touching[extra[i]], (i, 1))
+    end
+    predicted(i) = sum(n -> x[n], A[i]; init = 0.0) - sum(n -> x[n], B[i]; init = 0.0) + (extra[i] == 0 ? 0.0 : x[extra[i]])
+    for _ in 1:sweeps
+        change = 0.0
+        for n in eachindex(touching, x)
+            isempty(touching[n]) && continue
+            z = sum(((i, σ),) -> w[i] * cis(σ * (val[i] - predicted(i)) + x[n]), touching[n])
+            iszero(z) && continue
+            step = rem2pi(angle(z) - x[n], RoundNearest)
+            x[n] += step
+            change = max(change, abs(step))
+        end
+        change < tol && break
+    end
+    for i in eachindex(val)
+        p = predicted(i)
+        val[i] = p + rem2pi(val[i] - p, RoundNearest)
+    end
+    return val
 end
 
 # ── Generic, model-driven station solve ─────────────────────────────────────
@@ -315,9 +449,12 @@ function detection_stack(
 end
 
 # A detection stack's scan-level provenance: the representative global time
-# index, and the mean frequency and RMS frequency/time spreads the weights need.
-_scan_meta(ti, freq_mean, freq_rms, time_rms, delay_window = nothing, rate_window = nothing) =
-    (; ti = Int(ti), freq_mean, freq_rms, time_rms, delay_window, rate_window)
+# index, the mean frequency and RMS frequency/time spreads the weights need,
+# the searched windows, and, for phase rows, the frequency `f0` and epoch the
+# phases are referenced to and the searched `channels`, as positions in the
+# solve geometry.
+_scan_meta(ti, freq_mean, freq_rms, time_rms, delay_window = nothing, rate_window = nothing; channels = nothing, f0 = nothing, epoch = nothing) =
+    (; ti = Int(ti), freq_mean, freq_rms, time_rms, delay_window, rate_window, channels, f0, epoch)
 
 # Attach a representative global time index to an existing detection stack (the
 # search's own `search_scan` return, which carries no `:ti` — the caller knows
@@ -325,8 +462,8 @@ _scan_meta(ti, freq_mean, freq_rms, time_rms, delay_window = nothing, rate_windo
 _with_ti(
     stack::AbstractDimStack, ti::Integer; freq_mean::Union{Nothing, Real} = nothing,
     freq_rms::Union{Nothing, Real} = nothing, time_rms::Union{Nothing, Real} = nothing,
-    delay_window = nothing, rate_window = nothing,
-) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, freq_mean, freq_rms, time_rms, delay_window, rate_window))
+    delay_window = nothing, rate_window = nothing, channels = nothing, f0 = nothing, epoch = nothing,
+) = DimensionalData.rebuild(stack; metadata = _scan_meta(ti, freq_mean, freq_rms, time_rms, delay_window, rate_window; channels, f0, epoch))
 
 _scan_pairs(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, AntennaPair))
 _scan_feeds(sc::AbstractDimStack) = collect(DimensionalData.lookup(sc, FeedPair))
@@ -339,12 +476,26 @@ _scan_ti(sc::AbstractDimStack) = DimensionalData.metadata(sc).ti
 """
     solve_antenna_systems!(θ, scans, components, antennas; gauge, opts, times) -> (ncomp, covered, unlinked, fits)
 
-Solve the stage-B fringe systems (delay and rate) over `scans` and
+Solve the stage-B fringe systems (delay, rate and phase) over `scans` and
 accumulate the per-(station, feed) values into `θ` at the columns the model
 declares. `antennas` are the station names the layout numbers; each
 detection's antenna pair is matched to them by name. `components` is a vector
 of `(plan::ComponentPlan, kind::Symbol)` with
-`kind ∈ (:delay, :rate)`. Multiple components of the same kind are summed
+`kind ∈ (:delay, :rate, :phase)`. A component split in frequency takes each
+detection in the segment its channels (`channels` in the stack's metadata, as
+positions in the plans' geometry) fall in, and a detection whose channels span
+several segments is an error.
+
+The phase system is solved after the delay and rate ones: each row is the
+detection's phase at its stack's reference frequency `f0` and epoch `epoch`
+(metadata) less the solved delays' and rates' phase there, so the constant
+phases hold what those leave. Each row also carries a source phase per (scan,
+antenna pair, feed pair), shared by the frequency segments of the scan, so only
+the differences between segments inform the station phases, in any
+polarization basis; each (station, feed, scan) takes phases summing to zero
+over its segments, the rest of its phase being the source's. Rows are moved by
+whole turns to within half a turn of the station phases that averaging unit
+phasors around the array gives, so the linear solve sees no wraps. Multiple components of the same kind are summed
 per (station, feed) observation: e.g. a feed-common `PerScan × SharedFeeds` term
 plus a `GlobalTime × ExceptFeed(1)` inter-feed offset both feed the delay
 system, so a row on feed `k ≠ 1` touches both columns and a stable inter-feed offset is solved
@@ -365,6 +516,14 @@ each segment. The prior ties the segments' values, so a column it ties counts
 as constrained, and a station's feed is covered where every column of its value
 is constrained and one is tied.
 
+The phase system holds no column two scans share unless a phase component spans
+scans or carries a prior along `Ti`, so it is solved one group of stacks at a
+time, the stacks whose phase columns fall in the same time segments, unless
+the [`OutlierMixture`](@ref) loss shares its parameters across them. A phase
+row's source phase is shared by the stacks of one scan: `scan_of_time` maps a
+stack's time index to its scan, and without it each time index is its own
+scan.
+
 `fits` holds, per kind that ran the EM of `Stationization`, the resolved prior
 of each chain, the [`OutlierMixture`](@ref) parameters per row class, and the
 rows more likely unexplained than not.
@@ -377,6 +536,7 @@ it, at the gauge's preferred station, so it is not measured.
 function solve_antenna_systems!(
         θ::AbstractVector, scans, components, antennas;
         gauge::AbstractGauge, opts::Stationization{T} = Stationization(), times = nothing,
+        scan_of_time = nothing,
     ) where {T}
     # θ columns are numbered from 1 (`_block_index`).
     Base.require_one_based_indexing(θ)
@@ -392,10 +552,12 @@ function solve_antenna_systems!(
     unlinked = Set{Tuple{Symbol, Int}}()
     fits = Dict{Symbol, Any}()
     first_kind = true
-    for kind in (:delay, :rate)
+    for kind in (:delay, :rate, :phase)
         plans = [c[1] for c in components if c[2] === kind]
         isempty(plans) && continue
-        nc, cov, solved, constrained, free_scans, fit = _solve_kind_cols!(θ, scans, plans, index, gauge, opts, Val(kind), times)
+        reference = kind === :phase ? [c for c in components if c[2] !== :phase] : nothing
+        parts = kind === :phase ? _independent_parts(scans, plans, opts) : [collect(eachindex(scans))]
+        nc, cov, solved, constrained, free_scans, fit = _solve_parts!(θ, scans, parts, plans, index, gauge, opts, Val(kind), times; reference, scan_of_time)
         isnothing(fit) || (fits[kind] = fit)
         union!(unlinked, ((kind, si) for si in free_scans))
         union!(unconstrained, setdiff(keys(solved), constrained))
@@ -413,6 +575,48 @@ function solve_antenna_systems!(
     return ncomp, Set{Tuple{eltype(antennas), Int, Int}}((antennas[a], f, si) for (a, f, si) in covered), unlinked, fits
 end
 
+# The stacks of `scans` grouped so that no phase column of `plans` is shared
+# between groups: by the time segments the plans give each stack, or all
+# together where a prior along `Ti` or an `OutlierMixture` ties segments.
+function _independent_parts(scans, plans, opts::Stationization)
+    together = opts.loss isa OutlierMixture ||
+        any(plan -> any(p -> !isnothing(_prior_along(p, :Ti)), plan.priors), plans)
+    together && return [collect(eachindex(scans))]
+    parts = OrderedDict{Vector{Int}, Vector{Int}}()
+    for (k, sc) in pairs(scans)
+        ti = _scan_ti(sc)
+        push!(get!(parts, [plan.tseg_id[ti] for plan in plans], Int[]), k)
+    end
+    return collect(values(parts))
+end
+
+# `_solve_kind_cols!` over each part of `scans` in turn, its results in terms of
+# positions in `scans`: the component counts summed, and the coverage, solved
+# and constrained columns, and unlinked stacks gathered. A kind running an EM is
+# solved as one part.
+function _solve_parts!(θ, scans, parts, plans, index, gauge, opts::Stationization{T}, ::Val{kind}, times; kw...) where {T, kind}
+    if length(parts) == 1
+        return _solve_kind_cols!(θ, scans[only(parts)], plans, index, gauge, opts, Val(kind), times; kw...)
+    end
+    ncomp = 0
+    cov = (; touched = Set{Tuple{Int, Int, Int}}(), determined = Set{Tuple{Int, Int, Int}}(), tied = Set{Tuple{Int, Int, Int}}())
+    solved = Dict{Int, T}()
+    constrained = Set{Int}()
+    free = Set{Int}()
+    for part in parts
+        nc, c, s, con, fr, fit = _solve_kind_cols!(θ, scans[part], plans, index, gauge, opts, Val(kind), times; kw...)
+        isnothing(fit) || error("a $kind solve split by scan ran an EM; it must be solved as one part")
+        ncomp += nc
+        for (field, set) in pairs(c)
+            union!(cov[field], ((st, f, part[si]) for (st, f, si) in set))
+        end
+        merge!(solved, s)
+        union!(constrained, con)
+        union!(free, (part[si] for si in fr))
+    end
+    return ncomp, cov, solved, constrained, free, nothing
+end
+
 # Solve one observable kind across all scans, accumulating into θ. Each detection
 # becomes a station-difference row whose a-/b-side touch the sum of all `plans`'
 # θ columns for that (station, feed, time) — a feed-common per-scan column and,
@@ -424,9 +628,8 @@ end
 # compile time; the caller's `Val(kind)` is the only dynamic dispatch.
 function _solve_kind_cols!(
         θ::AbstractVector, scans, plans, index, gauge::AbstractGauge, opts::Stationization{T},
-        ::Val{kind}, times,
+        ::Val{kind}, times; reference = nothing, scan_of_time = nothing,
     ) where {T, kind}
-    getval(d) = getfield(d, kind)
     spread_key = kind === :delay ? :freq_rms : :time_rms
 
     colnode = Dict{Int, Int}()               # θ column → local node id
@@ -453,12 +656,22 @@ function _solve_kind_cols!(
         return length(node_col)
     end
 
+    # A phase row's source phase: one node per (scan, antenna pair, feed pair),
+    # shared by the scan's frequency segments.
+    sources = Dict{NTuple{5, Int}, Int}()
+    scan_of(ti) = isnothing(scan_of_time) ? ti : scan_of_time[ti]
+    sourcenode(ti, a, b, fa, fb, sidx) = get!(() -> latentnode(0, 0, sidx, (:source,)), sources, (scan_of(ti), a, b, fa, fb))
+    # A phase node's (component, station, feed node, time segment): the nodes
+    # sharing one sum to zero over their frequency segments.
+    sumkey = Dict{Int, Tuple{Tuple{Vararg{Symbol}}, Int, Int, Int}}()
+
     # Rows in θ-column space: each side is the list of θ columns whose sum is
-    # that station's value for this observable (+1 on a-side, −1 on b-side).
+    # that station's value for this observable (+1 on a-side, −1 on b-side),
+    # plus `rextra`, a node entering at +1 (a phase row's source phase) or 0.
     # `rlinks` pairs each column with the same component's column on the other
     # side; they define the gauge components (see `_gauge_components`).
     rowA = Vector{Int}[]; rowB = Vector{Int}[]; rlinks = Vector{Tuple{Int, Int}}[]
-    rval = T[]; rw = T[]; rscan = Int[]
+    rextra = Int[]; rval = T[]; rw = T[]; rscan = Int[]
     rsta_a = Int[]; rsta_b = Int[]; rfeed_a = Int[]; rfeed_b = Int[]
     # Per row: whether its detection is real (`pfa <= pfa_max`). Only these
     # connect stations into a fringe group; the rest constrain and no more.
@@ -469,12 +682,15 @@ function _solve_kind_cols!(
         end
         feeds = _scan_feeds(sc)
         ti = _scan_ti(sc)
+        fsegs = [_stack_segment(plan, sc) for plan in plans]
         # Per scan, not per row: the band and duration are properties of the
         # observation, so every row of one scan shares this lever arm.
-        σ = T(_require_spread(getproperty(DimensionalData.metadata(sc), spread_key), kind, opts.loss))
+        σ = kind === :phase ? one(T) : T(_require_spread(getproperty(DimensionalData.metadata(sc), spread_key), kind, opts.loss))
         σν = kind === :delay ? σ : one(T)
         σt = kind === :rate ? σ : one(T)
-        sys = kind === :delay ? T(opts.systematic_delay) : T(_rate_floor(opts.systematic_delay_rate, DimensionalData.metadata(sc).freq_mean))
+        sys = kind === :delay ? T(opts.systematic_delay) :
+            kind === :rate ? T(_rate_floor(opts.systematic_delay_rate, DimensionalData.metadata(sc).freq_mean)) :
+            T(opts.systematic_phase)
         for bi in eachindex(bl_pairs), p in eachindex(feeds)
             det = sc[AntennaPair(bi), FeedPair(p)]
             det.valid || continue                   # no data in this cell, no measurement
@@ -483,18 +699,29 @@ function _solve_kind_cols!(
             fa, fb = feeds[p]
             accept = det.pfa <= opts.pfa_max
             nsA = Int[]; nsB = Int[]; links = Tuple{Int, Int}[]
-            for plan in plans
+            for (plan, fs) in zip(plans, fsegs)
+                ts = plan.tseg_id[ti]
                 na = _feed_node(plan.tying, fa)
-                ca = na == 0 ? 0 : _block_index(plan, na, 1, plan.tseg_id[ti], a)
+                ca = na == 0 ? 0 : _block_index(plan, na, fs, ts, a)
                 ca != 0 && push!(nsA, getnode(ca, a, fa, sidx, plan.path))
                 nb = _feed_node(plan.tying, fb)
-                cb = nb == 0 ? 0 : _block_index(plan, nb, 1, plan.tseg_id[ti], b)
+                cb = nb == 0 ? 0 : _block_index(plan, nb, fs, ts, b)
                 cb != 0 && push!(nsB, getnode(cb, b, fb, sidx, plan.path))
                 ca != 0 && cb != 0 && push!(links, (last(nsA), last(nsB)))
+                if kind === :phase
+                    ca != 0 && (sumkey[last(nsA)] = (plan.path, a, na, ts))
+                    cb != 0 && (sumkey[last(nsB)] = (plan.path, b, nb, ts))
+                end
             end
             (isempty(nsA) || isempty(nsB)) && continue
             push!(rowA, nsA); push!(rowB, nsB); push!(rlinks, links)
-            push!(rval, getval(det))
+            if kind === :phase
+                push!(rextra, sourcenode(ti, a, b, fa, fb, sidx))
+                push!(rval, det.phase - _reference_phase(θ, reference, sc, a, fa) + _reference_phase(θ, reference, sc, b, fb))
+            else
+                push!(rextra, 0)
+                push!(rval, getfield(det, kind))
+            end
             push!(rw, _row_weight(_sigma_stat(kind, det.snr, σν, σt), sys, accept ? one(T) : opts.weak_sys_scale))
             push!(raccept, accept)
             push!(rscan, sidx)
@@ -507,6 +734,9 @@ function _solve_kind_cols!(
     end
     chains = _prior_chains!(getnode, latentnode, colnode, node_feed, plans, scans, times)
     priors = Any[_hyper_start(ch.spec) for ch in chains]
+    kind === :phase && _unwrap_phase_rows!(rval, rowA, rowB, rextra, rw, raccept, rscan, length(node_col))
+    groups = Dict(k => g for (g, k) in enumerate(unique(values(sumkey))))
+    node_sum = [get(() -> 0, groups, get(sumkey, n, nothing)) for n in eachindex(node_col)]
 
     # Robust solve: IRLS over `opts.loss`, rescaling each row's noise-model
     # weight by the loss's derivative at that row's normalized residual (see
@@ -515,11 +745,11 @@ function _solve_kind_cols!(
     # An `OutlierMixture` starts from the `SoftL1` solution.
     w = copy(rw)
     rows = (;
-        A = rowA, B = rowB, links = rlinks, val = rval, accept = raccept,
+        A = rowA, B = rowB, extra = rextra, links = rlinks, val = rval, accept = raccept,
         sta_a = rsta_a, feed_a = rfeed_a, sta_b = rsta_b, feed_b = rfeed_b, scan = rscan,
         prior = _prior_block(chains, priors, length(node_col), T),
     )
-    nodes = (; feed = node_feed, antenna = node_antenna, scan = node_scan, component = node_path)
+    nodes = (; feed = node_feed, antenna = node_antenna, scan = node_scan, component = node_path, sum_group = node_sum)
     # The gauge is chosen once, from the noise-model weights: reweighting moves
     # the station values, not the reference they are measured against.
     g = _gauge_rows(rows, w, nodes, gauge, kind)
@@ -556,7 +786,9 @@ function _solve_kind_cols!(
     )
     chained = Set{Int}(node_col[first(ch.states[k])] for ch in chains for k in eachindex(ch.states))
     covered = _covered_antenna_feeds(rows, node_col, accepted, chained)
-    return ncomp, covered, solved, union(accepted, chained), _unlinked_scans(_incidence(rows, length(node_col), T), rows), fits
+    A = _incidence(rows, length(node_col), T)
+    fixed, _ = _sum_to_zero_rows(zeros(T, 0, size(A, 2)), T[], node_sum)
+    return ncomp, covered, solved, union(accepted, chained), _unlinked_scans(A, rows; fixed), fits
 end
 
 # The chains a prior along time runs over in a kind's system, one per (station,
@@ -574,10 +806,10 @@ function _prior_chains!(getnode, latentnode, colnode, node_feed, plans, scans, t
         epochs = [_segment_time(plan, times, k) for k in 1:plan.shape.Ti]
         order = sortperm(epochs)
         scan_of = Dict(plan.tseg_id[_scan_ti(sc)] => sidx for (sidx, sc) in pairs(scans))
-        for a in eachindex(plan.priors), n in 1:plan.shape.node
+        for a in eachindex(plan.priors), n in 1:plan.shape.node, fs in 1:plan.shape.Frequency
             spec = _prior_along(plan.priors[a], :Ti)
             isnothing(spec) && continue
-            cols = [_block_index(plan, n, 1, k, a) for k in order]
+            cols = [_block_index(plan, n, fs, k, a) for k in order]
             present = findfirst(c -> haskey(colnode, c), cols)
             isnothing(present) && continue
             fd = node_feed[colnode[cols[present]]]
@@ -639,7 +871,8 @@ _hyper_order(p::OUPrior) = (p.scale, p.σ)
 _hyper_order(p::CARMAPrior) = _hyper_specs(p)
 
 # The width of the window a scan's search covered in `kind`'s observable.
-_search_width(sc, kind) = (w = getproperty(DimensionalData.metadata(sc), kind === :delay ? :delay_window : :rate_window); w[2] - w[1])
+_search_width(sc, kind) = kind === :phase ? 2π :
+    (w = getproperty(DimensionalData.metadata(sc), kind === :delay ? :delay_window : :rate_window); w[2] - w[1])
 
 # Each row's class: `1` where it relates the same feed index on its two
 # stations, `2` where different ones.
@@ -882,8 +1115,21 @@ function _gauge_rows(rows, w, nodes, gauge::AbstractGauge, kind::Symbol; sides =
     C, d = _gauge_system(gauge, GaugeFreedoms{T}(freedoms, nnodes))
     # The null-space test and the gauge basis work on dense rows.
     C = Matrix(C)
+    C, d = _sum_to_zero_rows(C, d, nodes.sum_group)
     C, d = _pin_leftover_freedoms(C, d, A, rows, nodew, gauge, sides)
     return (; A, C, d, ncomp)
+end
+
+# One row per group of `sum_group` (0 for a node in none) holding its nodes'
+# sum at zero.
+function _sum_to_zero_rows(C, d, sum_group)
+    ngroup = maximum(sum_group; init = 0)
+    ngroup == 0 && return C, d
+    S = zeros(eltype(C), ngroup, size(C, 2))
+    for (n, g) in pairs(sum_group)
+        g == 0 || (S[g, n] = one(eltype(C)))
+    end
+    return vcat(C, S), vcat(d, zeros(eltype(d), ngroup))
 end
 
 # The feasible set `x0 + Z·y` of the gauge rows `Cx = d`. An unknown no row
@@ -1017,26 +1263,30 @@ function _node_covariance(cov, chains, nnodes)
     return sparse(I, J, [cov(i, j) for (i, j) in zip(I, J)], nnodes, nnodes, (a, b) -> a)
 end
 
-# Row `i` observes `Σ x[rows.A[i]] − Σ x[rows.B[i]]`.
+# Row `i` observes `Σ x[rows.A[i]] − Σ x[rows.B[i]] + x[rows.extra[i]]`, the
+# last term absent where `rows.extra[i]` is 0.
 function _incidence(rows, nnodes::Integer, ::Type{T}) where {T}
     I, J, V = Int[], Int[], T[]
-    for i in eachindex(rows.A, rows.B)
+    for i in eachindex(rows.A, rows.B, rows.extra)
         for n in rows.A[i]
             push!(I, i); push!(J, n); push!(V, one(T))
         end
         for n in rows.B[i]
             push!(I, i); push!(J, n); push!(V, -one(T))
         end
+        rows.extra[i] == 0 || (push!(I, i); push!(J, rows.extra[i]); push!(V, one(T)))
     end
     return dropzeros!(sparse(I, J, V, length(rows.A), nnodes))
 end
 
 # The rows a gauge must leave unchanged: the accepted ones and those touching a
-# column no accepted row touches, as `_gauge_components` holds islands to
-# every row.
+# node no accepted row touches, as `_gauge_components` holds islands to every
+# row. A phase row's source phase counts: one only weak rows measure is theirs
+# to set, not a freedom for the gauge.
 function _held_rows(rows)
-    touched = Set(n for i in eachindex(rows.A, rows.B, rows.accept) if rows.accept[i] for n in Iterators.flatten((rows.A[i], rows.B[i])))
-    return [rows.accept[i] || any(n -> n ∉ touched, Iterators.flatten((rows.A[i], rows.B[i]))) for i in eachindex(rows.A, rows.B, rows.accept)]
+    nodes(i) = Iterators.flatten((rows.A[i], rows.B[i], rows.extra[i] == 0 ? () : (rows.extra[i],)))
+    touched = Set(n for i in eachindex(rows.A, rows.B, rows.extra, rows.accept) if rows.accept[i] for n in nodes(i))
+    return [rows.accept[i] || any(n -> n ∉ touched, nodes(i)) for i in eachindex(rows.A, rows.B, rows.extra, rows.accept)]
 end
 
 # The rows a gauge must leave unchanged, as a matrix over the nodes: the held
@@ -1072,12 +1322,13 @@ function _row_sides(rows)
     return sides
 end
 
-# The scans in which a direction the held rows leave free changes the
-# difference between two feeds of one station: the detections do not link that
-# station's feeds, so only a gauge can set the offset between them.
-function _unlinked_scans(A, rows)
+# The scans in which a direction the held rows and the rows `fixed` (a phase
+# system's sums over frequency segments) leave free changes the difference
+# between two feeds of one station: the detections do not link that station's
+# feeds, so only a gauge can set the offset between them.
+function _unlinked_scans(A, rows; fixed = zeros(eltype(A), 0, size(A, 2)))
     T = eltype(A)
-    N = _null_basis(_held_system(A, rows))
+    N = _null_basis(vcat(_held_system(A, rows), fixed))
     scans = Set{Int}()
     size(N, 2) == 0 && return scans
     feeds = Dict{Tuple{Int, Int}, Vector{Pair{Int, Vector{Int}}}}()

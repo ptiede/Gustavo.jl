@@ -83,7 +83,7 @@ function _predicted_terms(sol::CalibrationSolution, name, antennas, nfeed)
     # put a prediction where the solution has none.
     flagged = _solution_flag_sets(sol)
     isnothing(flagged) && return delay, rate
-    for (a, f, k) in flagged
+    for (a, f, k, _) in flagged
         (k == s && a in antennas && f <= nfeed) || continue
         delay[AntennaName(At(a)), Feed(At(f))] = NaN
         rate[AntennaName(At(a)), Feed(At(f))] = NaN
@@ -115,10 +115,13 @@ dets = reduce(vcat, values(mapsets(g -> fit(FringeSearch(), g), groupby(ps, BySc
 sol = fit(FringeClosure(; model = default_fringe_model(; rel_time = GlobalTime())), dets)
 ```
 
-The models it fits: a `Delay` or `Rate` spanning the whole band
-(`Frequency = GlobalFrequency()`), under any feed scope, with a time
-segmentation no finer than a scan, and with no prior or a `RandomWalkPrior`,
-`OUPrior` or `CARMAPrior` along `Ti` with numbers for hyperparameters. Such a
+The models it fits: a `Delay`, `Rate` or `ConstantTerm` (a phase), under any
+feed scope, with a time segmentation no finer than a scan, and with no prior or
+a `RandomWalkPrior`, `OUPrior` or `CARMAPrior` along `Ti` with numbers for
+hyperparameters. A component split in frequency (`PerSpectralWindow`,
+`FreqGroups`) takes each detection in the segment its searched channels fall
+in, so its segments must be searched apart, and a detection spanning several
+of its segments is an error. Such a
 prior ties the component's values across its time segments, and so couples the
 scans: a segment no accepted detection constrains takes the prior's
 interpolation of its neighbors rather than being flagged. A drifting
@@ -130,11 +133,33 @@ rel_drift = GainComponent(Delay(); Ti = PerScan(), Feed = ExceptFeed(1),
                           prior = OUPrior(; scale = 3600.0, σ = 3.0e-11))
 model = merge(default_fringe_model(); phase = (; rel_delay, rel_drift))
 ```
- A segmentation that splits a scan (a
-`TimeBlocks` shorter than the scans, `PerIntegration`) asks for values the
-search does not measure and is rejected. It fits no constant phase, no
-dispersion (`Dispersion`) and no per-band-group delay (a `FreqGroups`-segmented
-`Delay`).
+A segmentation that splits a scan (a `TimeBlocks` shorter than the scans,
+`PerIntegration`) asks for values the search does not measure and is
+rejected, as is a dispersion (`Dispersion`).
+
+A phase is fit only split in frequency. Each baseline's phase holds, beside
+the station phases, a source phase per scan and feed pair that the closure
+takes to be the same in every segment: the source's structure and
+polarization, in any polarization basis. Only the differences between
+segments inform the station phases, and each station's feed takes phases
+summing to zero over a scan's segments; the rest is left with the source, for
+[`Adhoc`](@ref) or self-calibration. Searching each spectral window of a scan
+on its own, a per-window delay and phase beside a band-wide rate is
+
+```julia
+scan_window(ms) = map(l -> (; l..., window = XRadio.spectralwindow(ms)), ByScan()(ms))
+dets = reduce(vcat, values(mapsets(g -> fit(FringeSearch(), g), groupby(ps, scan_window))))
+model = GainModel(; phase = (;
+    delay = GainComponent(Delay(); Ti = PerScan(), Frequency = PerSpectralWindow(), Feed = SharedFeeds()),
+    rel_delay = GainComponent(Delay(); Ti = GlobalTime(), Frequency = PerSpectralWindow(), Feed = ExceptFeed(1)),
+    rate = GainComponent(Rate(); Ti = PerScan(), Feed = SharedFeeds()),
+    phase = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = PerSpectralWindow(), Feed = PerFeed()),
+))
+sol = fit(FringeClosure(; model), dets)
+```
+
+The phases are solved after the delays and rates, as what those leave at each
+detection's reference frequency and epoch.
 
 The solution's info holds `ncomp`, the number of fringe groups the detections
 form, and the `(station, feed, scan)` triples no accepted detection constrains
@@ -168,14 +193,28 @@ function StatsAPI.fit(c::FringeClosure, dets::AbstractVector; exec::ExecutionCon
     layout = plan_parameters(model, geom.antennas, geom; require_nonempty = false)
     θ = zeros(layout.nθ)
     stageB = Fring.fringe_stage_components(model, layout)
+    for (plan, kind) in stageB
+        kind === :phase && plan.shape.Frequency == 1 && throw(
+            ArgumentError(
+                "FringeClosure: the constant phase $(join(plan.path, '.')) takes one value across " *
+                    "the band, where each baseline's source phase absorbs it. Split it in frequency " *
+                    "(e.g. `Frequency = PerSpectralWindow()`) and search each segment on its own.",
+            ),
+        )
+    end
     has_rate = any(k -> last(k) === :rate, stageB)
     scans = map(d -> _closure_scan(d, geom, has_rate), dets)
+    scan_of(k) = geom.scan_of_time[Fring._scan_ti(scans[k])]
+    # The detections of one scan, from searches of different frequency
+    # segments, share its source phase and any band-wide component.
+    by_scan = OrderedDict{Int, Vector{Int}}()
+    foreach(k -> push!(get!(by_scan, scan_of(k), Int[]), k), eachindex(scans))
     # A mixture's floors and outlier fractions are shared by every scan.
     per_scan = _closes_per_scan(c.model) && !(c.closure.loss isa Fring.OutlierMixture)
-    blocks = per_scan ? [[k] for k in eachindex(scans)] : [collect(eachindex(scans))]
+    blocks = per_scan ? collect(values(by_scan)) : [collect(eachindex(scans))]
     results = _scheduled_map(blocks, ones(Int, length(blocks)); executor = outer_executor(exec)) do ks
         block = scans[ks]
-        ncomp, covered, unlinked, fits = Fring.solve_antenna_systems!(θ, block, stageB, geom.antennas; gauge, opts = c.closure, geom.times)
+        ncomp, covered, unlinked, fits = Fring.solve_antenna_systems!(θ, block, stageB, geom.antennas; gauge, opts = c.closure, geom.times, geom.scan_of_time)
         scan_name(si) = geom.scan_names[geom.scan_of_time[Fring._scan_ti(block[si])]]
         (;
             ncomp, fits, flags = Fring.unconstrained_flags(block, covered, geom),
@@ -184,7 +223,7 @@ function StatsAPI.fit(c::FringeClosure, dets::AbstractVector; exec::ExecutionCon
     end
     _warn_unlinked(reduce(vcat, (r.unlinked for r in results)))
     flags = reduce(vcat, (r.flags for r in results))
-    info = (; nscan = length(dets), ncomp = sum(r.ncomp for r in results), Fring.flag_table(flags)...)
+    info = (; nscan = length(by_scan), ncomp = sum(r.ncomp for r in results), Fring.flag_table(flags)...)
     em = mapreduce(r -> r.fits, merge, results)
     if !isempty(em)
         _warn_em(em, geom, dets)
@@ -268,17 +307,17 @@ end
 # `c`'s model, once every component is one the closure fits on `geom`.
 _vetted_model(c::FringeClosure, geom::DataGeometry) = _vet_model(
     c, c.model,
-    "It fits a `Delay` or `Rate` on `Frequency = GlobalFrequency()` with a time " *
-        "segmentation no finer than the data's scans: the search measures one value per " *
-        "scan, so a segmentation that splits a scan (`PerIntegration`, or `TimeBlocks` " *
-        "shorter than a scan) leaves columns unmeasured. It fits no dispersion (`Dispersion`) " *
-        "or per-band-group delay (a `FreqGroups`-segmented `Delay`). See `FringeClosure`.",
+    "It fits a `Delay`, `Rate` or `ConstantTerm` with a time segmentation no finer than " *
+        "the data's scans: the search measures one value per scan, so a segmentation that " *
+        "splits a scan (`PerIntegration`, or `TimeBlocks` shorter than a scan) leaves columns " *
+        "unmeasured. It fits no dispersion (`Dispersion`). See `FringeClosure`.",
     (; geom),
 )
 
 # A scan's detections as the station solve reads them: placed at the closure
 # geometry's time index of the scan's first epoch, with the lever arms that set
-# the delay and rate uncertainties.
+# the delay and rate uncertainties, the searched channels as positions in the
+# closure geometry, and the frequency and epoch the phases are referenced to.
 function _closure_scan(d, geom::DataGeometry, has_rate::Bool)
     meta = metadata(d)
     (has_rate && length(meta.geom.times) < 2) && throw(
@@ -289,7 +328,12 @@ function _closure_scan(d, geom::DataGeometry, has_rate::Bool)
         ),
     )
     ti = Calibration._time_index(geom, first(meta.geom.times))
-    return Fring._with_ti(d, ti; meta.freq_mean, meta.freq_rms, meta.time_rms, meta.search.delay_window, meta.search.rate_window)
+    position = Dict(f => c for (c, f) in pairs(geom.channel_freqs))
+    channels = [position[f] for f in meta.geom.channel_freqs]
+    return Fring._with_ti(
+        d, ti; meta.freq_mean, meta.freq_rms, meta.time_rms, meta.search.delay_window, meta.search.rate_window,
+        channels, f0 = meta.geom.f0, meta.epoch,
+    )
 end
 
 # A model of per-scan components without priors holds no column or prior row two

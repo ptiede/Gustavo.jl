@@ -11,9 +11,12 @@ correlation product separately, by maximizing a matched filter. The second
 treats the delays and rates as differences of per-station quantities and
 solves for the stations by weighted least squares.
 
-The per-scan station phase is not solved. It trades against the source's own
-phase, so the data do not determine it without a source model; it is left in
-the data for imaging or self-calibration.
+A station phase common to the whole band is not solved. It trades against the
+source's own phase, so the data do not determine it without a source model; it
+is left in the data for imaging or self-calibration. A phase that differs
+between frequency segments, such as one per spectral window, is determined by
+the differences between segments and can be solved (see
+[Phase per frequency segment](@ref fringe-window-phase)).
 
 Both stages are derived below. The choice of which parameters are solved, at
 what time and frequency resolution, and with what tying across feeds belongs to
@@ -541,6 +544,64 @@ group then has its baselines measured at a known fringe position, and so to
 arbitrarily low signal-to-noise. The significance of these steered measurements
 is recorded and is not used as a threshold.
 
+### [Phase per frequency segment](@id fringe-window-phase)
+
+A component split in frequency (`PerSpectralWindow`, `FreqGroups`) takes each
+detection in the segment its searched channels fall in, so each segment is
+searched on its own, for example by grouping each scan's spectral windows
+apart. A detection whose channels span several segments of a component is an
+error. A `Delay` or `Rate` so split gives each segment its own rows. A
+`ConstantTerm` phase is fit only so split: one across the band is rejected.
+
+The phase row of a detection in segment ``s`` is what remains of the measured
+phase after the station delays and rates, evaluated at the detection's
+reference frequency and epoch:
+
+```math
+\varphi^{p,s}_{ab} = \phi_{a,f_a,s} - \phi_{b,f_b,s} + \psi^{p}_{ab},
+```
+
+with ``\psi^p_{ab}`` a source phase per scan, baseline and feed pair that every
+segment shares. It holds the source's structure and polarization in any
+polarization basis, so products relating different feeds need no special
+treatment. Only the differences of the station phases between segments are
+measured; their mean over the segments trades against ``\psi``. Each
+(station, feed, scan) therefore takes phases summing to zero over its
+segments, in addition to the gauge's constraint on each segment's common
+shift, and the band-wide station phase stays with the source, for
+[`Adhoc`](@ref Gustavo.Adhoc) or self-calibration. The row weight is
+``1/\sigma_\varphi^2`` with the systematic floor `systematic_phase`.
+
+The phases are solved after the delays and rates and, unless a prior along
+time or an [`OutlierMixture`](@ref) ties scans, one scan at a time. Before the
+solve each row is moved by whole turns to lie within ``\pi`` of a
+starting solution built from the heaviest detections. A source phase that only
+detections above the threshold reach is still measured by them, and is not
+treated as a gauge freedom.
+
+A (station, feed) segment that no accepted detection constrains is flagged in
+that segment's spectral window alone: the flag table carries the window in
+`flagged_window`, empty when the flag applies to every window.
+
+With each spectral window of a scan searched on its own, a per-window delay
+and phase beside a band-wide rate is
+
+```julia
+scan_window(ms) = map(l -> (; l..., window = XRadio.spectralwindow(ms)), ByScan()(ms))
+dets = reduce(vcat, values(mapsets(g -> fit(FringeSearch(), g), groupby(ps, scan_window))))
+model = GainModel(; phase = (;
+    delay = GainComponent(Delay(); Ti = PerScan(), Frequency = PerSpectralWindow(), Feed = SharedFeeds()),
+    rel_delay = GainComponent(Delay(); Ti = GlobalTime(), Frequency = PerSpectralWindow(), Feed = ExceptFeed(1)),
+    rate = GainComponent(Rate(); Ti = PerScan(), Feed = SharedFeeds()),
+    phase = GainComponent(ConstantTerm(); Ti = PerScan(), Frequency = PerSpectralWindow(), Feed = PerFeed()),
+))
+sol = fit(FringeClosure(; model), dets)
+```
+
+This calibrates the instrumental phase between windows from the source itself,
+in place of phase-calibration tones. Being fit to the same data, the window
+phases absorb a small part of the noise.
+
 ## Adhoc
 
 The adhoc solver ([`Adhoc`](@ref Gustavo.Adhoc)) solves a phase and a
@@ -712,7 +773,7 @@ by scan name, station and feed: [`fringe_snr_table`](@ref) (per-scan peak SNR
 and false-alarm probability) and [`fringe_detections`](@ref) (every measured
 baseline and product) of the search's detections, and
 [`fringe_antenna_solutions`](@ref) (per-scan station delay, rate and phase) and
-[`fringe_antenna_flags`](@ref) (station feeds a scan left unconstrained) of the
+[`fringe_antenna_flags`](@ref) (station feeds, and windows, a scan left unconstrained) of the
 closure's solution. Per-scan solutions from [`mapsets`](@ref Gustavo.mapsets)
 combine with [`cat_scans`](@ref):
 

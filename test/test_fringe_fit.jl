@@ -307,18 +307,20 @@ end
 
         withphase(; kw...) = merge(default_fringe_model(); phase = NamedTuple(kw))
 
-        # A constant phase is not fitted: the data do not determine it.
-        @test_throws "It fits a `Delay` or `Rate`" fringe_phase(
-            withphase(atmos = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())),
-        )
+        # A constant phase and a per-band-group delay compile; the closure
+        # checks them against the detections (test_fringe_window_phase.jl).
+        @test length(
+            fringe_phase(
+                withphase(
+                    atmos = CAL.GainComponent(CAL.ConstantTerm(); Ti = CAL.PerScan(), Frequency = CAL.PerSpectralWindow(), Feed = CAL.SharedFeeds()),
+                    sbd2 = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.FreqGroups([1:1, 2:length(geom.channel_freqs)]), Feed = CAL.SharedFeeds()),
+                ),
+            ),
+        ) == 5
 
-        # Dispersion and a per-band-group delay are rejected: the search
-        # measures one delay across the band.
+        # Dispersion is rejected: the search measures no curvature in frequency.
         @test_throws "It fits no dispersion" fringe_phase(
             withphase(dtec2 = CAL.GainComponent(CAL.Dispersion(); Ti = CAL.PerScan(), Feed = CAL.SharedFeeds())),
-        )
-        @test_throws "It fits no dispersion" fringe_phase(
-            withphase(sbd2 = CAL.GainComponent(CAL.Delay(); Ti = CAL.PerScan(), Frequency = CAL.FreqGroups([1:1, 2:length(geom.channel_freqs)]), Feed = CAL.SharedFeeds())),
         )
 
         # The fringe closure fits phase only.

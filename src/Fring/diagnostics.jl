@@ -99,7 +99,11 @@ function fringe_antenna_solutions(sol::CalibrationSolution)
     )
     (; model, layout, θ) = only(groups)
     nant = layout.nant
-    comps = fringe_stage_components(model, layout)   # (plan, kind ∈ :delay/:rate)
+    comps = filter(c -> c[2] !== :phase, fringe_stage_components(model, layout))
+    all(c -> c[1].shape.Frequency == 1, comps) || error(
+        "fringe_antenna_solutions: a delay or rate component takes a value per frequency " *
+            "segment; decode it from its `params` instead"
+    )
     refplan = _perscan_delay_plan(model, layout)
     refplan === nothing &&
         error("fringe_antenna_solutions: model has no per-scan (feed-common) delay component")
@@ -124,7 +128,7 @@ function fringe_antenna_solutions(sol::CalibrationSolution)
     for (s, k) in enumerate(scans), a in 1:nant, f in 1:sol.geom.nfeed
         ti = t0[k]
         for (plan, kind) in comps
-            node = _feed_node(plan.tying, f)            # fseg 1: stage-B terms are GlobalFrequency
+            node = _feed_node(plan.tying, f)
             node == 0 && continue
             v = _component_leaf(plan, θ)[1, node, 1, plan.tseg_id[ti], a]
             out = kind === :delay ? delay : rate
@@ -138,12 +142,13 @@ end
     fringe_antenna_flags(sol::CalibrationSolution) -> DimArray{Bool}
 
 Over `(Scan, AntennaName, Feed)`: `true` where the fringe closure left the
-station's feed unconstrained in the scan — no accepted detection (`pfa ≤
+station's feed unconstrained in the scan, in every spectral window or in one
+(`info.flagged_window` names it) — no accepted detection (`pfa ≤
 Stationization.pfa_max`) on any of its products with that feed, so nothing put
 it in a fringe group. A measured but rejected product does not rescue it: such
 a row constrains the fit without fixing a fringe location. `calibrate` flags
-every product with a flagged (station, feed) on either side in that scan
-(`apply_flags = true`).
+every product with a flagged (station, feed) on either side in that scan and
+window (`apply_flags = true`).
 """
 function fringe_antenna_flags(sol::CalibrationSolution)
     info = _fringe_info(sol)

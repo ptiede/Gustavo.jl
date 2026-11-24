@@ -198,10 +198,13 @@ turn, solve the following phase components
 — this is the standard VLBI calibration model, and each tying below is a
 physics decision:
 
-There is no per-scan constant phase. A station's per-scan phase trades
-against the source's own phase, so the data do not determine it without a
-source model; it is left for imaging or self-calibration — see
-[`default_fringe_model`](@ref Gustavo.Fring.default_fringe_model).
+There is no per-scan constant phase across the band. A station's per-scan
+phase trades against the source's own phase, so the data do not determine it
+without a source model; it is left for imaging or self-calibration — see
+[`default_fringe_model`](@ref Gustavo.Fring.default_fringe_model). A per-scan
+phase split by spectral window is determined by the differences between
+windows, and the fringe closure can fit it in place of phase-calibration tones
+(see [Phase per frequency segment](@ref fringe-window-phase)).
 
 **`mbd` — per-scan wideband (multi-band) delay, feed-common.** One slope
 across the whole band per scan.
