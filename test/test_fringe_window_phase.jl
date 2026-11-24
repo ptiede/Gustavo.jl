@@ -28,12 +28,14 @@ end
 
 # Per-window station delays and phases, the phases across the whole circle and
 # changing from scan to scan, and a source phase per (scan, baseline, product)
-# that every window shares.
-function _window_ps(; nant = 5, nspw = 4, nchan = 16, nscans = 3, noise = 0.2, seed = 7)
+# that every window shares. With `fixed_xy`, each station's second feed keeps
+# one phase offset per window from its first in every scan.
+function _window_ps(; nant = 5, nspw = 4, nchan = 16, nscans = 3, noise = 0.2, seed = 7, fixed_xy = false)
     rng = StableRNG(seed)
     chan_bw, spw_sep, ref_freq = 2.0e6, 1.0e8, 230.0e9
     nfeed = 2
     offset = 2π .* rand(rng, nant, nfeed, nspw, nscans) .- π
+    fixed_xy && (offset[:, 2, :, :] .= offset[:, 1, :, :] .+ (2π .* rand(rng, nant, nspw) .- π))
     delay = 6.0e-9 .* (rand(rng, nant, nfeed, nspw) .- 0.5)
     bp = zeros(nant, nfeed, nspw * nchan, nscans)
     for a in 1:nant, f in 1:nfeed, b in 1:nspw, c in 1:nchan, s in 1:nscans
@@ -95,15 +97,39 @@ end
     @test _window_spread(phasors) < 0.02
     @test minimum(minimum(last, ws) for ws in values(phasors)) > 0.99
 
-    # Each station's feed has phases summing to zero over a scan's windows.
+    # Each station's first feed has phases summing to zero over a scan's windows.
     ph = only(c for c in sol.components if last(c.path) === :phase).params
-    sums = dropdims(sum(parent(ph); dims = dimnum(ph, Frequency)); dims = dimnum(ph, Frequency))
-    @test maximum(abs, sums) < 1.0e-8
+    x = parent(ph[Feed = At(1)])
+    @test maximum(abs, sum(x; dims = dimnum(ph[Feed = At(1)], Frequency))) < 1.0e-8
 
     # An inter-feed delay held over the track couples the scans' delays; their
     # phases are still solved scan by scan.
     coupled = fit(FringeClosure(; model = _window_model(; rel_time = GlobalTime()), gauge = PinAntenna(1)), dets)
     @test _window_spread(_window_phasors(coupled, ps)) < 0.02
+end
+
+# Each station's gain phase of its second feed against its first at each
+# window's center, from the window's summed channel gains, at an integration in
+# the middle of each scan: an array over (window, scan, station).
+function _window_xy(sol)
+    g = sol.geom
+    channels = [findall(==(w), g.spw_of_chan) for w in eachindex(g.spw_names)]
+    middles = [(i = findall(==(s), g.scan_of_time); i[cld(length(i), 2)]) for s in eachindex(g.scan_names)]
+    xy = map(Iterators.product(channels, middles, g.antennas)) do (cs, ti, a)
+        gt = gains(sol; Ti = ti)
+        center(f) = sum(c -> gt[Frequency = c, Feed = At(f), AntennaName = At(a)], cs)
+        angle(center(2) / center(1))
+    end
+    return xy
+end
+
+@testset "fringe closure: a station's inter-feed phase is the same in every scan" begin
+    ps, _ = _window_ps(; nscans = 6, fixed_xy = true)
+    sol = fit(FringeClosure(; model = _window_model(), gauge = PinAntenna(1)), _window_dets(ps))
+    xy = _window_xy(sol)
+    @test maximum(abs, rem2pi.(xy .- xy[:, 1:1, :], RoundNearest)) < 0.1
+    # Its circular mean over the windows is zero in every scan.
+    @test maximum(abs, angle.(sum(cis.(xy); dims = 1))) < 1.0e-6
 end
 
 @testset "fringe closure: a phase across the band is rejected" begin

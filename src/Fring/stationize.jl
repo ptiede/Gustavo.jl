@@ -490,11 +490,11 @@ The phase system is solved after the delay and rate ones: each row is the
 detection's phase at its stack's reference frequency `f0` and epoch `epoch`
 (metadata) less the solved delays' and rates' phase there, so the constant
 phases hold what those leave. Each row also carries a source phase per (scan,
-antenna pair, feed pair), shared by the frequency segments of the scan, so only
-the differences between segments inform the station phases, in any
-polarization basis; each (station, feed, scan) takes phases summing to zero
-over its segments, the rest of its phase being the source's. Rows are moved by
-whole turns to within half a turn of the station phases that averaging unit
+antenna pair, feed pair), shared by the scan's frequency segments, which
+absorbs a constant added to every segment of one station's feed. That constant
+is fixed per scan: the first feed's phases sum to zero over the segments, and
+each other feed's differences from the first have zero circular mean. Rows are
+moved by whole turns to within half a turn of the station phases that averaging unit
 phasors around the array gives, so the linear solve sees no wraps. Multiple components of the same kind are summed
 per (station, feed) observation: e.g. a feed-common `PerScan × SharedFeeds` term
 plus a `GlobalTime × ExceptFeed(1)` inter-feed offset both feed the delay
@@ -661,9 +661,12 @@ function _solve_kind_cols!(
     sources = Dict{NTuple{5, Int}, Int}()
     scan_of(ti) = isnothing(scan_of_time) ? ti : scan_of_time[ti]
     sourcenode(ti, a, b, fa, fb, sidx) = get!(() -> latentnode(0, 0, sidx, (:source,)), sources, (scan_of(ti), a, b, fa, fb))
-    # A phase node's (component, station, feed node, time segment): the nodes
-    # sharing one sum to zero over their frequency segments.
+    # Per phase node: its (component, station, feed node, time segment), its
+    # frequency segment, and the delay and rate phase at its detections'
+    # reference frequency and epoch.
     sumkey = Dict{Int, Tuple{Tuple{Vararg{Symbol}}, Int, Int, Int}}()
+    nodeseg = Dict{Int, Int}()
+    noderef = Dict{Int, T}()
 
     # Rows in θ-column space: each side is the list of θ columns whose sum is
     # that station's value for this observable (+1 on a-side, −1 on b-side),
@@ -709,15 +712,18 @@ function _solve_kind_cols!(
                 cb != 0 && push!(nsB, getnode(cb, b, fb, sidx, plan.path))
                 ca != 0 && cb != 0 && push!(links, (last(nsA), last(nsB)))
                 if kind === :phase
-                    ca != 0 && (sumkey[last(nsA)] = (plan.path, a, na, ts))
-                    cb != 0 && (sumkey[last(nsB)] = (plan.path, b, nb, ts))
+                    ca != 0 && (sumkey[last(nsA)] = (plan.path, a, na, ts); nodeseg[last(nsA)] = fs)
+                    cb != 0 && (sumkey[last(nsB)] = (plan.path, b, nb, ts); nodeseg[last(nsB)] = fs)
                 end
             end
             (isempty(nsA) || isempty(nsB)) && continue
             push!(rowA, nsA); push!(rowB, nsB); push!(rlinks, links)
             if kind === :phase
+                ra, rb = _reference_phase(θ, reference, sc, a, fa), _reference_phase(θ, reference, sc, b, fb)
+                foreach(n -> noderef[n] = ra, nsA)
+                foreach(n -> noderef[n] = rb, nsB)
                 push!(rextra, sourcenode(ti, a, b, fa, fb, sidx))
-                push!(rval, det.phase - _reference_phase(θ, reference, sc, a, fa) + _reference_phase(θ, reference, sc, b, fb))
+                push!(rval, det.phase - ra + rb)
             else
                 push!(rextra, 0)
                 push!(rval, getfield(det, kind))
@@ -780,6 +786,7 @@ function _solve_kind_cols!(
         θ[node_col[n]] += x[n]
         solved[node_col[n]] = x[n]
     end
+    kind === :phase && _align_feed_phases!(θ, solved, node_col, sumkey, nodeseg, noderef)
     accepted = Set{Int}(
         node_col[n] for i in eachindex(rowA, rowB, informative) if informative[i]
             for n in Iterators.flatten((rowA[i], rowB[i]))
@@ -1118,6 +1125,36 @@ function _gauge_rows(rows, w, nodes, gauge::AbstractGauge, kind::Symbol; sides =
     C, d = _sum_to_zero_rows(C, d, nodes.sum_group)
     C, d = _pin_leftover_freedoms(C, d, A, rows, nodew, gauge, sides)
     return (; A, C, d, ncomp)
+end
+
+# Fix the band-wide phase of each station's feed nodes after the first: shift
+# each so that its differences from the first node, at the detections' reference
+# frequency and epoch, have zero circular mean over the frequency segments. A
+# circular mean, unlike a sum, does not change with a segment's whole turns.
+function _align_feed_phases!(θ, solved, node_col, sumkey, nodeseg, noderef)
+    # (component, station, time segment) → feed node → frequency segment → node
+    nodes = Dict{Tuple{Tuple{Vararg{Symbol}}, Int, Int}, Dict{Int, Dict{Int, Int}}}()
+    for (n, (path, a, na, ts)) in sumkey
+        node_col[n] == 0 && continue
+        byfeed = get!(() -> Dict{Int, Dict{Int, Int}}(), nodes, (path, a, ts))
+        get!(() -> Dict{Int, Int}(), byfeed, na)[nodeseg[n]] = n
+    end
+    phase(n) = θ[node_col[n]] + noderef[n]
+    for byfeed in values(nodes)
+        first_node = minimum(keys(byfeed))
+        ref = byfeed[first_node]
+        for (na, segs) in byfeed
+            na == first_node && continue
+            shared = intersect(keys(segs), keys(ref))
+            isempty(shared) && continue
+            Δ = angle(sum(fs -> cis(phase(segs[fs]) - phase(ref[fs])), shared))
+            for n in values(segs)
+                θ[node_col[n]] -= Δ
+                haskey(solved, node_col[n]) && (solved[node_col[n]] -= Δ)
+            end
+        end
+    end
+    return θ
 end
 
 # One row per group of `sum_group` (0 for a node in none) holding its nodes'

@@ -137,13 +137,13 @@ A segmentation that splits a scan (a `TimeBlocks` shorter than the scans,
 `PerIntegration`) asks for values the search does not measure and is
 rejected, as is a dispersion (`Dispersion`).
 
-A phase is fit only split in frequency. Each baseline's phase holds, beside
-the station phases, a source phase per scan and feed pair that the closure
-takes to be the same in every segment: the source's structure and
-polarization, in any polarization basis. Only the differences between
-segments inform the station phases, and each station's feed takes phases
-summing to zero over a scan's segments; the rest is left with the source, for
-[`Adhoc`](@ref) or self-calibration. Searching each spectral window of a scan
+A phase is fit only split in frequency. Each baseline also carries a source
+phase per scan and feed pair, the same in every segment, which absorbs a
+constant added to every segment of one station's feed. The closure fixes that
+constant per scan: the first feed's phases sum to zero over the segments, and
+each other feed's differences from the first have zero circular mean. The
+band-wide phase is left with the source, for [`Adhoc`](@ref) or
+self-calibration. Searching each spectral window of a scan
 on its own, a per-window delay and phase beside a band-wide rate is
 
 ```julia

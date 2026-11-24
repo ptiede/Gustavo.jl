@@ -562,14 +562,18 @@ reference frequency and epoch:
 ```
 
 with ``\psi^p_{ab}`` a source phase per scan, baseline and feed pair that every
-segment shares. It holds the source's structure and polarization in any
-polarization basis, so products relating different feeds need no special
-treatment. Only the differences of the station phases between segments are
-measured; their mean over the segments trades against ``\psi``. Each
-(station, feed, scan) therefore takes phases summing to zero over its
-segments, in addition to the gauge's constraint on each segment's common
-shift, and the band-wide station phase stays with the source, for
-[`Adhoc`](@ref Gustavo.Adhoc) or self-calibration. The row weight is
+segment shares, in any polarization basis. A constant added to every segment
+of one station's feed trades against ``\psi``. The closure fixes it per
+(station, scan): the first feed's phases sum to zero over the segments, and
+each other feed ``f`` satisfies
+
+```math
+\arg \sum_s e^{i(\phi_{a,f,s} - \phi_{a,1,s})} = 0,
+```
+
+a condition no whole turn of a segment's phase changes, so the inter-feed phase
+does not jump between scans. The band-wide station phase stays with the source,
+for [`Adhoc`](@ref Gustavo.Adhoc) or self-calibration. The row weight is
 ``1/\sigma_\varphi^2`` with the systematic floor `systematic_phase`.
 
 The phases are solved after the delays and rates and, unless a prior along
