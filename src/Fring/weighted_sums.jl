@@ -130,8 +130,10 @@ function _add_by_label!(rbar, wbar, wv, ws, antennas, feeds, along; autos::Bool 
         autos || a != b || continue
         sel = (AntennaPair(At(antennas[bi])), FeedPair(At(feeds[p, bi])), along)
         cell = (BaselineID(bi), Polarization(p))
-        view(rbar, sel...) .+= view(wv, cell...)
-        view(wbar, sel...) .+= view(ws, cell...)
+        # Not strict: a falling-range slice keeps its parent's order trait
+        # (rafaqz/DimensionalData.jl#563). Callers check the positions' labels.
+        @d view(rbar, sel...) .+= view(wv, cell...) strict = false
+        @d view(wbar, sel...) .+= view(ws, cell...) strict = false
     end
     return rbar, wbar
 end

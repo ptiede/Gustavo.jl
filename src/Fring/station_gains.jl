@@ -24,8 +24,8 @@ returns.
 - `at[n]`: station gain `n`'s station, feed and one of its entries `(t, ch)`.
 - `params`: per observable, the parameters its components fit at these
   entries, each `(component, block, index)` into that block's `θ`.
-- `J`: per observable, the sparse Jacobian of its station-gain values
-  (`_station_gain_values`) in its `params`.
+- `J`: per observable, the sparse Jacobian of its station-gain values in its
+  `params`.
 """
 struct StationGains{I <: AbstractArray{<:Integer, 4}, A <: AbstractVector, P <: NamedTuple, M <: NamedTuple}
     index::I
